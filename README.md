@@ -43,11 +43,13 @@ It runs in Claude Code, Claude Desktop, and claude.ai — no Hancom Office, no L
 ## Roadmap
 
 - [x] v0 contract — `SKILL.md` decision tree
-- [ ] v0.1 — `references/hwpx-format.md` (XML schema cheatsheet for Claude to edit by hand)
-- [ ] v0.2 — Node scripts (`extract_text.js`, `create.js`, `convert.js`) with bundled `@rhwp/core` WASM
-- [ ] v0.3 — Python scripts (`unpack.py`, `pack.py`, `validate.py`)
-- [ ] v0.4 — End-to-end smoke tests against `samples/` HWPX fixtures
+- [x] v0.1 — `references/hwpx-format.md` (XML schema cheatsheet for Claude to edit by hand)
+- [x] v0.2 — Node scripts (`extract_text.js` ✅, `convert.js` ✅, `create.js` deferred — see project notes)
+- [x] v0.3 — Python scripts (`unpack.py`, `pack.py`, `validate.py`)
+- [x] v0.4 — End-to-end smoke tests against rhwp `samples/` fixtures (round-trip verified)
 - [ ] v0.5 — `npx skills add` distribution + Claude Code plugin manifest
+- [ ] v0.6 — `references/rhwp-api.md` (curated `@rhwp/core` API reference)
+- [ ] v0.7 — `create.js` (aligned with MyAgent's existing HWP creation tool)
 - [ ] v1.0 — Public release, npm/skill marketplace submission
 - [ ] v1.1+ — PDF / DOCX conversion, image extraction, viewer/editor React packages
 
