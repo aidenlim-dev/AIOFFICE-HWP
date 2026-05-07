@@ -8,13 +8,22 @@ Bundled scripts referenced by `SKILL.md`. Each script is intentionally low-level
 
 | Script | Status | Notes |
 |--------|--------|-------|
-| `extract_text.js` | not started | Node + bundled `@rhwp/core` WASM. Default plaintext output, `--format markdown` for structured output, `--inspect` for JSON metadata |
+| `extract_text.js` | ✅ v0 | Default plaintext, `--format markdown` (skips empty layout tables), `--inspect` for JSON metadata. Handles both `.hwp` and `.hwpx` (in-memory rhwp conversion for binary) |
 | `create.js` | not started | Template script. Claude edits content blocks before running. Uses `HwpDocument.createEmpty()` + body-building API + `exportHwpx()` |
 | `convert.js` | not started | `.hwp ↔ .hwpx` conversion via rhwp WASM. Loads bytes → `exportHwp()` or `exportHwpx()` → write |
 | `unpack.py` | not started | `zipfile` + `xml.etree` for pretty-print. Mirrors `anthropics/skills/docx/scripts/office/unpack.py` |
 | `pack.py` | not started | Inverse of unpack. Auto-repair common HWPX issues, regenerate `content.hpf` manifest |
 | `validate.py` | not started | Structural checks (manifest matches files, XML well-formedness, root elements present) |
-| `vendor/` | not started | Bundled `@rhwp/core` (`rhwp.js` + `rhwp_bg.wasm`) for offline operation |
+| `vendor/` | not needed (yet) | Currently using `npm install`. May bundle `@rhwp/core` files directly later for offline / sandbox use |
+
+## One-time setup
+
+```bash
+cd skills/hwp/scripts
+npm install
+```
+
+Installs `@rhwp/core` (~5MB WASM) and `fflate` (~45KB zip lib) into `node_modules/`. Required before any `*.js` script runs.
 
 ## Out of v0 scope
 

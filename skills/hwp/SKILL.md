@@ -114,7 +114,16 @@ node scripts/convert.js input.hwp /tmp/converted.hwpx
 ## Dependencies
 
 - **Python 3.9+** — `unpack.py`, `pack.py`, `validate.py` (standard library only)
-- **Node.js 18+** — `extract_text.js`, `create.js`, `convert.js`. Uses `@rhwp/core`, bundled in `scripts/vendor/` for offline operation.
+- **Node.js 18+** — `extract_text.js`, `create.js`, `convert.js`. Depends on `@rhwp/core` and `fflate` declared in `scripts/package.json`.
+
+**One-time setup** (after installing the skill):
+
+```bash
+cd skills/hwp/scripts
+npm install
+```
+
+This installs `@rhwp/core` (HWP/HWPX WASM parser) and `fflate` (in-memory zip). Required before any Node script runs.
 
 ## References
 
