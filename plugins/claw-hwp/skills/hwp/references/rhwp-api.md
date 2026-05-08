@@ -320,9 +320,24 @@ Returns the rhwp library version. Useful in error reports.
 - **`free()` is mandatory in long-running processes**. wasm-bindgen has a finalizer but Node's GC may not run before the script exits, leaking WASM memory across calls. Always wrap in try/finally.
 - **`paraPrIDRef` / `charPrIDRef` / `styleIDRef` are integers**, not strings. They reference the doc's internal style table populated by `findOrCreateFontId` / `createStyle`. Inventing arbitrary integers will silently corrupt the doc.
 - **Inserting a paragraph then text** — `insertParagraph(sec, idx)` inserts BEFORE `idx`. To append at end: `insertParagraph(sec, getParagraphCount(sec))`. Then `insertText(sec, newParaIdx, 0, "text")`.
-- **HU-vs-px confusion in `insertPicture`** — the first two size args are HWP units (display size), the second two are pixels (natural / source size). Mixing them gives huge or tiny images.
+- **HU-vs-px confusion in `insertPicture`** — args 5 and 6 are HWP units (display size), args 7 and 8 are PIXELS (natural / source size). Passing HU to the natural-size args makes a strict viewer scale the bitmap by `orgSz/imgDim` and render the image at ~1/75 of the requested size (Hancom masks the bug by rewriting `imgDim` from the PNG IHDR on round-trip; other viewers won't).
 - **HWP 5.0 round-trip is lossy.** Prefer `exportHwpx()`. Round-tripping `.hwp → .hwpx → .hwp` may lose minor formatting (footnote spacing, complex shapes).
 - **Font fallback warnings** — if a `fontId` references a font name not on the rendering machine (e.g., `함초롬바탕`), the renderer falls back to the system default. The serialized HWPX still contains the original `fontId` reference. To suppress fallback warnings programmatically, call `doc.setFallbackFont(path)` with a known-installed font path.
+
+## HWPX serializer quirks (post-export patches recommended)
+
+These are bugs in `exportHwpx()` and the HWP→HWPX path of `convert.js` that strict viewers (incl. our local rhwp viewer) trip on but Hancom Office masks. See `scripts/create.js` for the patch implementations.
+
+- **`<hp:pic>` is not emitted.** `insertPicture` correctly packs the bitmap into `BinData/imageN.png` and registers it in `Contents/content.hpf`'s manifest, but the paragraph it lives in is left as `<hp:t/>` — Hancom (and any reader) has nothing to draw against. Fix: walk `<hp:p>` regions and rewrite the empty-text run with a hand-built `<hp:pic>` node referencing the binary item id.
+- **Picture manifest needs `isEmbeded="1"`** (sic — typo from the OWPML spec) on each `<opf:item>` for image media-types. rhwp omits it and Hancom treats the entry as an external reference, rendering a missing-image placeholder.
+- **Heading `charPrIDRef="0"`.** When you `applyCharFormat` a run with heading-shaped properties, rhwp creates the `<hh:charPr>` definition in `header.xml` (height + bold + color all correct) but the run in `section0.xml` references `charPrIDRef="0"` (default body shape). Headings render at body size. Fix: parse `<hh:charPr>` in `header.xml`, build a `(height, bold) → id` map, and rewrite each heading paragraph's text-bearing run to point at the matching id.
+- **`<hp:linesegarray>` is a stale layout cache.** rhwp pre-fills `vertpos` / `vertsize` with placeholder values that ignore image and table heights. Strict viewers trust the cache and place subsequent paragraphs at the wrong vertical position (image paragraphs cached as `vsize=900` push following text onto the next page; tables get pre-emptively page-broken because their cumulative-vertpos cache says they don't fit). Hancom strips every `<hp:linesegarray>` on save; mirror that.
+- **Tables are dropped entirely.** No `<hp:tbl>` is emitted regardless of how the table was created via the editor API. The HWP→HWPX path through `convert.js` has the same bug. Currently the only ways to land tables in HWPX are: (a) keep the document in `.hwp`, or (b) round-trip the `.hwp` through Hancom Office / 한컴독스 to re-emit the HWPX with `<hp:tbl>` populated.
+- **`xmlns:hwpunitchar` is missing on `<hs:sec>`.** Hancom-saved HWPX declares it because some elements depend on the namespace; rhwp omits it. Splice it in if you want byte-shape parity with Hancom output.
+
+## HWP binary serializer quirks
+
+- **`PARA_LINESEG` (tag 69) is a stale cache** — same root cause as `<hp:linesegarray>` above, but in the binary CFB layout. Walk `BodyText/Section*` records, drop tag-69 records, recompress (raw deflate). The `cfb` package handles the CFB shell.
 
 ---
 
