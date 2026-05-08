@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="plugins/claw-hwp/assets/icon-256.png" width="160" alt="claw-hwp" />
+  <img src="plugins/claw-hwp/assets/icon.svg" width="160" alt="claw-hwp" />
 </p>
 
 <h1 align="center">claw-hwp</h1>
@@ -11,7 +11,6 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT" /></a>
-  <a href="https://www.reconlabs.ai/"><img src="https://img.shields.io/badge/built%20at-RECON%20Labs-0f172a" alt="Built at RECON Labs" /></a>
   <img src="https://img.shields.io/badge/status-WIP-orange" alt="WIP" />
 </p>
 
@@ -36,20 +35,20 @@ It runs in Claude Code, Claude Desktop, and claude.ai — no Hancom Office, no L
 
 ## Status
 
-🚧 Early development. v0 contract (`skills/hwp/SKILL.md`) is in place; bundled scripts coming next.
+🚧 Early development. End-to-end read / edit / convert pipeline is working; `create.js` and public marketplace submission are next.
 
 ## Roadmap
 
-- [x] v0 contract — `SKILL.md` decision tree
+- [x] v0 — `SKILL.md` decision tree
 - [x] v0.1 — `references/hwpx-format.md` (XML schema cheatsheet for Claude to edit by hand)
-- [x] v0.2 — Node scripts (`extract_text.js` ✅, `convert.js` ✅, `create.js` deferred — see project notes)
+- [x] v0.2 — Node scripts (`extract_text.js`, `convert.js`)
 - [x] v0.3 — Python scripts (`unpack.py`, `pack.py`, `validate.py`)
 - [x] v0.4 — End-to-end smoke tests against rhwp `samples/` fixtures (round-trip verified)
-- [x] v0.5 — Claude Code plugin manifest (`.claude-plugin/plugin.json`) + single-plugin marketplace (`.claude-plugin/marketplace.json`)
-- [x] v0.8 — Vendored Node deps (`vendor/rhwp` + `vendor/fflate`) — zero-config install across Code / Desktop / web
-- [x] v0.6 — `references/rhwp-api.md` (curated `@rhwp/core` API reference, ~30 methods + create-doc example)
+- [x] v0.5 — Claude Code plugin manifest + single-plugin marketplace
+- [x] v0.6 — `references/rhwp-api.md` (curated `@rhwp/core` API reference)
+- [x] v0.8 — Vendored Node deps — zero-config install across Code / Desktop / web
+- [x] v0.9 — Plugin icon (한지 + ㄱㄴㄷㄹ, v15-02-vanilla)
 - [ ] v0.7 — `create.js` (aligned with MyAgent's existing HWP creation tool)
-- [ ] v0.9 — Real-world install verification + plugin icon
 - [ ] v1.0 — Public release, submit plugin to Anthropic's official marketplace
 - [ ] v1.1+ — PDF / DOCX conversion, image extraction, viewer/editor React packages
 
@@ -94,8 +93,17 @@ LibreOffice / Hancom Office are **not** required. PDF/DOCX conversion (later rel
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Copyright © 2026 RECON Labs Inc.
 
 ---
 
-Built and maintained at [**RECON Labs**](https://www.reconlabs.ai/) · [@RECON-Labs-Inc](https://github.com/RECON-Labs-Inc)
+<p align="center">
+  <sub>
+    Built and maintained at
+    <a href="https://www.reconlabs.ai/">
+      <img src="https://avatars.githubusercontent.com/u/82856082?s=24&v=4" width="14" align="center" alt="RECON Labs" />
+      <b>RECON Labs</b>
+    </a>
+    · <a href="https://github.com/RECON-Labs-Inc">@RECON-Labs-Inc</a>
+  </sub>
+</p>
