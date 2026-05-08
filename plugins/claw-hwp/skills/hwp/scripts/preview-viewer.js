@@ -18,8 +18,13 @@ await rhwp.default({ module_or_path: "/vendor/rhwp/rhwp_bg.wasm" });
 
 const els = {
   filename: document.getElementById("filename"),
-  pages: document.getElementById("pages"),
   autofix: document.getElementById("autofix"),
+  download: document.getElementById("download"),
+  pagenav: document.getElementById("pagenav"),
+  pagePrev: document.getElementById("page-prev"),
+  pageNext: document.getElementById("page-next"),
+  pageInput: document.getElementById("page-input"),
+  pageTotal: document.getElementById("page-total"),
   container: document.getElementById("pages-container"),
   status: document.getElementById("status"),
   modal: document.getElementById("autofix-modal"),
@@ -33,8 +38,14 @@ const els = {
 const state = {
   fileBytes: null,
   filename: "",
+  filePath: "",
   autoFix: null,
   asked: false,
+  pageCount: 0,
+  currentPage: 1,
+  // Cached canvas-pixel-buffer dimensions per page. We render once at
+  // baseline DPR, then on resize just update CSS width/height. No re-render.
+  pageDims: [],
 };
 
 function syncAutofixButton() {
@@ -55,6 +66,71 @@ function setStatus(text, kind = "info") {
 }
 function clearStatus() { els.status.style.display = "none"; }
 
+function syncPageNav() {
+  if (state.pageCount <= 0) {
+    els.pagenav.hidden = true;
+    return;
+  }
+  els.pagenav.hidden = false;
+  els.pageInput.max = String(state.pageCount);
+  els.pageInput.value = String(state.currentPage);
+  els.pageTotal.textContent = String(state.pageCount);
+  els.pagePrev.disabled = state.currentPage <= 1;
+  els.pageNext.disabled = state.currentPage >= state.pageCount;
+}
+
+function scrollToPage(n) {
+  const idx = Math.max(1, Math.min(state.pageCount, n));
+  const wrap = els.container.querySelectorAll(".page-wrap")[idx - 1];
+  if (wrap) wrap.scrollIntoView({ behavior: "smooth", block: "start" });
+  state.currentPage = idx;
+  syncPageNav();
+}
+
+// Recompute CSS sizes on container resize so canvases re-fit width-wise.
+// We don't re-rasterise — the canvas pixel buffer stays at its render-time
+// resolution and CSS scales it; visually equivalent to MyAgent's HwpViewer
+// resize behaviour without the cost of re-running renderPageToCanvas.
+function applyFit() {
+  const wraps = els.container.querySelectorAll(".page-wrap");
+  if (wraps.length === 0) return;
+  const containerWidth = els.container.clientWidth - 48; // padding both sides
+  const targetCssWidth = Math.min(1100, containerWidth);
+  wraps.forEach((wrap, i) => {
+    const canvas = wrap.querySelector("canvas");
+    if (!canvas) return;
+    const dim = state.pageDims[i];
+    if (!dim) return;
+    const cssW = targetCssWidth;
+    const cssH = (dim.h / dim.w) * cssW;
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+  });
+}
+const ro = new ResizeObserver(() => applyFit());
+ro.observe(els.container);
+
+// Track which page is currently most-visible in the scroll container so
+// the page-nav input reflects the user's manual scrolling.
+const pageObserver = new IntersectionObserver(
+  (entries) => {
+    let bestIdx = state.currentPage;
+    let bestRatio = 0;
+    entries.forEach((e) => {
+      if (e.intersectionRatio > bestRatio) {
+        bestRatio = e.intersectionRatio;
+        const idx = Number(e.target.dataset.pageIdx) + 1;
+        if (Number.isFinite(idx)) bestIdx = idx;
+      }
+    });
+    if (bestRatio > 0 && bestIdx !== state.currentPage) {
+      state.currentPage = bestIdx;
+      syncPageNav();
+    }
+  },
+  { root: els.container, threshold: [0.1, 0.5, 0.9] },
+);
+
 async function loadFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const p = params.get("path");
@@ -67,8 +143,14 @@ async function loadFromUrl() {
     const res = await fetch(`/file?path=${encodeURIComponent(p)}`);
     if (!res.ok) throw new Error(`서버 응답 ${res.status}: ${await res.text()}`);
     state.fileBytes = new Uint8Array(await res.arrayBuffer());
-    state.filename = res.headers.get("x-filename") || p.split("/").pop() || "untitled";
+    state.filePath = p;
+    const headerName = res.headers.get("x-filename");
+    state.filename = headerName
+      ? (() => { try { return decodeURIComponent(headerName); } catch { return headerName; } })()
+      : (p.split("/").pop() || "untitled");
     els.filename.textContent = state.filename;
+    els.download.href = `/file?path=${encodeURIComponent(p)}`;
+    els.download.setAttribute("download", state.filename);
     await render();
   } catch (err) {
     setStatus(`불러오기 실패: ${err.message}`, "error");
@@ -79,8 +161,12 @@ async function render() {
   if (!state.fileBytes) return;
   setStatus("렌더링 중…");
 
-  // Tear down previous canvases.
-  els.container.querySelectorAll(".page-wrap").forEach((n) => n.remove());
+  // Tear down previous canvases + observer attachments.
+  els.container.querySelectorAll(".page-wrap").forEach((n) => {
+    pageObserver.unobserve(n);
+    n.remove();
+  });
+  state.pageDims = [];
 
   let doc;
   try {
@@ -96,40 +182,34 @@ async function render() {
       catch (err) { console.warn("[claw-hwp] reflowLinesegs failed:", err); }
     }
 
-    const pageCount = doc.pageCount();
-    els.pages.textContent = `${pageCount} 페이지`;
+    state.pageCount = doc.pageCount();
+    state.currentPage = Math.min(state.currentPage || 1, state.pageCount);
+    syncPageNav();
 
     // First load — we have a parsed doc, ask the user once whether to apply.
-    // The doc is rendered in raw mode behind the modal until they answer;
-    // accepting flips state.autoFix=true and re-renders.
     if (!state.asked && state.autoFix === null) {
       state.asked = true;
       showModal();
     }
 
     const dpr = window.devicePixelRatio || 1;
-    const containerWidth = els.container.clientWidth - 48;  // padding
-    const targetCssWidth = Math.min(900, containerWidth);
 
-    for (let i = 0; i < pageCount; i++) {
+    for (let i = 0; i < state.pageCount; i++) {
       const wrap = document.createElement("div");
       wrap.className = "page-wrap";
+      wrap.dataset.pageIdx = String(i);
       const canvas = document.createElement("canvas");
       wrap.appendChild(canvas);
       els.container.appendChild(wrap);
+      pageObserver.observe(wrap);
 
-      // rhwp paints into the canvas at (intrinsic size) × scale. We render
-      // at dpr × an oversampling factor so the canvas stays sharp when CSS
-      // scales it down to fit the container width. No zoom controls — the
-      // viewer auto-fits and the user can rely on the OS / Claude Code
-      // pane resize to scale the layout.
+      // Render at native dimensions × dpr; CSS sizing in applyFit() handles
+      // the visible width. Caching canvas.width/.height lets resize stay
+      // cheap (CSS-only).
       doc.renderPageToCanvas(i, canvas, dpr);
-
-      const cssW = targetCssWidth;
-      const cssH = (canvas.height / canvas.width) * cssW;
-      canvas.style.width = `${cssW}px`;
-      canvas.style.height = `${cssH}px`;
+      state.pageDims.push({ w: canvas.width, h: canvas.height });
     }
+    applyFit();
     clearStatus();
   } finally {
     if (typeof doc.free === "function") doc.free();
@@ -153,6 +233,20 @@ els.modalDecline.addEventListener("click", () => {
   state.autoFix = false;
   hideModal();
   syncAutofixButton();
+});
+
+els.pagePrev.addEventListener("click", () => scrollToPage(state.currentPage - 1));
+els.pageNext.addEventListener("click", () => scrollToPage(state.currentPage + 1));
+els.pageInput.addEventListener("change", () => {
+  const v = Number(els.pageInput.value);
+  if (Number.isFinite(v)) scrollToPage(v);
+});
+els.pageInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const v = Number(els.pageInput.value);
+    if (Number.isFinite(v)) scrollToPage(v);
+  }
 });
 
 loadFromUrl();

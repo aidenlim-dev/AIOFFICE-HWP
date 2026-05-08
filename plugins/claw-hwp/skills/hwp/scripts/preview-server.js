@@ -72,9 +72,11 @@ const server = createServer(async (req, res) => {
     try {
       const stat = statSync(abs);
       const data = await readFile(abs);
+      // x-filename must be ASCII (RFC 7230); percent-encode so Korean
+      // filenames survive the round-trip. Client decodes via decodeURIComponent.
       return send(res, 200, "application/octet-stream", data, {
         "content-length": String(stat.size),
-        "x-filename": path.basename(abs),
+        "x-filename": encodeURIComponent(path.basename(abs)),
       });
     } catch (err) {
       return send(res, 500, "text/plain", `failed to read file: ${err.message}`);

@@ -46,11 +46,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .pages {
-    font-size: 11px;
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-  }
   .autofix {
     background: transparent;
     color: var(--text-muted);
@@ -67,6 +62,62 @@
     border-color: var(--border-strong);
   }
   .autofix:hover:not(.on) { background: var(--surface-elev); }
+
+  /* Page nav (< [n] / total >). Layout-side mirror of hop's bottom-bar
+     navigator but inlined into the toolbar. The number input is a real
+     <input type="number"> so users can type a page number directly. */
+  .pagenav {
+    display: flex; align-items: center; gap: 6px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .pagenav button {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .pagenav button:hover:not(:disabled) { background: var(--surface-elev); }
+  .pagenav button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pagenav input {
+    background: var(--surface-elev);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    width: 38px;
+    text-align: center;
+    padding: 2px 4px;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    -moz-appearance: textfield;
+  }
+  .pagenav input::-webkit-outer-spin-button,
+  .pagenav input::-webkit-inner-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
+  .pagenav .total { color: var(--text-muted); }
+
+  /* Download icon (anchor styled as a button) */
+  .download {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    width: 26px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .download:hover { background: var(--surface-elev); }
+  .download svg { width: 14px; height: 14px; }
+
   main {
     flex: 1 1 auto;
     overflow: auto;
@@ -123,8 +174,11 @@
     display: block;
     margin-top: 6px;
     font-size: 11px;
-    color: #64748B;
+    color: var(--text-muted);
   }
+  /* Force the hint text to the muted token even if Safari auto-styles
+     ASCII fragments embedded in Korean text with a hint of blue. */
+  .modal-body .hint * { color: inherit; }
   .modal-actions {
     display: flex;
     justify-content: flex-end;
@@ -154,8 +208,21 @@
 <body>
   <div class="toolbar">
     <span class="filename" id="filename">파일을 불러오는 중…</span>
-    <span class="pages" id="pages"></span>
+    <div class="pagenav" id="pagenav" hidden>
+      <button id="page-prev" type="button" aria-label="이전 페이지">‹</button>
+      <input id="page-input" type="number" min="1" value="1">
+      <span class="total">/ <span id="page-total">1</span></span>
+      <button id="page-next" type="button" aria-label="다음 페이지">›</button>
+    </div>
     <button class="autofix" id="autofix" type="button">자동 보정 OFF</button>
+    <a class="download" id="download" href="#" download title="다운로드">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="7 10 12 15 17 10"/>
+        <line x1="12" y1="15" x2="12" y2="3"/>
+      </svg>
+    </a>
   </div>
   <main id="pages-container">
     <div class="status" id="status">초기화 중…</div>
@@ -167,7 +234,7 @@
       <p class="modal-body">
         이 문서에 자동 보정(lineseg reflow)을 적용할까요?<br>
         문단 줄 위치와 셀 wrap 등이 한컴 정답에 더 가깝게 정리됩니다.
-        <span class="hint">상단의 "자동 보정 ON/OFF" 버튼으로 언제든 다시 토글할 수 있어요.</span>
+        <span class="hint">상단의 자동 보정 버튼으로 언제든 다시 끄거나 켤 수 있어요.</span>
       </p>
       <div class="modal-actions">
         <button type="button" id="autofix-decline">원본 그대로</button>
