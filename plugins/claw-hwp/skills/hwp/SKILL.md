@@ -20,6 +20,7 @@ This skill helps Claude work with Korean Hangul Word Processor documents — rea
 | Edit existing `.hwp` (HWP 5.0 binary) | convert to `.hwpx` via `convert.js` first, then edit-as-hwpx |
 | Convert `.hwp` ↔ `.hwpx` | `node scripts/convert.js <input> <output>` |
 | Validate output | `python scripts/validate.py <file.hwpx>` |
+| Preview file in Claude Code preview pane | start `claw-hwp-preview` server (see Preview pane section), then call `preview_start` |
 
 > Conversion to PDF / DOCX is **out of scope for v0**. Will be added in a later release via LibreOffice headless.
 
@@ -134,6 +135,37 @@ node scripts/convert.js input.hwp /tmp/converted.hwpx
 
 **Output format default**: save edits as `.hwpx`. The HWPX format is the modern Hangul Office standard and avoids the lossy round-trip back to HWP 5.0 binary. Only convert back to `.hwp` if the user explicitly requires HWP 5.0 output (use `node scripts/convert.js output.hwpx final.hwp` and warn that some formatting may be lost).
 
+### "Show me what this looks like" / "Preview this HWP file"
+
+Use Claude Code's preview pane via `preview_start`. The skill ships a tiny Node HTTP server (`scripts/preview-server.js`) that serves a vanilla-JS canvas-based viewer; rhwp WASM does the actual rendering in the browser, so the result matches Hancom Office closely. No LibreOffice, no external browser — the preview pane in Claude Code displays it inline.
+
+**Setup once per workspace** — make sure `.claude/launch.json` has the preview entry:
+
+```json
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "claw-hwp-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["<absolute-path-to>/scripts/preview-server.js"],
+      "port": 3737
+    }
+  ]
+}
+```
+
+If that config is missing, create or merge it before calling `preview_start`. The runtimeArgs path resolves the script in this skill's install directory; on a typical plugin install that's `~/.claude/plugins/claw-hwp/skills/hwp/scripts/preview-server.js`.
+
+**Run** — once the launch config exists:
+
+1. Call `preview_start` with `name: "claw-hwp-preview"`.
+2. Navigate the preview to `http://localhost:3737/?path=<absolute path of the .hwp/.hwpx file>`.
+
+The viewer auto-loads from the `?path=` query string, renders every page to its own canvas, and exposes a 자동 보정 toggle (calls rhwp's `reflowLinesegs()` — the same fix we apply server-side in `create.js` to strip stale layout caches) plus zoom controls. No file picker, no chrome — the page is meant to live inside the Claude Code preview pane.
+
+Port `3737` is the default and can be overridden via `CLAW_HWP_PREVIEW_PORT` env in the launch config if it conflicts.
+
 ## Common pitfalls
 
 - **HWP 5.0 lossy round-trip**: `.hwp` → `.hwpx` → `.hwp` may drop formatting. Default to `.hwpx` output. Only round-trip back to `.hwp` on explicit user request, and warn first.
@@ -152,6 +184,8 @@ node scripts/convert.js input.hwp /tmp/converted.hwpx
 | `scripts/unpack.py` | Python | Unzip .hwpx → directory of pretty-printed XML |
 | `scripts/pack.py` | Python | Repack directory → .hwpx with auto-repair |
 | `scripts/validate.py` | Python | HWPX schema and structural validation |
+| `scripts/preview-server.js` | Node | Static HTTP server backing the Claude Code preview pane viewer |
+| `scripts/preview-viewer.html` + `scripts/preview-viewer.js` | static | Canvas-based vanilla-JS HWP viewer (vendored rhwp WASM, no React) |
 
 ## Dependencies
 
