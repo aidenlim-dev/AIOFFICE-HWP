@@ -70,31 +70,36 @@
     display: flex; align-items: center; gap: 6px;
     color: var(--text-muted);
     font-size: 11px;
+    line-height: 1;
     font-variant-numeric: tabular-nums;
   }
+  /* Borderless arrow buttons — clean glyph, hover hint only. */
   .pagenav button {
     background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 4px;
+    border: none;
     color: var(--text);
-    width: 22px; height: 22px;
+    width: 20px; height: 20px;
     display: flex; align-items: center; justify-content: center;
     cursor: pointer;
     padding: 0;
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1;
+    border-radius: 3px;
   }
-  .pagenav button:hover:not(:disabled) { background: var(--surface-elev); }
-  .pagenav button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pagenav button:hover:not(:disabled) { color: var(--text); background: var(--surface-elev); }
+  .pagenav button:disabled { opacity: 0.35; cursor: not-allowed; }
   .pagenav input {
     background: var(--surface-elev);
     border: 1px solid var(--border);
     border-radius: 4px;
     color: var(--text);
-    width: 38px;
+    width: 36px;
+    height: 20px;
     text-align: center;
-    padding: 2px 4px;
+    padding: 0 4px;
+    font: inherit;
     font-size: 11px;
+    line-height: 1;
     font-variant-numeric: tabular-nums;
     -moz-appearance: textfield;
   }
@@ -102,7 +107,13 @@
   .pagenav input::-webkit-inner-spin-button {
     -webkit-appearance: none; margin: 0;
   }
-  .pagenav .total { color: var(--text-muted); }
+  .pagenav .total {
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
 
   /* Download icon (anchor styled as a button) */
   .download {
@@ -127,12 +138,15 @@
     align-items: center;
     gap: 16px;
   }
-  .page-wrap {
-    background: white;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-    line-height: 0;
-  }
-  .page-wrap canvas { display: block; }
+  /* JS sets all geometry inline (mirrors MyAgent HwpViewer) — wrap sized
+     in native page px on render, fit() rescales via CSS without
+     re-rasterising. Canvas is absolutely positioned inside the wrap.
+     flex-shrink:0 because <main> is a column flexbox; without it each
+     page's inline height gets crushed by flex-shrink:1 when the total
+     page stack exceeds the container, which folded every page down to
+     ~120px regardless of the inline height. */
+  .hwp-page { line-height: 0; flex: 0 0 auto; }
+  .hwp-page canvas { display: block; }
   .status {
     color: var(--text-muted);
     font-size: 12px;
@@ -140,73 +154,69 @@
   }
   .status.error { color: var(--error); }
 
-  /* First-load modal asking whether to apply 자동 보정 (rhwp's reflowLinesegs).
-     Shown once per file load; the toolbar toggle stays available afterwards. */
-  .modal-backdrop {
-    position: fixed; inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 50;
-  }
-  .modal-backdrop[hidden] { display: none; }
-  .modal-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 18px 18px 14px;
-    max-width: 360px;
-    width: 88%;
-    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
-  }
-  .modal-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 8px;
-  }
-  .modal-body {
-    font-size: 12px;
-    color: var(--text-muted);
-    line-height: 1.55;
-    margin: 0 0 14px;
-  }
-  .modal-body .hint {
-    display: block;
-    margin-top: 6px;
-    font-size: 11px;
-    color: var(--text-muted);
-  }
-  /* Force the hint text to the muted token even if Safari auto-styles
-     ASCII fragments embedded in Korean text with a hint of blue. */
-  .modal-body .hint * { color: inherit; }
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
-  .modal-actions button {
-    border-radius: 4px;
-    padding: 5px 12px;
-    font-size: 12px;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-muted);
-  }
-  .modal-actions button:hover { background: var(--surface-elev); }
-  .modal-actions button.primary {
+  /* Hover tooltips — shared shape, just different anchors:
+     - .autofix-wrap (right-aligned beneath the toolbar's autofix button)
+     - .info-wrap (left-aligned beneath the leading ⓘ icon)
+     The wrap is the hover host so the tip appears whether the cursor is on
+     the button or the tip itself; pointer-events stays enabled so users can
+     read longer tips without it disappearing. */
+  .autofix-wrap, .info-wrap { position: relative; display: inline-flex; }
+  .autofix-tip, .info-tip {
+    position: absolute;
+    top: calc(100% + 6px);
+    width: 240px;
+    padding: 8px 10px;
     background: var(--surface-elev);
-    color: var(--text);
-    border-color: var(--border-strong);
-    font-weight: 600;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 80ms ease, visibility 80ms ease;
+    z-index: 30;
   }
-  .modal-actions button.primary:hover {
-    background: var(--border);
+  .autofix-tip { right: 0; }
+  .info-tip { left: 0; }
+  .autofix-wrap:hover .autofix-tip,
+  .autofix-wrap:focus-within .autofix-tip,
+  .info-wrap:hover .info-tip,
+  .info-wrap:focus-within .info-tip { visibility: visible; opacity: 1; }
+  /* Leading info button — borderless circle that visually reads as a hint,
+     not an action. Same hit-target conventions as the download/pagenav. */
+  .info-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    width: 22px; height: 22px;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: help;
+    padding: 0;
+    border-radius: 3px;
+    flex: 0 0 auto;
   }
+  .info-btn:hover { color: var(--text-dim); background: var(--surface-elev); }
+  .info-btn svg { width: 14px; height: 14px; }
 </style>
 </head>
 <body>
   <div class="toolbar">
+    <span class="info-wrap">
+      <button class="info-btn" type="button" aria-label="뷰어 정보" tabindex="0">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="16" x2="12" y2="12"/>
+          <line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
+      </button>
+      <span class="info-tip" role="tooltip">
+        rhwp WebAssembly 렌더러로 표시합니다. 한컴 오피스의 픽셀 정확한 결과와
+        약간 다를 수 있어요.
+      </span>
+    </span>
     <span class="filename" id="filename">파일을 불러오는 중…</span>
     <div class="pagenav" id="pagenav" hidden>
       <button id="page-prev" type="button" aria-label="이전 페이지">‹</button>
@@ -214,7 +224,13 @@
       <span class="total">/ <span id="page-total">1</span></span>
       <button id="page-next" type="button" aria-label="다음 페이지">›</button>
     </div>
-    <button class="autofix" id="autofix" type="button">자동 보정 OFF</button>
+    <span class="autofix-wrap">
+      <button class="autofix" id="autofix" type="button">자동 보정 ON</button>
+      <span class="autofix-tip" role="tooltip">
+        문단 줄 위치와 셀 wrap을 한컴 기준으로 다시 정렬합니다 (rhwp lineseg reflow).
+        끄면 원본 그대로 표시돼요.
+      </span>
+    </span>
     <a class="download" id="download" href="#" download title="다운로드">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -227,21 +243,6 @@
   <main id="pages-container">
     <div class="status" id="status">초기화 중…</div>
   </main>
-
-  <div class="modal-backdrop" id="autofix-modal" hidden>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="autofix-modal-title">
-      <h3 class="modal-title" id="autofix-modal-title">자동 보정 적용</h3>
-      <p class="modal-body">
-        이 문서에 자동 보정(lineseg reflow)을 적용할까요?<br>
-        문단 줄 위치와 셀 wrap 등이 한컴 정답에 더 가깝게 정리됩니다.
-        <span class="hint">상단의 자동 보정 버튼으로 언제든 다시 끄거나 켤 수 있어요.</span>
-      </p>
-      <div class="modal-actions">
-        <button type="button" id="autofix-decline">원본 그대로</button>
-        <button type="button" id="autofix-accept" class="primary">보정 적용</button>
-      </div>
-    </div>
-  </div>
 
   <script type="module" src="/preview-viewer.js"></script>
 </body>
