@@ -20,7 +20,7 @@ This skill helps Claude work with Korean Hangul Word Processor documents — rea
 | Edit existing `.hwp` (HWP 5.0 binary) | convert to `.hwpx` via `convert.js` first, then edit-as-hwpx |
 | Convert `.hwp` ↔ `.hwpx` | `node scripts/convert.js <input> <output>` |
 | Validate output | `python scripts/validate.py <file.hwpx>` |
-| Preview file in Claude Code preview pane | start `claw-hwp-preview` server (see Preview pane section), then call `preview_start` |
+| Preview file in a preview pane (Code or cowork+`Claude_Preview`) | `preview_start` → `preview_eval` to `http://localhost:3737/?path=...` (see Preview section) |
 
 > Conversion to PDF / DOCX is **out of scope for v0**. Will be added in a later release via LibreOffice headless.
 
@@ -137,9 +137,16 @@ node scripts/convert.js input.hwp /tmp/converted.hwpx
 
 ### "Show me what this looks like" / "Preview this HWP file"
 
-Use Claude Code's preview pane via `preview_start`. The skill ships a tiny Node HTTP server (`scripts/preview-server.js`) that serves a vanilla-JS canvas-based viewer; rhwp WASM does the actual rendering in the browser, so the result matches Hancom Office closely. No LibreOffice, no external browser — the preview pane in Claude Code displays it inline.
+The skill ships a tiny Node HTTP server (`scripts/preview-server.js`) that serves a vanilla-JS canvas-based viewer; rhwp WASM does the actual rendering in the browser, so the result matches Hancom Office closely. No LibreOffice, no external browser.
 
-**Setup once per workspace** — make sure `.claude/launch.json` has the preview entry:
+**The preview pane is host-agnostic.** Whoever exposes the `preview_start` / `preview_eval` / `preview_stop` tools can drive it. Two known hosts today:
+
+- **Claude Code (CLI)** — built-in. Tool names are bare: `preview_start`, `preview_eval`, `preview_stop`. Requires a one-time `.claude/launch.json` entry (below).
+- **claude.ai cowork (web) with the `Claude_Preview` plugin** — same tools, namespaced (`Claude_Preview:preview_start` etc.). The plugin must be installed in the cowork session; it iframes the localhost URL the same way Code's pane does. The user's machine still runs the Node server.
+
+If neither host is present (Claude API direct / headless CI), see **Fallback** at the end of this section.
+
+**Setup once per workspace (Claude Code only)** — `.claude/launch.json`:
 
 ```json
 {
@@ -155,26 +162,33 @@ Use Claude Code's preview pane via `preview_start`. The skill ships a tiny Node 
 }
 ```
 
-If that config is missing, create or merge it before calling `preview_start`. The runtimeArgs path resolves the script in this skill's install directory; on a typical plugin install that's `~/.claude/plugins/claw-hwp/skills/hwp/scripts/preview-server.js`.
+If missing, create or merge before calling `preview_start`. On a typical plugin install the path is `~/.claude/plugins/claw-hwp/skills/hwp/scripts/preview-server.js`. Cowork's `Claude_Preview` plugin handles process management itself — no launch.json needed there. Port `3737` is the default; override via `CLAW_HWP_PREVIEW_PORT`.
 
-**Run** — once the launch config exists:
+**The lifecycle — start, navigate, stop.** The viewer is a long-lived page in a long-lived pane. You do NOT spawn a fresh server per file.
 
-1. Call `preview_start` with `name: "claw-hwp-preview"`.
-2. Navigate the preview to `http://localhost:3737/?path=<absolute path of the .hwp/.hwpx file>`.
+1. **`preview_start`** with `name: "claw-hwp-preview"` (or the cowork-namespaced equivalent). Returns either a fresh pane or `reused: true` if one is already open.
+2. **`preview_eval`** to set `window.location.href = "http://localhost:3737/?path=<absolute path>"`. Use this both for the first navigation and for swapping to a different file later. Do not start a second server.
+3. **`preview_stop`** when you need to recover a stuck pane (see below).
 
-The viewer auto-loads from the `?path=` query string, renders every page to its own canvas, and exposes a 자동 보정 toggle (calls rhwp's `reflowLinesegs()` — the same fix we apply server-side in `create.js` to strip stale layout caches) plus zoom controls. No file picker, no chrome — the page is meant to live inside the Claude Code preview pane.
+The viewer reads `?path=`, renders every page to its own canvas, and shows a 자동 보정 toggle (calls rhwp's `reflowLinesegs()` — same fix `create.js` applies server-side to strip stale layout caches). Auto-correction defaults ON; the toolbar toggle flips it for raw inspection.
 
-Port `3737` is the default and can be overridden via `CLAW_HWP_PREVIEW_PORT` env in the launch config if it conflicts.
+**When to auto-preview — don't ask, just fire.** In every situation below, run `preview_start` → `preview_eval` immediately. Visual verification is your job, not the user's.
 
-**When to auto-preview** — fire `preview_start` → `preview_eval` without asking the user in any of these situations. The point is that you verify the result visually instead of pushing that work onto the user.
+1. Right after `create.js` / `convert.js` writes a new file or finishes a format conversion — feed the returned `path` straight into the URL.
+2. Right after the user uploads a `.hwp` / `.hwpx` to the workspace or mentions one by path.
+3. Right after edits to an existing file (`replace_text`, unpack-edit-pack round-trip).
 
-1. Right after `create.js` / `convert.js` writes a new file or finishes a format conversion — feed the returned `path` straight into the `?path=` query.
-2. Right after the user uploads a `.hwp` / `.hwpx` to the workspace or mentions one by path in a message.
-3. Right after edits to an existing file (e.g. `replace_text`, an unpack-edit-pack round-trip).
+Never write "please check if the file looks right." Open the viewer and let them see it.
 
-Don't tell the user "check if the file looks right" — open the viewer and let them see it. If the preview pane is already showing a viewer, just update `location.href` via `preview_eval` to swap to the new path; do not start a second server or open a second tab.
+**Recovering a stuck pane (`reused: true` but nothing visible).** Common failure: `preview_start` returns `reused: true` because a prior pane is still registered, but the pane is closed/hidden and your `preview_eval` lands in a void the user can't see. The fix is hard-reset:
 
-**Fallback when the preview pane is unavailable** (e.g. Claude API direct, headless CI, or a future split where preview tooling is opt-in): start the server with `node scripts/preview-server.js` directly and open `http://localhost:3737/?path=<absolute path>` in the user's default browser (`open` on macOS, `xdg-open` on Linux, `start` on Windows). Same viewer, just no inline pane.
+1. Call `preview_stop` (with the same `name`).
+2. Call `preview_start` again — this returns a fresh pane.
+3. Then `preview_eval` to navigate.
+
+Do this whenever the user says "the pane is empty / didn't open / I can't see it" after a successful `preview_start`. Don't ask — just stop-then-start.
+
+**Fallback when no preview host is available** (Claude API direct, headless CI, or cowork without the `Claude_Preview` plugin): start the server manually with `node scripts/preview-server.js` and open `http://localhost:3737/?path=<absolute path>` in the user's default browser (`open` on macOS, `xdg-open` on Linux, `start` on Windows). The viewer renders the same way; the only loss is the inline pane.
 
 ## Common pitfalls
 
