@@ -20,7 +20,7 @@ This skill helps Claude work with Korean Hangul Word Processor documents — rea
 | Edit existing `.hwp` (HWP 5.0 binary) | convert to `.hwpx` via `convert.js` first, then edit-as-hwpx |
 | Convert `.hwp` ↔ `.hwpx` | `node scripts/convert.js <input> <output>` |
 | Validate output | `python scripts/validate.py <file.hwpx>` |
-| Preview file in a preview pane (Code or cowork+`Claude_Preview`) | `preview_start` → `preview_eval` to `http://localhost:3737/?path=...` (see Preview section) |
+| Preview file in a preview pane (Claude Code only) | `preview_start` → `preview_eval` to `http://localhost:3737/?path=...` (see Preview section) |
 
 > Conversion to PDF / DOCX is **out of scope for v0**. Will be added in a later release via LibreOffice headless.
 
@@ -139,14 +139,9 @@ node scripts/convert.js input.hwp /tmp/converted.hwpx
 
 The skill ships a tiny Node HTTP server (`scripts/preview-server.js`) that serves a vanilla-JS canvas-based viewer; rhwp WASM does the actual rendering in the browser, so the result matches Hancom Office closely. No LibreOffice, no external browser.
 
-**The preview pane is host-agnostic.** Whoever exposes the `preview_start` / `preview_eval` / `preview_stop` tools can drive it. Two known hosts today:
+**Preview is Claude Code only.** That's the CLI and Desktop's Code mode. Cowork (web or Desktop cowork mode) does not expose `preview_start` / `preview_eval` / `preview_stop` and has no equivalent — its Bash is a remote Linux sandbox whose `localhost` the user's browser cannot reach. **Do not attempt to spin up `preview-server.js` from a cowork session and hand the user a `localhost:3737` link; the link will silently fail because the port is on a different machine.** In cowork, just emit the file and tell the user to open it with their HWP app.
 
-- **Claude Code (CLI)** — built-in. Tool names are bare: `preview_start`, `preview_eval`, `preview_stop`. Requires a one-time `.claude/launch.json` entry (below).
-- **claude.ai cowork (web) with the `Claude_Preview` plugin** — same tools, namespaced (`Claude_Preview:preview_start` etc.). The plugin must be installed in the cowork session; it iframes the localhost URL the same way Code's pane does. The user's machine still runs the Node server.
-
-If neither host is present (Claude API direct / headless CI), see **Fallback** at the end of this section.
-
-**Setup once per workspace (Claude Code only)** — `.claude/launch.json`:
+**Setup once per workspace (Code only)** — `.claude/launch.json`:
 
 ```json
 {
@@ -155,24 +150,24 @@ If neither host is present (Claude API direct / headless CI), see **Fallback** a
     {
       "name": "claw-hwp-preview",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["<absolute-path-to>/scripts/preview-server.js"],
+      "runtimeArgs": ["${CLAUDE_PLUGIN_ROOT}/skills/hwp/scripts/preview-server.js"],
       "port": 3737
     }
   ]
 }
 ```
 
-If missing, create or merge before calling `preview_start`. The script path is `${CLAUDE_PLUGIN_ROOT}/skills/hwp/scripts/preview-server.js` — Code substitutes `CLAUDE_PLUGIN_ROOT` at load time. (When typing the path manually for debugging, an installed plugin lives at `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`.) Cowork's `Claude_Preview` plugin handles process management itself — no launch.json needed there. Port `3737` is the default; override via `CLAW_HWP_PREVIEW_PORT`.
+If missing, create or merge before calling `preview_start`. Code substitutes `CLAUDE_PLUGIN_ROOT` at load time. (When typing the path manually for debugging, an installed plugin lives at `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`.) Port `3737` is the default; override via `CLAW_HWP_PREVIEW_PORT`.
 
 **The lifecycle — start, navigate, stop.** The viewer is a long-lived page in a long-lived pane. You do NOT spawn a fresh server per file.
 
-1. **`preview_start`** with `name: "claw-hwp-preview"` (or the cowork-namespaced equivalent). Returns either a fresh pane or `reused: true` if one is already open.
+1. **`preview_start`** with `name: "claw-hwp-preview"`. Returns either a fresh pane or `reused: true` if one is already open.
 2. **`preview_eval`** to set `window.location.href = "http://localhost:3737/?path=<absolute path>"`. Use this both for the first navigation and for swapping to a different file later. Do not start a second server.
 3. **`preview_stop`** when you need to recover a stuck pane (see below).
 
 The viewer reads `?path=`, renders every page to its own canvas, and shows a 자동 보정 toggle (calls rhwp's `reflowLinesegs()` — same fix `create.js` applies server-side to strip stale layout caches). Auto-correction defaults ON; the toolbar toggle flips it for raw inspection.
 
-**When to auto-preview — don't ask, just fire.** In every situation below, run `preview_start` → `preview_eval` immediately. Visual verification is your job, not the user's.
+**When to auto-preview — don't ask, just fire.** In Code, run `preview_start` → `preview_eval` immediately. Visual verification is your job, not the user's.
 
 1. Right after `create.js` / `convert.js` writes a new file or finishes a format conversion — feed the returned `path` straight into the URL.
 2. Right after the user uploads a `.hwp` / `.hwpx` to the workspace or mentions one by path.
@@ -188,27 +183,17 @@ Never write "please check if the file looks right." Open the viewer and let them
 
 Do this whenever the user says "the pane is empty / didn't open / I can't see it" after a successful `preview_start`. Don't ask — just stop-then-start.
 
-**Server lifecycle the agent owns.** As of the auto-shutdown change, `preview-server.js` self-exits ~2 minutes after the last viewer tab closes (heartbeat-based). It may be dead between user requests even if you started it earlier in the session. **Always health-check before any preview action; if dead, start it yourself via Bash — do not ask the user to run anything.**
+**Server lifecycle the agent owns.** `preview-server.js` self-exits ~2 minutes after the last viewer tab closes (heartbeat-based), so it may be dead between requests even if you started it earlier. Health-check first; if dead, restart via Bash without asking the user.
 
 ```bash
-# Resolve the script path. CLAUDE_PLUGIN_ROOT is set by Code when invoking
-# plugin scripts; the find fallback covers manual / non-Code Bash sessions.
 SCRIPT="${CLAUDE_PLUGIN_ROOT:-}/skills/hwp/scripts/preview-server.js"
 [ -f "$SCRIPT" ] || SCRIPT=$(find "$HOME/.claude/plugins/cache/claw-hwp" \
   -path '*/skills/hwp/scripts/preview-server.js' 2>/dev/null | sort -V | tail -1)
-
-# Health check — anything other than 204 means dead.
 curl -fsS -o /dev/null http://localhost:3737/__heartbeat || \
   node "$SCRIPT" >/tmp/claw-hwp-preview.log 2>&1 &
 disown 2>/dev/null || true
-# Give it a beat to bind the port before you fire the next request.
 sleep 0.5
 ```
-
-After that, proceed with whichever delivery path applies:
-
-- **Claude Code / cowork + `Claude_Preview`**: call `preview_eval` with the URL as before.
-- **Cowork standalone (no `Claude_Preview` plugin), Claude API direct, headless CI**: hand the user a markdown link `[열기 — <filename>](http://localhost:3737/?path=<absolute path>)`. Click opens in their OS default browser. Same viewer, only loss is the inline pane.
 
 ## Common pitfalls
 

@@ -20,8 +20,9 @@
 - **create** new HWPX documents from scratch
 - **edit** existing documents (text replace, table fill, formatting) by unpacking the XML and using Claude's native `Edit` tool
 - **convert** `.hwp ↔ .hwpx` losslessly via the rhwp WASM library
+- **preview** rendered pages in Claude Code's preview pane (Hancom-grade fidelity)
 
-It runs in Claude Code, Claude Desktop, and claude.ai — no Hancom Office, no LibreOffice, no Windows COM required.
+Read / create / edit / convert work everywhere Claude has Bash and filesystem access — Claude Code (CLI / Desktop), Claude Desktop, and claude.ai cowork. The interactive preview pane is **Claude Code only** (CLI + Desktop's Code mode); other surfaces hand the file back for the user to open in their HWP app. No Hancom Office, no LibreOffice, no Windows COM required.
 
 ## Built on
 
