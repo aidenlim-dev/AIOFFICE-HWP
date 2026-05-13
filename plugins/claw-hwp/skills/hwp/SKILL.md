@@ -20,7 +20,7 @@ This skill helps Claude work with Korean Hangul Word Processor documents — rea
 | Edit existing `.hwp` (HWP 5.0 binary) | convert to `.hwpx` via `convert.js` first, then edit-as-hwpx |
 | Convert `.hwp` ↔ `.hwpx` | `node scripts/convert.js <input> <output>` |
 | Validate output | `python scripts/validate.py <file.hwpx>` |
-| Preview file in a preview pane (Claude Code only) | `preview_start` → `preview_eval` to `http://localhost:3737/?path=...` (see Preview section) |
+| Preview file (Desktop = inline pane, CLI = browser link, cowork = no preview) | See Preview section for the surface decision rule |
 
 > Conversion to PDF / DOCX is **out of scope for v0**. Will be added in a later release via LibreOffice headless.
 
@@ -137,11 +137,20 @@ node scripts/convert.js input.hwp /tmp/converted.hwpx
 
 ### "Show me what this looks like" / "Preview this HWP file"
 
-The skill ships a tiny Node HTTP server (`scripts/preview-server.js`) that serves a vanilla-JS canvas-based viewer; rhwp WASM does the actual rendering in the browser, so the result matches Hancom Office closely. No LibreOffice, no external browser.
+The skill ships a tiny Node HTTP server (`scripts/preview-server.js`) that serves a vanilla-JS canvas-based viewer; rhwp WASM does the actual rendering in the browser, so the result matches Hancom Office closely. No LibreOffice, no external browser plugin.
 
-**Preview is Claude Code only.** That's the CLI and Desktop's Code mode. Cowork (web or Desktop cowork mode) does not expose `preview_start` / `preview_eval` / `preview_stop` and has no equivalent — its Bash is a remote Linux sandbox whose `localhost` the user's browser cannot reach. **Do not attempt to spin up `preview-server.js` from a cowork session and hand the user a `localhost:3737` link; the link will silently fail because the port is on a different machine.** In cowork, just emit the file and tell the user to open it with their HWP app.
+**The preview path depends on which Claude surface you're running in.** The decision rule, applied first thing every time the user wants to view a file:
 
-**Setup once per workspace (Code only)** — `.claude/launch.json`:
+| Surface | Detection | What you do |
+|---|---|---|
+| **Claude Code Desktop** (Code mode in the desktop app) | `preview_start` / `preview_eval` / `preview_stop` tools are present | Use the host-managed inline pane. See "Inline pane path" below. |
+| **Claude Code CLI** (and any other surface where Bash runs on the user's machine but no `preview_*` tools exist) | `uname -s` returns `Darwin` / `Linux` / `MINGW*` *and* no `preview_*` tools | Self-host: bash launches `preview-server.js`, then hand the user a markdown link. See "Self-host link path" below. |
+| **Cowork** (claude.ai web cowork, Claude Desktop's cowork mode) | No `preview_*` tools, and you're inside a remote Linux sandbox (Bash can't reach the user's `localhost`) | **No preview. Just emit the file and tell the user to open it with their HWP app.** Do not spin up `preview-server.js` here — the port will be on the sandbox, unreachable from the user's browser. |
+| **Claude API direct** (developer's app embedding the SDK) | Depends on developer's deployment | If their Bash is on the user's machine, treat as CLI. If it's on a remote server, treat as cowork. |
+
+#### Inline pane path (Claude Code Desktop only)
+
+This is the only surface that exposes `preview_start` / `preview_eval` / `preview_stop`. Setup once per workspace via `.claude/launch.json`:
 
 ```json
 {
@@ -159,31 +168,17 @@ The skill ships a tiny Node HTTP server (`scripts/preview-server.js`) that serve
 
 If missing, create or merge before calling `preview_start`. Code substitutes `CLAUDE_PLUGIN_ROOT` at load time. (When typing the path manually for debugging, an installed plugin lives at `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`.) Port `3737` is the default; override via `CLAW_HWP_PREVIEW_PORT`.
 
-**The lifecycle — start, navigate, stop.** The viewer is a long-lived page in a long-lived pane. You do NOT spawn a fresh server per file.
+Lifecycle — the viewer is a long-lived page in a long-lived pane. You do NOT spawn a fresh server per file.
 
 1. **`preview_start`** with `name: "claw-hwp-preview"`. Returns either a fresh pane or `reused: true` if one is already open.
-2. **`preview_eval`** to set `window.location.href = "http://localhost:3737/?path=<absolute path>"`. Use this both for the first navigation and for swapping to a different file later. Do not start a second server.
-3. **`preview_stop`** when you need to recover a stuck pane (see below).
+2. **`preview_eval`** to set `window.location.href = "http://localhost:3737/?path=<absolute path>"`. Use this both for the first navigation and for swapping files. Do not start a second server.
+3. **`preview_stop`** when you need to recover a stuck pane (below).
 
-The viewer reads `?path=`, renders every page to its own canvas, and shows a 자동 보정 toggle (calls rhwp's `reflowLinesegs()` — same fix `create.js` applies server-side to strip stale layout caches). Auto-correction defaults ON; the toolbar toggle flips it for raw inspection.
+Stuck pane recovery — when `preview_start` returns `reused: true` but nothing is visible (the prior pane was closed/hidden), hard-reset: `preview_stop` → `preview_start` → `preview_eval`. Don't ask the user, just do it.
 
-**When to auto-preview — don't ask, just fire.** In Code, run `preview_start` → `preview_eval` immediately. Visual verification is your job, not the user's.
+#### Self-host link path (Claude Code CLI, local-bash API setups)
 
-1. Right after `create.js` / `convert.js` writes a new file or finishes a format conversion — feed the returned `path` straight into the URL.
-2. Right after the user uploads a `.hwp` / `.hwpx` to the workspace or mentions one by path.
-3. Right after edits to an existing file (`replace_text`, unpack-edit-pack round-trip).
-
-Never write "please check if the file looks right." Open the viewer and let them see it.
-
-**Recovering a stuck pane (`reused: true` but nothing visible).** Common failure: `preview_start` returns `reused: true` because a prior pane is still registered, but the pane is closed/hidden and your `preview_eval` lands in a void the user can't see. The fix is hard-reset:
-
-1. Call `preview_stop` (with the same `name`).
-2. Call `preview_start` again — this returns a fresh pane.
-3. Then `preview_eval` to navigate.
-
-Do this whenever the user says "the pane is empty / didn't open / I can't see it" after a successful `preview_start`. Don't ask — just stop-then-start.
-
-**Server lifecycle the agent owns.** `preview-server.js` self-exits ~2 minutes after the last viewer tab closes (heartbeat-based), so it may be dead between requests even if you started it earlier. Health-check first; if dead, restart via Bash without asking the user.
+No host-managed pane available, but Bash can reach the user's localhost. Health-check first; if dead, start it yourself — never ask the user to run anything.
 
 ```bash
 SCRIPT="${CLAUDE_PLUGIN_ROOT:-}/skills/hwp/scripts/preview-server.js"
@@ -194,6 +189,26 @@ curl -fsS -o /dev/null http://localhost:3737/__heartbeat || \
 disown 2>/dev/null || true
 sleep 0.5
 ```
+
+Then emit a markdown link the user clicks to open in their default browser:
+
+```
+[열기 — <filename>](http://localhost:3737/?path=<absolute path>)
+```
+
+`preview-server.js` self-exits ~2 minutes after the last viewer tab closes (heartbeat-based), so on a return visit you may need to repeat the health-check + relaunch. The script handles that — just always run the snippet above before emitting a link.
+
+#### When to fire preview (Desktop and CLI paths)
+
+Don't ask, just do it. Visual verification is your job.
+
+1. Right after `create.js` / `convert.js` writes a new file or finishes a format conversion.
+2. Right after the user uploads a `.hwp` / `.hwpx` or mentions one by path.
+3. Right after edits (`replace_text`, unpack-edit-pack round-trip).
+
+Never write "please check if the file looks right." Open the viewer / link and let them see it.
+
+In **cowork**, skip preview entirely — just emit the file. Telling the user "open it with Hancom Office or 한컴독스" is enough; they already know how to handle a `.hwp` they downloaded.
 
 ## Common pitfalls
 
