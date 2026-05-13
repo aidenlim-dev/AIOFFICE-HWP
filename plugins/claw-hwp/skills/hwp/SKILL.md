@@ -188,7 +188,22 @@ Never write "please check if the file looks right." Open the viewer and let them
 
 Do this whenever the user says "the pane is empty / didn't open / I can't see it" after a successful `preview_start`. Don't ask — just stop-then-start.
 
-**Fallback when no preview host is available** (Claude API direct, headless CI, or cowork without the `Claude_Preview` plugin): start the server manually with `node scripts/preview-server.js` and open `http://localhost:3737/?path=<absolute path>` in the user's default browser (`open` on macOS, `xdg-open` on Linux, `start` on Windows). The viewer renders the same way; the only loss is the inline pane.
+**Server lifecycle the agent owns.** As of the auto-shutdown change, `preview-server.js` self-exits ~2 minutes after the last viewer tab closes (heartbeat-based). It may be dead between user requests even if you started it earlier in the session. **Always health-check before any preview action; if dead, start it yourself via Bash — do not ask the user to run anything.**
+
+```bash
+# Health check — anything other than 204 means dead.
+curl -fsS -o /dev/null http://localhost:3737/__heartbeat || \
+  node ~/.claude/plugins/claw-hwp/skills/hwp/scripts/preview-server.js \
+    >/tmp/claw-hwp-preview.log 2>&1 &
+disown 2>/dev/null || true
+# Give it a beat to bind the port before you fire the next request.
+sleep 0.5
+```
+
+Adjust the script path if the plugin is installed somewhere other than `~/.claude/plugins/claw-hwp/`. After that, proceed with whichever delivery path applies:
+
+- **Claude Code / cowork + `Claude_Preview`**: call `preview_eval` with the URL as before.
+- **Cowork standalone (no `Claude_Preview` plugin), Claude API direct, headless CI**: hand the user a markdown link `[열기 — <filename>](http://localhost:3737/?path=<absolute path>)`. Click opens in their OS default browser. Same viewer, only loss is the inline pane.
 
 ## Common pitfalls
 
