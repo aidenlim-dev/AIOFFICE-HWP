@@ -34,6 +34,3 @@ coverage/
 
 # scratch / spike work
 spike/
-
-# poc render outputs (PNGs etc., regenerable)
-poc/**/out/
