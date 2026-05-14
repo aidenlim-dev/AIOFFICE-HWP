@@ -20,7 +20,7 @@ This skill helps Claude work with Korean Hangul Word Processor documents — rea
 | Edit existing `.hwp` (HWP 5.0 binary) | convert to `.hwpx` via `convert.js` first, then edit-as-hwpx |
 | Convert `.hwp` ↔ `.hwpx` | `node scripts/convert.js <input> <output>` |
 | Validate output | `python scripts/validate.py <file.hwpx>` |
-| Preview file (Desktop = inline pane, CLI = browser link, cowork = no preview) | See Preview section for the surface decision rule |
+| Preview file (Desktop = inline pane, CLI = browser link, cowork = launcher script) | See Preview section for the surface decision rule |
 
 > Conversion to PDF / DOCX is **out of scope for v0**. Will be added in a later release via LibreOffice headless.
 
@@ -145,7 +145,7 @@ The skill ships a tiny Node HTTP server (`scripts/preview-server.js`) that serve
 |---|---|---|
 | **Claude Code Desktop** (Code mode in the desktop app) | `preview_start` / `preview_eval` / `preview_stop` tools are present | Use the host-managed inline pane. See "Inline pane path" below. |
 | **Claude Code CLI** (and any other surface where Bash runs on the user's machine but no `preview_*` tools exist) | `uname -s` returns `Darwin` / `Linux` / `MINGW*` *and* no `preview_*` tools | Self-host: bash launches `preview-server.js`, then hand the user a markdown link. See "Self-host link path" below. |
-| **Cowork** (claude.ai web cowork, Claude Desktop's cowork mode) | No `preview_*` tools, and you're inside a remote Linux sandbox (Bash can't reach the user's `localhost`) | **No preview. Just emit the file and tell the user to open it with their HWP app.** Do not spin up `preview-server.js` here — the port will be on the sandbox, unreachable from the user's browser. |
+| **Cowork** (claude.ai web cowork, Claude Desktop's cowork mode) | No `preview_*` tools, and you're inside a remote Linux sandbox (Bash can't reach the user's `localhost`) | Emit the file plus an OS-launcher block. The user runs the launcher locally, which spins up `preview-server.js` on **their** machine and opens the browser. See "Cowork launcher path" below. Do not run `preview-server.js` inside the sandbox — its `localhost` is unreachable from the user's browser. |
 | **Claude API direct** (developer's app embedding the SDK) | Depends on developer's deployment | If their Bash is on the user's machine, treat as CLI. If it's on a remote server, treat as cowork. |
 
 #### Inline pane path (Claude Code Desktop only)
@@ -198,7 +198,31 @@ Then emit a markdown link the user clicks to open in their default browser:
 
 `preview-server.js` self-exits ~2 minutes after the last viewer tab closes (heartbeat-based), so on a return visit you may need to repeat the health-check + relaunch. The script handles that — just always run the snippet above before emitting a link.
 
-#### When to fire preview (Desktop and CLI paths)
+#### Cowork launcher path (cowork = remote sandbox, no local Bash)
+
+The sandbox's `localhost:3737` is unreachable from the user's browser, so the preview server has to run on the **user's** machine. The skill ships three OS launchers that handle this end-to-end. After writing the HWP file, append a launcher block to your reply so the user can download the launcher matching their OS, drop it next to the file, and double-click.
+
+```
+**미리보기:** OS 별 launcher 하나만 받아서 위 파일과 같은 폴더에 두고 더블클릭:
+
+- macOS: <https://raw.githubusercontent.com/DoHyun468/claw-hwp/main/plugins/claw-hwp/skills/hwp/scripts/launcher/preview-mac.command>
+- Windows: <https://raw.githubusercontent.com/DoHyun468/claw-hwp/main/plugins/claw-hwp/skills/hwp/scripts/launcher/preview-windows.bat>
+- Linux: <https://raw.githubusercontent.com/DoHyun468/claw-hwp/main/plugins/claw-hwp/skills/hwp/scripts/launcher/preview-linux.sh>
+
+(Node.js 18+ 필요. 첫 실행 시 ~5MB 뷰어 자산 다운로드. macOS는 우클릭 → 열기로 한 번만 Gatekeeper 통과.)
+```
+
+What the launcher does on the user's machine:
+1. Looks for `preview-server.js` in the local Claude plugin cache (`~/.claude/plugins/cache/claw-hwp/...`). If found, uses it.
+2. Otherwise downloads `scripts/` from the GitHub `main` tarball into `~/.claw-hwp-launcher/` (~5 MB, one-time).
+3. Boots `preview-server.js` on `localhost:3737` if not already up (idempotent — health-checks first).
+4. Opens the user's default browser at `http://localhost:3737/?path=<absolute path of the .hwp/.hwpx>`.
+
+Auto-detection: if no file argument is passed, the launcher picks the most recent `.hwp`/`.hwpx` in its own directory. So "drop launcher next to file → double-click" is the happy path; "pass file path as argument" is the fallback.
+
+Server lifetime: same as CLI path — `preview-server.js` self-exits ~2 minutes after the last viewer tab closes. Re-running the launcher restarts it.
+
+#### When to fire preview (all paths)
 
 Don't ask, just do it. Visual verification is your job.
 
@@ -206,9 +230,7 @@ Don't ask, just do it. Visual verification is your job.
 2. Right after the user uploads a `.hwp` / `.hwpx` or mentions one by path.
 3. Right after edits (`replace_text`, unpack-edit-pack round-trip).
 
-Never write "please check if the file looks right." Open the viewer / link and let them see it.
-
-In **cowork**, skip preview entirely — just emit the file. Telling the user "open it with Hancom Office or 한컴독스" is enough; they already know how to handle a `.hwp` they downloaded.
+In Desktop and CLI paths, "fire preview" means open the viewer / link directly. In cowork, "fire preview" means emit the launcher block alongside the file. Never write "please check if the file looks right" — give the user a working preview path.
 
 ## Common pitfalls
 

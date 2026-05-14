@@ -30,8 +30,8 @@ The viewer surface coverage:
 |---|---|
 | Claude Code Desktop (Code mode) | Inline preview pane |
 | Claude Code CLI | Browser link to local `localhost:3737` (agent self-launches the server) |
-| Claude Desktop cowork mode | None — file emitted, open with your HWP app |
-| claude.ai cowork (web) | None — file emitted, open with your HWP app |
+| Claude Desktop cowork mode | OS launcher (`.command` / `.bat` / `.sh`) — drop next to file, double-click, browser opens |
+| claude.ai cowork (web) | OS launcher (`.command` / `.bat` / `.sh`) — drop next to file, double-click, browser opens |
 
 No Hancom Office, no LibreOffice, no Windows COM required.
 
