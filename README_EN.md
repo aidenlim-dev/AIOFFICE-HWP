@@ -18,26 +18,35 @@
 
 ## What is this?
 
-`claw-hwp` brings native HWP / HWPX support to Claude as an [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview). Most of the Korean office ecosystem is locked into Hancom's `.hwp` / `.hwpx` formats, and Claude can't read or edit them out of the box. This skill closes that gap so Claude can:
+`claw-hwp` is an [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) that lets Claude work directly with Korean Hangul documents (`.hwp` / `.hwpx`). The Korean office ecosystem is effectively standardized on Hancom's `.hwp` / `.hwpx` formats, and Claude can't read or edit them out of the box. Install this skill and Claude can:
 
-- **read** HWP/HWPX text, tables, and metadata
-- **create** new HWPX documents from scratch
-- **edit** existing documents (text replace, table fill, formatting) by unpacking the XML and using Claude's native `Edit` tool
-- **convert** `.hwp ↔ .hwpx` losslessly via the rhwp WASM library
-- **preview** rendered pages with Hancom-grade fidelity (surface-dependent — see below)
+- **read** — extract text, tables, and metadata from `.hwp` / `.hwpx`
+- **create** — write new documents (headings, paragraphs, tables, images, page breaks). For tables, output as `.hwp` — see [Known limitations](#known-limitations)
+- **edit** — text replace, paragraph insert, formatting changes on existing documents — by unpacking the XML and using Claude's native `Edit` tool
+- **convert** — `.hwp ↔ .hwpx` both directions via rhwp WASM. Not lossless — round-tripping can damage tables and images
+- **preview** — view rhwp-rendered pages inline or in a browser (the path differs by surface — see [Usage by surface](#usage-by-surface))
 
 Read / create / edit / convert work everywhere Claude has Bash and filesystem access — Claude Code CLI, Claude Code Desktop (Code mode), Claude Desktop cowork mode, and claude.ai cowork.
 
-The viewer surface coverage:
+The preview surface coverage:
 
-| Surface | Viewer |
+| Surface | Preview |
 |---|---|
-| Claude Code Desktop (Code mode) | Inline preview pane |
+| Claude Code Desktop (Code mode) | Inline pane next to the chat |
 | Claude Code CLI | Browser link to local `localhost:3737` (agent self-launches the server) |
-| Claude Desktop cowork mode | OS launcher (`.command` / `.bat` / `.sh`) — drop next to file, double-click, browser opens |
-| claude.ai cowork (web) | OS launcher (`.command` / `.bat` / `.sh`) — drop next to file, double-click, browser opens |
+| Claude Desktop cowork mode | OS launcher (`.command` / `.bat` / `.sh`) — drop next to file, double-click |
+| claude.ai cowork (web) | OS launcher (`.command` / `.bat` / `.sh`) — drop next to file, double-click |
 
 No Hancom Office, no LibreOffice, no Windows COM required.
+
+## Known limitations
+
+These come from rhwp's serializer. Worth knowing before you start.
+
+- **Tables are dropped when emitting `.hwpx`.** Whether you create a new `.hwpx` via `create.js` or convert `.hwp → .hwpx`, rhwp's `exportHwpx()` strips tables. **If you need tables, write `.hwp` instead.** If you really need `.hwpx`, opening and re-saving the result in Hancom Office or 한컴독스 will regenerate the table XML.
+- **Editing existing `.hwp` files can lose tables.** The `.hwp` edit path internally converts to `.hwpx` first, which trips the same serializer. **If you need to edit while preserving existing tables, start from a `.hwpx` source** — that path edits the XML directly and tables are preserved.
+- **`.hwp ↔ .hwpx` round-tripping is lossy.** Tables, images, and complex shapes can be damaged. Keep `.hwpx` as the canonical format when possible; only emit `.hwp` when explicitly required.
+- **PDF / DOCX conversion is not yet supported.** Planned for a later release via LibreOffice headless.
 
 ## Built on
 
@@ -47,7 +56,7 @@ No Hancom Office, no LibreOffice, no Windows COM required.
 
 ## Status
 
-🚧 Early development. End-to-end read / edit / convert pipeline is working; `create.js` and public marketplace submission are next.
+🚧 v1.0 submitted to Anthropic's official marketplace on 2026-05-14, pending review. Read / create / edit / convert / preview pipeline verified across all four surfaces.
 
 ## Roadmap
 
@@ -61,8 +70,8 @@ No Hancom Office, no LibreOffice, no Windows COM required.
 - [x] v0.7 — `create.js` core ops (setup_document, append_{heading,paragraph,table,list,image}, replace_text, page/column breaks, load-then-append, extension-based `.hwp`/`.hwpx` dispatch)
 - [x] v0.8 — Vendored Node deps — zero-config install across Code / Desktop / web
 - [x] v0.9 — Plugin icon
-- [ ] v1.0 — Public release, submit plugin to Anthropic's official marketplace
-- [ ] v1.1 — Footnotes (`append_paragraph_with_footnotes`) + Markdown→HWP with citation styles (numeric_inline / footnote / footnote_with_bibliography) — MyAgent-parity differentiators
+- [x] v1.0 — Submitted to Anthropic's official marketplace (pending review)
+- [ ] v1.1 — Footnotes (`append_paragraph_with_footnotes`) + Markdown→HWP citation styles (numeric_inline / footnote / footnote_with_bibliography)
 - [ ] v1.2+ — PDF / DOCX conversion, image extraction, viewer/editor React packages
 
 ## Install
@@ -84,13 +93,13 @@ That's it. Claude Code auto-loads the skill when you mention `.hwp`/`.hwpx` file
 ### Claude Desktop (macOS / Windows app)
 
 1. Clone or download this repo.
-2. Open Claude Desktop → **Settings → Skills** → *Upload skill* → select the `plugins/claw-hwp/skills/hwp/` folder (or zip it first).
+2. Open Claude Desktop → **Settings → Skills → Upload skill** → select the `plugins/claw-hwp/skills/hwp/` folder (or zip it first).
 3. The skill auto-loads when you attach a `.hwp`/`.hwpx` file or mention Korean document tasks.
 
 ### claude.ai (web, Pro / Max / Team / Enterprise)
 
 1. Clone or download this repo.
-2. Open claude.ai → **Settings → Capabilities → Skills** → *Add skill*.
+2. Open claude.ai → **Settings → Capabilities → Skills → Add skill**.
 3. Upload the `plugins/claw-hwp/skills/hwp/` folder (zip it first).
 
 > **Zero-config**. Node dependencies (`@rhwp/core` WASM ~5 MB, `fflate` ~80 KB) are vendored into `scripts/vendor/` so the plugin works on any machine with Node 18+ and Python 3.9+ — no `npm install` step.
@@ -99,7 +108,7 @@ See `plugins/claw-hwp/skills/hwp/SKILL.md` for the full decision tree (read / cr
 
 ## Usage by surface
 
-How preview looks differs by where you're using Claude. Find the row that matches your setup — the read/create/edit flow itself works the same everywhere.
+Only the preview path differs by surface — the read/create/edit flow itself works the same everywhere. Find the row that matches your setup.
 
 ### Claude Code Desktop (Code mode) — the smoothest path
 
@@ -125,7 +134,7 @@ That's it. The launcher needs **Node.js 18+** installed. First run downloads a s
 
 <!-- TODO(media): cowork — launcher links in chat + double-click → browser preview screenshot/video -->
 
-## Dependencies
+## Requirements
 
 - Node.js 18+
 - Python 3.9+

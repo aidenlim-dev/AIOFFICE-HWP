@@ -1,7 +1,7 @@
 <h1 align="center">claw-hwp</h1>
 
 <p align="center">
-  Claude 어디서든 한글 문서. .hwp / .hwpx 읽기 · 만들기 · 편집을 Claude Code · Desktop · 웹 모두에서.<br/>
+  Claude 에서 한글 문서 (.hwp / .hwpx) 를 다룰 수 있게 해주는 스킬입니다. 읽기 · 만들기 · 편집을 Claude Code · Desktop · 웹 어디서든.<br/>
   <a href="https://github.com/edwardkim/rhwp">rhwp</a> WASM 기반.
 </p>
 
@@ -16,121 +16,130 @@
 
 ---
 
-## 이게 뭐야?
+## 소개
 
-`claw-hwp` 는 Claude 가 한글 문서 (.hwp / .hwpx) 를 직접 다룰 수 있게 해주는 [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) 입니다. 한국 오피스 환경 대부분이 한컴오피스의 .hwp / .hwpx 형식에 묶여있는데, Claude 는 기본적으로 이 형식을 읽거나 편집하지 못합니다. 이 스킬이 그 갭을 메워서 다음 작업이 가능합니다:
+`claw-hwp` 는 Claude 가 한글 문서 (.hwp / .hwpx) 를 직접 다룰 수 있도록 해주는 [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) 입니다. 한국 사무 환경에서는 한컴오피스 형식이 사실상 표준인데, Claude 는 기본적으로 이 형식을 읽거나 편집하지 못합니다. 이 스킬을 설치하면 Claude 가 다음 작업을 할 수 있습니다:
 
-- **읽기** — HWP/HWPX 텍스트, 표, 메타데이터
-- **생성** — 새 .hwpx 문서를 처음부터 작성
-- **편집** — 기존 문서 (텍스트 치환, 표 채우기, 서식 변경) — XML 을 풀어서 Claude 의 `Edit` 툴로 직접 편집
-- **변환** — `.hwp ↔ .hwpx` 무손실 변환 (rhwp WASM)
-- **미리보기** — 한컴오피스 수준 fidelity 로 페이지 렌더 (사용 환경 별로 다름 — 아래 참조)
+- **읽기** — .hwp / .hwpx 의 본문, 표, 메타데이터 추출
+- **만들기** — 새 문서 작성 (제목·문단·표·이미지·페이지 나누기 포함). 단, 표가 들어가야 하면 `.hwp` 로 출력해야 합니다 — 아래 [현재 제한사항](#현재-제한사항) 참조
+- **편집** — 기존 문서의 텍스트 치환, 문단 추가, 서식 변경 등 — XML 을 풀어서 Claude 의 `Edit` 툴로 직접 수정
+- **변환** — `.hwp ↔ .hwpx` 양방향 변환 (rhwp WASM). 무손실은 아닙니다 — 라운드트립 시 표·이미지가 손상될 수 있습니다
+- **미리보기** — rhwp 가 렌더한 페이지를 인라인 또는 브라우저에서 확인 (환경별로 방식이 다름 — 아래 [환경별 사용법](#환경별-사용법) 참조)
 
-읽기 / 생성 / 편집 / 변환은 Claude 가 Bash 와 파일 시스템에 접근할 수 있는 모든 환경에서 작동합니다 — Claude Code CLI, Claude Code Desktop (Code 모드), Claude Desktop cowork 모드, claude.ai cowork.
+읽기 / 만들기 / 편집 / 변환은 Claude 가 Bash 와 파일 시스템을 쓸 수 있는 모든 환경에서 작동합니다 — Claude Code CLI, Claude Code Desktop (Code 모드), Claude Desktop cowork 모드, claude.ai cowork.
 
-미리보기 환경 별 지원:
+미리보기는 환경마다 방식이 다릅니다:
 
-| 환경 | 뷰어 |
+| 환경 | 미리보기 |
 |---|---|
-| Claude Code Desktop (Code 모드) | 인라인 미리보기 패널 |
+| Claude Code Desktop (Code 모드) | 대화 옆 인라인 패널 |
 | Claude Code CLI | 로컬 `localhost:3737` 브라우저 링크 (에이전트가 서버 자동 기동) |
-| Claude Desktop cowork 모드 | OS 별 launcher (`.command` / `.bat` / `.sh`) — 파일 옆에 두고 더블클릭, 브라우저 열림 |
-| claude.ai cowork (웹) | OS 별 launcher (`.command` / `.bat` / `.sh`) — 파일 옆에 두고 더블클릭, 브라우저 열림 |
+| Claude Desktop cowork 모드 | OS 별 launcher (`.command` / `.bat` / `.sh`) — 파일 옆에 두고 더블클릭 |
+| claude.ai cowork (웹) | OS 별 launcher (`.command` / `.bat` / `.sh`) — 파일 옆에 두고 더블클릭 |
 
-한컴오피스 / LibreOffice / Windows COM **모두 불필요**.
+한컴오피스 / LibreOffice / Windows COM 모두 **필요 없습니다**.
 
-## 기반
+## 현재 제한사항
 
-- **[edwardkim/rhwp](https://github.com/edwardkim/rhwp)** — Rust + WebAssembly 뷰어/에디터 코어. 모든 파싱·렌더링·`.hwp` ↔ `.hwpx` 변환을 담당. rhwp 없으면 이 프로젝트 자체가 성립 안 됨.
-- **[golbin/hop](https://github.com/golbin/hop)** — rhwp 를 감싼 오픈소스 HWP 데스크탑 앱. 에디터 UX 패턴 참조.
-- **[anthropics/skills](https://github.com/anthropics/skills)** — Anthropic 공식 스킬 저장소. `docx`, `pptx`, `xlsx` 스킬을 구조 청사진으로 사용.
+rhwp 직렬화 한계에서 오는 제약입니다. 사용 전에 아시면 좋습니다.
+
+- **`.hwpx` 로 출력할 때 표가 사라집니다.** `create.js` 로 새 `.hwpx` 를 만들거나 `.hwp → .hwpx` 변환을 하면 rhwp 의 `exportHwpx()` 가 표를 드롭합니다. **표가 들어가야 하면 `.hwp` 로 출력하세요.** 정 `.hwpx` 가 필요하면 한컴오피스나 한컴독스에서 한 번 열었다 저장하면 표 XML 이 다시 만들어집니다.
+- **기존 `.hwp` 파일을 편집하면 그 안의 표가 사라질 수 있습니다.** `.hwp` 편집 경로는 내부적으로 `.hwpx` 변환을 한 번 거치는데, 그 단계에서 표가 드롭됩니다. **기존 표를 보존하면서 편집해야 한다면 `.hwpx` 원본으로 시작하세요** — 이 경로는 XML 을 직접 편집하므로 표가 그대로 유지됩니다.
+- **`.hwp ↔ .hwpx` 라운드트립은 손실이 있습니다.** 표 / 이미지 / 복잡한 도형이 손상될 수 있으니, 가능하면 `.hwpx` 를 원본 형식으로 두고 `.hwp` 출력은 명시적으로 필요한 경우에만 사용하세요.
+- **PDF / DOCX 변환은 아직 지원하지 않습니다.** 추후 LibreOffice headless 연동으로 추가할 예정입니다.
+
+## 의존하는 프로젝트
+
+- **[edwardkim/rhwp](https://github.com/edwardkim/rhwp)** — Rust + WebAssembly HWP 뷰어/에디터 코어. 이 스킬의 모든 파싱·렌더링·`.hwp` ↔ `.hwpx` 변환을 담당합니다. rhwp 가 없었으면 이 프로젝트 자체가 시작될 수 없었습니다.
+- **[golbin/hop](https://github.com/golbin/hop)** — rhwp 를 감싼 오픈소스 HWP 데스크탑 앱. 에디터 UX 패턴을 참고했습니다.
+- **[anthropics/skills](https://github.com/anthropics/skills)** — Anthropic 공식 스킬 저장소. `docx`, `pptx`, `xlsx` 스킬의 구조를 본떠서 만들었습니다.
 
 ## 상태
 
-🚧 초기 개발. 읽기 / 편집 / 변환 end-to-end 파이프라인 동작 중. `create.js` 와 공식 마켓플레이스 제출이 다음 마일스톤.
+🚧 v1.0 공식 마켓플레이스 검토 대기 중 (2026-05-14 제출). 읽기 / 만들기 / 편집 / 변환 / 미리보기 파이프라인은 네 가지 환경에서 모두 동작 확인.
 
 ## 로드맵
 
 - [x] v0 — `SKILL.md` 결정 트리
-- [x] v0.1 — `references/hwpx-format.md` (Claude 가 직접 편집할 수 있게 만든 XML 스키마 치트시트)
+- [x] v0.1 — `references/hwpx-format.md` (Claude 가 직접 편집할 때 참조하는 XML 스키마)
 - [x] v0.2 — Node 스크립트 (`extract_text.js`, `convert.js`)
 - [x] v0.3 — Python 스크립트 (`unpack.py`, `pack.py`, `validate.py`)
-- [x] v0.4 — rhwp `samples/` fixture 대상 end-to-end smoke 테스트 (round-trip 검증)
-- [x] v0.5 — Claude Code 플러그인 manifest + 단일 플러그인 마켓플레이스
-- [x] v0.6 — `references/rhwp-api.md` (큐레이션된 `@rhwp/core` API 레퍼런스)
-- [x] v0.7 — `create.js` 코어 op (setup_document, append_{heading,paragraph,table,list,image}, replace_text, page/column break, load-then-append, 확장자 기반 `.hwp`/`.hwpx` 디스패치)
-- [x] v0.8 — Vendored Node 의존성 — Code / Desktop / 웹 어디서든 zero-config 설치
+- [x] v0.4 — rhwp `samples/` fixture 대상 end-to-end 스모크 테스트 (round-trip 검증)
+- [x] v0.5 — Claude Code 플러그인 manifest + 마켓플레이스 정의
+- [x] v0.6 — `references/rhwp-api.md` (`@rhwp/core` API 레퍼런스)
+- [x] v0.7 — `create.js` 핵심 op (setup_document, append_{heading,paragraph,table,list,image}, replace_text, page/column break, load-then-append, 확장자 기반 `.hwp`/`.hwpx` 디스패치)
+- [x] v0.8 — Node 의존성 vendoring — Code / Desktop / 웹 어디서든 zero-config 설치
 - [x] v0.9 — 플러그인 아이콘
-- [ ] v1.0 — 공식 릴리스, Anthropic 공식 마켓플레이스 제출
-- [ ] v1.1 — 각주 (`append_paragraph_with_footnotes`) + Markdown→HWP 인용 스타일 (numeric_inline / footnote / footnote_with_bibliography) — MyAgent 패리티 차별화
+- [x] v1.0 — 공식 마켓플레이스 제출 (검토 대기)
+- [ ] v1.1 — 각주 (`append_paragraph_with_footnotes`) + Markdown→HWP 인용 스타일 (numeric_inline / footnote / footnote_with_bibliography)
 - [ ] v1.2+ — PDF / DOCX 변환, 이미지 추출, 뷰어/에디터 React 패키지
 
 ## 설치
 
-같은 스킬 폴더가 모든 Claude 환경에서 작동합니다. 본인이 사용하는 환경 하나만 따라하세요.
+같은 스킬 폴더가 모든 환경에서 동일하게 작동합니다. 본인이 쓰는 환경 하나만 따라하시면 됩니다.
 
-### Claude Code (CLI) — 권장
+### Claude Code (CLI) — 추천
 
 ```bash
-# 1. 마켓플레이스 추가 (한 번만)
+# 1. 마켓플레이스 등록 (한 번만)
 claude plugin marketplace add https://github.com/DoHyun468/claw-hwp
 
 # 2. 플러그인 설치
 claude plugin install claw-hwp@claw-hwp
 ```
 
-이게 끝. Claude Code 가 `.hwp`/`.hwpx` 파일 언급 시 자동으로 스킬을 로드합니다. 업데이트는 `claude plugin marketplace update claw-hwp` 로.
+설치하면 끝입니다. `.hwp`/`.hwpx` 파일을 언급하면 Claude Code 가 자동으로 스킬을 불러옵니다. 업데이트는 `claude plugin marketplace update claw-hwp`.
 
 ### Claude Desktop (macOS / Windows 앱)
 
-1. 이 repo 를 clone 또는 다운로드.
-2. Claude Desktop → **설정 → Skills** → *Upload skill* → `plugins/claw-hwp/skills/hwp/` 폴더 선택 (또는 zip 으로 압축 후 업로드).
-3. `.hwp`/`.hwpx` 파일 첨부하거나 한글 문서 작업 언급 시 자동 로드.
+1. 이 저장소를 clone 또는 다운로드 합니다.
+2. Claude Desktop → **Settings → Skills → Upload skill** → `plugins/claw-hwp/skills/hwp/` 폴더 선택 (또는 zip 으로 압축 후 업로드).
+3. `.hwp`/`.hwpx` 파일을 첨부하거나 한글 문서 작업을 언급하면 자동 로드됩니다.
 
 ### claude.ai (웹, Pro / Max / Team / Enterprise)
 
-1. 이 repo 를 clone 또는 다운로드.
-2. claude.ai → **Settings → Capabilities → Skills** → *Add skill*.
-3. `plugins/claw-hwp/skills/hwp/` 폴더를 zip 으로 압축 후 업로드.
+1. 이 저장소를 clone 또는 다운로드 합니다.
+2. claude.ai → **Settings → Capabilities → Skills → Add skill**.
+3. `plugins/claw-hwp/skills/hwp/` 폴더를 zip 으로 압축 후 업로드 합니다.
 
-> **Zero-config**. Node 의존성 (`@rhwp/core` WASM ~5 MB, `fflate` ~80 KB) 이 `scripts/vendor/` 에 vendored 돼 있어 Node 18+ / Python 3.9+ 만 있으면 바로 작동 — `npm install` 단계 없음.
+> **별도 의존성 설치 불필요**. Node 의존성 (`@rhwp/core` WASM 약 5 MB, `fflate` 약 80 KB) 이 `scripts/vendor/` 에 vendoring 돼 있어, Node 18+ / Python 3.9+ 만 있으면 바로 작동합니다 — `npm install` 단계 없습니다.
 
-전체 결정 트리 (read / create / edit / convert / validate) 는 `plugins/claw-hwp/skills/hwp/SKILL.md` 참조.
+전체 결정 트리 (read / create / edit / convert / validate) 는 `plugins/claw-hwp/skills/hwp/SKILL.md` 를 참조하세요.
 
 ## 환경별 사용법
 
-미리보기는 Claude 를 어디서 쓰느냐에 따라 다릅니다. 본인 환경에 맞는 줄을 찾으세요 — 읽기/생성/편집 흐름 자체는 어디서든 동일하게 작동합니다.
+미리보기 동작 방식만 환경마다 조금씩 다릅니다 (읽기/만들기/편집 흐름 자체는 어디서든 같음). 본인 환경에 맞는 항목을 보세요.
 
-### Claude Code Desktop (Code 모드) — 가장 매끄러운 경로
+### Claude Code Desktop (Code 모드) — 가장 매끄러운 경험
 
-`.hwp`/`.hwpx` 를 채팅에 드롭하거나 (또는 그냥 파일 이름 언급). 렌더된 문서가 **인라인으로, 대화 옆 패널에** 열림 — 브라우저 탭 없음, 클릭할 링크 없음. Claude 와 대화하면서 빠르게 문서 넘겨보기에 최적.
+`.hwp`/`.hwpx` 파일을 채팅에 드롭하거나 파일 이름을 언급하면 됩니다. 렌더된 문서가 **대화 옆 패널에 인라인으로** 열립니다 — 브라우저 탭도, 클릭할 링크도 없습니다. 대화하면서 문서를 빠르게 넘겨볼 때 가장 편합니다.
 
 <!-- TODO(media): Desktop Code 모드 — 인라인 미리보기 패널 스크린샷/영상 -->
 
 ### Claude Code CLI
 
-`.hwp`/`.hwpx` 를 채팅에 드롭. Claude 가 클릭 가능한 링크를 출력 → 클릭 → 기본 브라우저에서 문서 열림. 작은 로컬 서버는 탭 닫고 약 2 분 후 알아서 종료 — 청소할 거 없음.
+`.hwp`/`.hwpx` 파일을 채팅에 드롭하면 Claude 가 클릭할 수 있는 링크를 출력합니다. 클릭하면 기본 브라우저에서 문서가 열립니다. 작은 로컬 서버는 탭을 닫고 약 2 분 후 알아서 종료되므로 따로 정리할 게 없습니다.
 
 <!-- TODO(media): CLI — 마크다운 링크 + 브라우저 미리보기 스크린샷/영상 -->
 
 ### Cowork (claude.ai 웹 cowork, Claude Desktop 의 cowork 모드)
 
-Cowork 는 Claude 를 원격 샌드박스에서 돌리기 때문에, 미리보기는 **본인 컴퓨터** 에서 돌아야 합니다. Claude 가 작은 launcher 로 이걸 처리:
+Cowork 는 Claude 를 원격 샌드박스에서 실행하기 때문에 미리보기는 **본인 컴퓨터** 에서 돌아야 합니다. 이를 위해 작은 launcher 스크립트가 사용됩니다:
 
-1. Claude 가 `.hwp` 파일과 함께 OS 별 launcher 다운로드 링크 3개를 줌 — 본인 OS 에 맞는 거 하나 선택 (`.command` = Mac, `.bat` = Windows, `.sh` = Linux)
-2. launcher 를 `.hwp` 파일과 같은 폴더에 저장
-3. launcher 더블클릭 → 브라우저에서 미리보기 열림
+1. Claude 가 `.hwp` 파일과 함께 OS 별 launcher 다운로드 링크 3개를 줍니다 — 본인 OS 에 맞는 것 하나만 받으면 됩니다 (`.command` = Mac, `.bat` = Windows, `.sh` = Linux).
+2. launcher 를 `.hwp` 파일과 같은 폴더에 저장합니다.
+3. launcher 를 더블클릭하면 브라우저에서 미리보기가 열립니다.
 
-이게 끝. launcher 는 **Node.js 18+** 가 설치돼 있어야 함. 첫 실행 시 작은 뷰어 번들 (~5 MB) 을 다운로드해서 로컬 캐시. macOS 는 첫 실행 시 Gatekeeper 경고 — 우클릭 → **열기** 한 번이면, 그 다음부터는 그냥 작동.
+이게 전부입니다. launcher 는 **Node.js 18+** 가 설치돼 있어야 합니다. 첫 실행 시 작은 뷰어 번들 (약 5 MB) 을 다운로드해서 캐시합니다. macOS 는 첫 실행 시 Gatekeeper 경고가 뜨는데, 우클릭 → **열기** 를 한 번만 거쳐주시면 그 이후로는 바로 실행됩니다.
 
 <!-- TODO(media): cowork — launcher 링크 + 더블클릭 → 브라우저 미리보기 스크린샷/영상 -->
 
-## 의존성
+## 요구사항
 
 - Node.js 18+
 - Python 3.9+
 
-LibreOffice / 한컴오피스는 **불필요**. PDF/DOCX 변환 (이후 릴리스) 은 LibreOffice headless 가 있으면 사용 예정.
+LibreOffice / 한컴오피스는 **필요 없습니다**. 단 추후 PDF / DOCX 변환을 추가할 때는 LibreOffice headless 가 있으면 사용할 예정입니다.
 
 ## 라이선스
 
