@@ -1,0 +1,151 @@
+<h1 align="center">claw-hwp</h1>
+
+<p align="center">
+  HWP/HWPX skill for Claude — read, create, and edit Korean Hangul documents in Claude Code, Desktop, and web.<br/>
+  Built on <a href="https://github.com/edwardkim/rhwp">rhwp</a> WASM.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT" /></a>
+  <img src="https://img.shields.io/badge/status-WIP-orange" alt="WIP" />
+</p>
+
+<p align="center">
+  <a href="README.md">한국어</a> · <strong>English</strong>
+</p>
+
+---
+
+## What is this?
+
+`claw-hwp` brings native HWP / HWPX support to Claude as an [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview). Most of the Korean office ecosystem is locked into Hancom's `.hwp` / `.hwpx` formats, and Claude can't read or edit them out of the box. This skill closes that gap so Claude can:
+
+- **read** HWP/HWPX text, tables, and metadata
+- **create** new HWPX documents from scratch
+- **edit** existing documents (text replace, table fill, formatting) by unpacking the XML and using Claude's native `Edit` tool
+- **convert** `.hwp ↔ .hwpx` losslessly via the rhwp WASM library
+- **preview** rendered pages with Hancom-grade fidelity (surface-dependent — see below)
+
+Read / create / edit / convert work everywhere Claude has Bash and filesystem access — Claude Code CLI, Claude Code Desktop (Code mode), Claude Desktop cowork mode, and claude.ai cowork.
+
+The viewer surface coverage:
+
+| Surface | Viewer |
+|---|---|
+| Claude Code Desktop (Code mode) | Inline preview pane |
+| Claude Code CLI | Browser link to local `localhost:3737` (agent self-launches the server) |
+| Claude Desktop cowork mode | OS launcher (`.command` / `.bat` / `.sh`) — drop next to file, double-click, browser opens |
+| claude.ai cowork (web) | OS launcher (`.command` / `.bat` / `.sh`) — drop next to file, double-click, browser opens |
+
+No Hancom Office, no LibreOffice, no Windows COM required.
+
+## Built on
+
+- **[edwardkim/rhwp](https://github.com/edwardkim/rhwp)** — the Rust + WebAssembly viewer/editor core that powers all parsing, rendering, and `.hwp` ↔ `.hwpx` conversion. Without rhwp this project doesn't exist.
+- **[golbin/hop](https://github.com/golbin/hop)** — the open-source HWP desktop app that wraps rhwp. Reference for editor UX patterns.
+- **[anthropics/skills](https://github.com/anthropics/skills)** — Anthropic's official skill repository. The `docx`, `pptx`, `xlsx` skills are the structural blueprint we mirror.
+
+## Status
+
+🚧 Early development. End-to-end read / edit / convert pipeline is working; `create.js` and public marketplace submission are next.
+
+## Roadmap
+
+- [x] v0 — `SKILL.md` decision tree
+- [x] v0.1 — `references/hwpx-format.md` (XML schema cheatsheet for Claude to edit by hand)
+- [x] v0.2 — Node scripts (`extract_text.js`, `convert.js`)
+- [x] v0.3 — Python scripts (`unpack.py`, `pack.py`, `validate.py`)
+- [x] v0.4 — End-to-end smoke tests against rhwp `samples/` fixtures (round-trip verified)
+- [x] v0.5 — Claude Code plugin manifest + single-plugin marketplace
+- [x] v0.6 — `references/rhwp-api.md` (curated `@rhwp/core` API reference)
+- [x] v0.7 — `create.js` core ops (setup_document, append_{heading,paragraph,table,list,image}, replace_text, page/column breaks, load-then-append, extension-based `.hwp`/`.hwpx` dispatch)
+- [x] v0.8 — Vendored Node deps — zero-config install across Code / Desktop / web
+- [x] v0.9 — Plugin icon
+- [ ] v1.0 — Public release, submit plugin to Anthropic's official marketplace
+- [ ] v1.1 — Footnotes (`append_paragraph_with_footnotes`) + Markdown→HWP with citation styles (numeric_inline / footnote / footnote_with_bibliography) — MyAgent-parity differentiators
+- [ ] v1.2+ — PDF / DOCX conversion, image extraction, viewer/editor React packages
+
+## Install
+
+The same skill folder works across Claude surfaces. Pick the one you use.
+
+### Claude Code (CLI) — recommended
+
+```bash
+# 1. Add the marketplace (one-time)
+claude plugin marketplace add https://github.com/DoHyun468/claw-hwp
+
+# 2. Install the plugin
+claude plugin install claw-hwp@claw-hwp
+```
+
+That's it. Claude Code auto-loads the skill when you mention `.hwp`/`.hwpx` files. Updates land via `claude plugin marketplace update claw-hwp`.
+
+### Claude Desktop (macOS / Windows app)
+
+1. Clone or download this repo.
+2. Open Claude Desktop → **Settings → Skills** → *Upload skill* → select the `plugins/claw-hwp/skills/hwp/` folder (or zip it first).
+3. The skill auto-loads when you attach a `.hwp`/`.hwpx` file or mention Korean document tasks.
+
+### claude.ai (web, Pro / Max / Team / Enterprise)
+
+1. Clone or download this repo.
+2. Open claude.ai → **Settings → Capabilities → Skills** → *Add skill*.
+3. Upload the `plugins/claw-hwp/skills/hwp/` folder (zip it first).
+
+> **Zero-config**. Node dependencies (`@rhwp/core` WASM ~5 MB, `fflate` ~80 KB) are vendored into `scripts/vendor/` so the plugin works on any machine with Node 18+ and Python 3.9+ — no `npm install` step.
+
+See `plugins/claw-hwp/skills/hwp/SKILL.md` for the full decision tree (read / create / edit / convert / validate).
+
+## Usage by surface
+
+How preview looks differs by where you're using Claude. Find the row that matches your setup — the read/create/edit flow itself works the same everywhere.
+
+### Claude Code Desktop (Code mode) — the smoothest path
+
+Drop a `.hwp`/`.hwpx` into chat (or just mention it by name). The rendered document opens **inline, in a pane next to your conversation** — no browser tab, no link to click. Best for quickly flipping through documents while chatting with Claude.
+
+<!-- TODO(media): Desktop Code mode — inline preview pane screenshot/video -->
+
+### Claude Code CLI
+
+Drop a `.hwp`/`.hwpx` into chat. Claude prints a clickable link → click it → the document opens in your default browser. The tiny local server quietly turns itself off about 2 minutes after you close the tab — nothing to clean up.
+
+<!-- TODO(media): CLI — markdown link emission + browser preview screenshot/video -->
+
+### Cowork (claude.ai web cowork, Claude Desktop's cowork mode)
+
+Cowork runs Claude in a remote sandbox, so the preview has to run on **your** computer instead. Claude handles this with a small launcher:
+
+1. Claude gives you the `.hwp` file plus three download links — pick the one for your OS (`.command` for Mac, `.bat` for Windows, `.sh` for Linux)
+2. Save the launcher into the same folder as the `.hwp` file
+3. Double-click the launcher → your browser opens with the preview
+
+That's it. The launcher needs **Node.js 18+** installed. First run downloads a small viewer bundle (~5 MB) and caches it locally. On macOS, the first launch shows a Gatekeeper warning — right-click → **Open** once, after that it just works.
+
+<!-- TODO(media): cowork — launcher links in chat + double-click → browser preview screenshot/video -->
+
+## Dependencies
+
+- Node.js 18+
+- Python 3.9+
+
+LibreOffice / Hancom Office are **not** required. PDF/DOCX conversion (later releases) will use LibreOffice headless when available.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright © 2026 RECON Labs Inc.
+
+---
+
+<p align="center">
+  <a href="https://www.reconlabs.ai/">
+    <img src="https://avatars.githubusercontent.com/u/82856082?s=160&v=4" width="72" alt="RECON Labs" />
+  </a>
+</p>
+
+<h3 align="center">Built and maintained at <a href="https://www.reconlabs.ai/">RECON Labs</a></h3>
+
+<p align="center">
+  Generative-AI 3D content platform — <a href="https://www.reconlabs.ai/">reconlabs.ai</a> · <a href="https://github.com/RECON-Labs-Inc">@RECON-Labs-Inc</a>
+</p>
