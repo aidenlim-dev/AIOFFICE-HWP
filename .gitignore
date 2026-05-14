@@ -34,3 +34,6 @@ coverage/
 
 # scratch / spike work
 spike/
+
+# internal-only docs (marketing / strategy notes shared across local sessions)
+_*.md

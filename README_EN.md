@@ -54,6 +54,18 @@ These come from rhwp's serializer. Worth knowing before you start.
 - **[golbin/hop](https://github.com/golbin/hop)** — the open-source HWP desktop app that wraps rhwp. Reference for editor UX patterns.
 - **[anthropics/skills](https://github.com/anthropics/skills)** — Anthropic's official skill repository. The `docx`, `pptx`, `xlsx` skills are the structural blueprint we mirror.
 
+## Korean HWP open-source ecosystem
+
+claw-hwp is part of a broader open-source movement around Korea's HWP formats. Each project occupies a different niche, complementing the others:
+
+| Project | Role | When to use |
+|---|---|---|
+| **[rhwp](https://github.com/edwardkim/rhwp)** | HWP parser/renderer core (Rust + WASM) | foundation that everything else builds on |
+| **[hop](https://github.com/golbin/hop)** | HWP desktop viewer (Tauri) | opening .hwp files on macOS / Linux |
+| **claw-hwp** | HWP skill for Claude/AI workflows | working on .hwp with AI — generate, summarize, edit |
+
+`rhwp` makes the whole ecosystem possible. Pick `hop` for desktop GUI, `claw-hwp` for AI-driven workflows.
+
 ## Status
 
 🚧 v1.0 submitted to Anthropic's official marketplace on 2026-05-14, pending review. Read / create / edit / convert / preview pipeline verified across all four surfaces.
