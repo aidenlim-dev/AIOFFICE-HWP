@@ -93,6 +93,34 @@ That's it. Claude Code auto-loads the skill when you mention `.hwp`/`.hwpx` file
 
 See `plugins/claw-hwp/skills/hwp/SKILL.md` for the full decision tree (read / create / edit / convert / validate).
 
+## Usage by surface
+
+How preview looks differs by where you're using Claude. Find the row that matches your setup — the read/create/edit flow itself works the same everywhere.
+
+### Claude Code Desktop (Code mode) — the smoothest path
+
+Drop a `.hwp`/`.hwpx` into chat (or just mention it by name). The rendered document opens **inline, in a pane next to your conversation** — no browser tab, no link to click. Best for quickly flipping through documents while chatting with Claude.
+
+<!-- TODO(media): Desktop Code mode — inline preview pane screenshot/video -->
+
+### Claude Code CLI
+
+Drop a `.hwp`/`.hwpx` into chat. Claude prints a clickable link → click it → the document opens in your default browser. The tiny local server quietly turns itself off about 2 minutes after you close the tab — nothing to clean up.
+
+<!-- TODO(media): CLI — markdown link emission + browser preview screenshot/video -->
+
+### Cowork (claude.ai web cowork, Claude Desktop's cowork mode)
+
+Cowork runs Claude in a remote sandbox, so the preview has to run on **your** computer instead. Claude handles this with a small launcher:
+
+1. Claude gives you the `.hwp` file plus three download links — pick the one for your OS (`.command` for Mac, `.bat` for Windows, `.sh` for Linux)
+2. Save the launcher into the same folder as the `.hwp` file
+3. Double-click the launcher → your browser opens with the preview
+
+That's it. The launcher needs **Node.js 18+** installed. First run downloads a small viewer bundle (~5 MB) and caches it locally. On macOS, the first launch shows a Gatekeeper warning — right-click → **Open** once, after that it just works.
+
+<!-- TODO(media): cowork — launcher links in chat + double-click → browser preview screenshot/video -->
+
 ## Dependencies
 
 - Node.js 18+
