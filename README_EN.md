@@ -34,8 +34,8 @@ The preview surface coverage:
 |---|---|
 | Claude Code Desktop (Code mode) | Inline pane next to the chat |
 | Claude Code CLI | Browser link to local `localhost:3737` (agent self-launches the server) |
-| Claude Desktop cowork mode | OS launcher (`.command` / `.bat` / `.sh`) — drop next to file, double-click |
-| claude.ai cowork (web) | OS launcher (`.command` / `.bat` / `.sh`) — drop next to file, double-click |
+| Claude Desktop cowork mode | Drag-drop the file onto <https://dohyun468.github.io/claw-hwp/> (no Node install) |
+| claude.ai cowork (web) | Drag-drop the file onto <https://dohyun468.github.io/claw-hwp/> (no Node install) |
 
 No Hancom Office, no LibreOffice, no Windows COM required.
 
@@ -124,15 +124,17 @@ Drop a `.hwp`/`.hwpx` into chat. Claude prints a clickable link → click it →
 
 ### Cowork (claude.ai web cowork, Claude Desktop's cowork mode)
 
-Cowork runs Claude in a remote sandbox, so the preview has to run on **your** computer instead. Claude handles this with a small launcher:
+Cowork runs Claude in a remote sandbox, so it can't reach a preview server on your machine. Instead, the same viewer is hosted as a **static page on GitHub Pages**:
 
-1. Claude gives you the `.hwp` file plus three download links — pick the one for your OS (`.command` for Mac, `.bat` for Windows, `.sh` for Linux)
-2. Save the launcher into the same folder as the `.hwp` file
-3. Double-click the launcher → your browser opens with the preview
+1. Claude gives you the `.hwp` / `.hwpx` file plus the viewer link — <https://dohyun468.github.io/claw-hwp/>
+2. Download the file, then drop it onto that page (or pick it via the folder icon in the toolbar)
+3. It renders right there in the browser. The file is not uploaded anywhere — rhwp WASM parses it locally in your tab.
 
-That's it. The launcher needs **Node.js 18+** installed. First run downloads a small viewer bundle (~5 MB) and caches it locally. On macOS, the first launch shows a Gatekeeper warning — right-click → **Open** once, after that it just works.
+No install, no Node, no permissions. Zoom (Ctrl+wheel or slider), page navigation, and the auto-correction toggle all work.
 
-<!-- TODO(media): cowork — launcher links in chat + double-click → browser preview screenshot/video -->
+If you're offline or GitHub Pages is blocked, OS launchers (`.command` / `.bat` / `.sh`) are still available as a fallback — drop next to the file and double-click, Node.js 18+ required. Claude will offer them if needed.
+
+<!-- TODO(media): cowork — drag-drop onto hosted viewer → rendered preview screenshot/video -->
 
 ## Requirements
 

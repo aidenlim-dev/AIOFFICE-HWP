@@ -34,8 +34,8 @@
 |---|---|
 | Claude Code Desktop (Code 모드) | 대화 옆 인라인 패널 |
 | Claude Code CLI | 로컬 `localhost:3737` 브라우저 링크 (에이전트가 서버 자동 기동) |
-| Claude Desktop cowork 모드 | OS 별 launcher (`.command` / `.bat` / `.sh`) — 파일 옆에 두고 더블클릭 |
-| claude.ai cowork (웹) | OS 별 launcher (`.command` / `.bat` / `.sh`) — 파일 옆에 두고 더블클릭 |
+| Claude Desktop cowork 모드 | <https://dohyun468.github.io/claw-hwp/> 페이지에 파일 끌어 놓기 (Node 설치 불필요) |
+| claude.ai cowork (웹) | <https://dohyun468.github.io/claw-hwp/> 페이지에 파일 끌어 놓기 (Node 설치 불필요) |
 
 한컴오피스 / LibreOffice / Windows COM 모두 **필요 없습니다**.
 
@@ -124,15 +124,17 @@ claude plugin install claw-hwp@claw-hwp
 
 ### Cowork (claude.ai 웹 cowork, Claude Desktop 의 cowork 모드)
 
-Cowork 는 Claude 를 원격 샌드박스에서 실행하기 때문에 미리보기는 **본인 컴퓨터** 에서 돌아야 합니다. 이를 위해 작은 launcher 스크립트가 사용됩니다:
+Cowork 는 Claude 가 원격 샌드박스에서 돌기 때문에 미리보기 서버에 직접 접근할 수 없습니다. 대신 같은 뷰어를 **GitHub Pages 정적 페이지** 로 호스팅해 둡니다:
 
-1. Claude 가 `.hwp` 파일과 함께 OS 별 launcher 다운로드 링크 3개를 줍니다 — 본인 OS 에 맞는 것 하나만 받으면 됩니다 (`.command` = Mac, `.bat` = Windows, `.sh` = Linux).
-2. launcher 를 `.hwp` 파일과 같은 폴더에 저장합니다.
-3. launcher 를 더블클릭하면 브라우저에서 미리보기가 열립니다.
+1. Claude 가 `.hwp` / `.hwpx` 파일과 함께 뷰어 링크를 줍니다 — <https://dohyun468.github.io/claw-hwp/>
+2. 파일을 내려받아서 그 페이지에 끌어 놓거나 우측 상단 폴더 아이콘으로 선택합니다.
+3. 브라우저 안에서 바로 렌더됩니다. 파일은 외부로 업로드되지 않습니다 — rhwp WASM 이 사용자 브라우저 안에서 직접 파싱합니다.
 
-이게 전부입니다. launcher 는 **Node.js 18+** 가 설치돼 있어야 합니다. 첫 실행 시 작은 뷰어 번들 (약 5 MB) 을 다운로드해서 캐시합니다. macOS 는 첫 실행 시 Gatekeeper 경고가 뜨는데, 우클릭 → **열기** 를 한 번만 거쳐주시면 그 이후로는 바로 실행됩니다.
+설치 / Node / 권한 모두 불필요합니다. 줌 (Ctrl+휠 또는 슬라이더), 페이지 이동, 자동 보정 토글 모두 작동합니다.
 
-<!-- TODO(media): cowork — launcher 링크 + 더블클릭 → 브라우저 미리보기 스크린샷/영상 -->
+오프라인 환경이거나 GitHub Pages 가 막혀 있는 경우의 대안으로 OS 별 launcher 도 있습니다 (`.command` / `.bat` / `.sh` — 파일 옆에 두고 더블클릭, Node.js 18+ 필요). Claude 가 필요할 때 알려줍니다.
+
+<!-- TODO(media): cowork — 호스팅 뷰어에 드래그 드롭 → 렌더 스크린샷/영상 -->
 
 ## 요구사항
 

@@ -33,8 +33,14 @@
 }
 
 // ── 2. rhwp WASM ──────────────────────────────────────────────────────────
-const rhwp = await import("/vendor/rhwp/rhwp.js");
-await rhwp.default({ module_or_path: "/vendor/rhwp/rhwp_bg.wasm" });
+// Resolve vendor paths relative to this module so the same bundle works
+// under both the local preview-server (root host, served from /) and a
+// GitHub Pages sub-path (e.g. /claw-hwp/). Bare `/vendor/...` would break
+// under any sub-path host.
+const rhwpJsUrl = new URL("vendor/rhwp/rhwp.js", import.meta.url).href;
+const rhwpWasmUrl = new URL("vendor/rhwp/rhwp_bg.wasm", import.meta.url).href;
+const rhwp = await import(rhwpJsUrl);
+await rhwp.default({ module_or_path: rhwpWasmUrl });
 
 // ── 3. DOM lookups ────────────────────────────────────────────────────────
 const els = {
@@ -48,6 +54,11 @@ const els = {
   pageTotal: document.getElementById("page-total"),
   container: document.getElementById("pages-container"),
   status: document.getElementById("status"),
+  open: document.getElementById("open"),
+  fileInput: document.getElementById("file-input"),
+  zoomControls: document.getElementById("zoom-controls"),
+  zoomSlider: document.getElementById("zoom-slider"),
+  zoomLabel: document.getElementById("zoom-label"),
 };
 
 // ── 4. State ──────────────────────────────────────────────────────────────
@@ -61,7 +72,16 @@ const state = {
   autoFix: true,
   pageCount: 0,
   currentPage: 1,
+  // Zoom multiplier on the fit-to-container baseline. 1.0 = fits the pane.
+  // CSS-scale only — canvas pixel buffer is set once in render(). Past ~1.5x
+  // upscaling becomes visible on standard-DPI screens; we accept that for
+  // now to keep slider drags instant. Re-rasterise on demand is a future
+  // refinement.
+  zoom: 1,
 };
+const ZOOM_MIN = 0.2;
+const ZOOM_MAX = 2;
+const ZOOM_STEP = 0.05;
 
 // ── 5. UI helpers ─────────────────────────────────────────────────────────
 function syncAutofixButton() {
@@ -81,9 +101,11 @@ function clearStatus() { els.status.style.display = "none"; }
 function syncPageNav() {
   if (state.pageCount <= 0) {
     els.pagenav.hidden = true;
+    els.zoomControls.hidden = true;
     return;
   }
   els.pagenav.hidden = false;
+  els.zoomControls.hidden = false;
   els.pageInput.max = String(state.pageCount);
   els.pageInput.value = String(state.currentPage);
   els.pageTotal.textContent = String(state.pageCount);
@@ -111,7 +133,25 @@ function pickEffectiveDpr(pageW, pageH, zoom, rawDpr) {
 function fit() {
   const wraps = els.container.querySelectorAll(".hwp-page");
   if (wraps.length === 0) return;
-  const avail = Math.max(280, Math.min(1100, els.container.clientWidth - 32));
+  // At zoom=1 we want the page rendered at its NATURAL width (or fit-to-pane,
+  // whichever is smaller). The earlier "always fill 1100px" rule made A4
+  // (~595px native) look bloated on wide Code panes — 100% felt too big.
+  // Now 100% = 1:1, zoom in to enlarge, zoom out to shrink. 1100px is kept
+  // as a final ceiling for pathological wide pages.
+  let maxPageW = 0;
+  wraps.forEach((wrap) => {
+    const canvas = wrap.querySelector("canvas");
+    if (!canvas) return;
+    const pw = parseFloat(canvas.dataset.pageWidth || "0");
+    if (pw > maxPageW) maxPageW = pw;
+  });
+  const containerW = Math.max(0, els.container.clientWidth - 32);
+  const naturalCap = maxPageW > 0 ? maxPageW : 1100;
+  const baseAvail = Math.max(
+    280,
+    Math.min(naturalCap, containerW || naturalCap, 1100),
+  );
+  const avail = baseAvail * state.zoom;
   wraps.forEach((wrap) => {
     const canvas = wrap.querySelector("canvas");
     if (!canvas) return;
@@ -125,6 +165,19 @@ function fit() {
     canvas.style.width = `${avail}px`;
     canvas.style.height = `${scaledH}px`;
   });
+}
+
+function syncZoomUi() {
+  els.zoomSlider.value = String(state.zoom);
+  els.zoomLabel.textContent = `${Math.round(state.zoom * 100)}%`;
+}
+
+function setZoom(z) {
+  const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+  if (clamped === state.zoom) return;
+  state.zoom = clamped;
+  syncZoomUi();
+  fit();
 }
 
 const ro = new ResizeObserver(() => fit());
@@ -154,7 +207,8 @@ async function loadFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const p = params.get("path");
   if (!p) {
-    setStatus("미리보기할 파일 경로가 지정되지 않았습니다 (?path=).", "error");
+    setStatus("우측 상단 폴더 아이콘으로 .hwp / .hwpx 파일을 선택하세요.");
+    els.filename.textContent = "";
     return;
   }
   setStatus("파일 불러오는 중…");
@@ -170,6 +224,29 @@ async function loadFromUrl() {
     els.filename.textContent = state.filename;
     els.download.href = `/file?path=${encodeURIComponent(p)}`;
     els.download.setAttribute("download", state.filename);
+    await render();
+  } catch (err) {
+    setStatus(`불러오기 실패: ${err.message}`, "error");
+  }
+}
+
+async function loadFromFile(file) {
+  setStatus("파일 불러오는 중…");
+  try {
+    state.fileBytes = new Uint8Array(await file.arrayBuffer());
+    state.filename = file.name || "untitled";
+    state.filePath = file.name || "";
+    // Reset page position so the new doc starts at page 1, not wherever the
+    // previous doc was scrolled to. Without this, opening a 3-page doc after
+    // browsing to page 12 of a long doc would land on the last page.
+    state.currentPage = 1;
+    els.filename.textContent = state.filename;
+    if (els.download.dataset.blobUrl) URL.revokeObjectURL(els.download.dataset.blobUrl);
+    const url = URL.createObjectURL(new Blob([state.fileBytes]));
+    els.download.dataset.blobUrl = url;
+    els.download.href = url;
+    els.download.setAttribute("download", state.filename);
+    els.container.scrollTo(0, 0);
     await render();
   } catch (err) {
     setStatus(`불러오기 실패: ${err.message}`, "error");
@@ -285,6 +362,45 @@ els.pageInput.addEventListener("change", () => {
   const v = Number(els.pageInput.value);
   if (Number.isFinite(v)) scrollToPage(v);
 });
+els.open.addEventListener("click", () => els.fileInput.click());
+els.fileInput.addEventListener("change", (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) loadFromFile(f);
+  e.target.value = "";
+});
+
+// ── 8b. Drag-and-drop ─────────────────────────────────────────────────────
+// dragenter/dragleave fire once per descendant the cursor crosses, so a
+// naive add/remove of the .dragging class flickers as the cursor moves
+// between child elements. Counter pattern keeps the overlay stable until
+// the drag truly leaves the window.
+let dragDepth = 0;
+window.addEventListener("dragenter", (e) => {
+  e.preventDefault();
+  dragDepth++;
+  document.body.classList.add("dragging");
+});
+window.addEventListener("dragover", (e) => {
+  // Required: without preventDefault the browser refuses the drop.
+  e.preventDefault();
+});
+window.addEventListener("dragleave", () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) document.body.classList.remove("dragging");
+});
+window.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove("dragging");
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!f) return;
+  const lower = f.name.toLowerCase();
+  if (!lower.endsWith(".hwp") && !lower.endsWith(".hwpx")) {
+    setStatus(`.hwp / .hwpx 파일만 지원합니다 (받은 파일: ${f.name})`, "error");
+    return;
+  }
+  loadFromFile(f);
+});
 els.pageInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
@@ -293,12 +409,32 @@ els.pageInput.addEventListener("keydown", (e) => {
   }
 });
 
+// Zoom — slider drag, label click for reset, Ctrl/Cmd+wheel.
+els.zoomSlider.addEventListener("input", (e) => {
+  const v = Number(e.target.value);
+  if (Number.isFinite(v)) setZoom(v);
+});
+els.zoomLabel.addEventListener("click", () => setZoom(1));
+els.container.addEventListener("wheel", (e) => {
+  // Ctrl on Win/Linux, Cmd on macOS. Trackpad pinch-zoom also surfaces as
+  // wheel + ctrlKey on macOS, so this picks up both gestures.
+  if (!(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault();
+  const delta = e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
+  setZoom(state.zoom + delta);
+}, { passive: false });
+syncZoomUi();
+
 // ── 9. Heartbeat ──────────────────────────────────────────────────────────
 // While this tab is open, ping the server so it knows we're alive. When the
 // tab closes the pings stop, the server's idle timer fires, and the process
-// self-kills — sparing the user from having to remember to stop it.
-setInterval(() => {
-  fetch("/__heartbeat", { method: "GET", cache: "no-store" }).catch(() => {});
-}, 30_000);
+// self-kills — sparing the user from having to remember to stop it. Only
+// applies when running under preview-server (port 3737); under static
+// hosting (GitHub Pages) there's nothing on the other end of the heartbeat.
+if (location.port === "3737") {
+  setInterval(() => {
+    fetch("/__heartbeat", { method: "GET", cache: "no-store" }).catch(() => {});
+  }, 30_000);
+}
 
 loadFromUrl();
