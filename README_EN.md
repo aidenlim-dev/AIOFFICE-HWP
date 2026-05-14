@@ -50,7 +50,7 @@ These come from rhwp's serializer. Worth knowing before you start.
 
 ## Built on
 
-- **[edwardkim/rhwp](https://github.com/edwardkim/rhwp)** — the Rust + WebAssembly viewer/editor core that powers all parsing, rendering, and `.hwp` ↔ `.hwpx` conversion. Without rhwp this project doesn't exist.
+- **[edwardkim/rhwp](https://github.com/edwardkim/rhwp)** — Rust + WebAssembly core for HWP parsing, rendering, and `.hwp` ↔ `.hwpx` conversion. This skill is built on rhwp.
 - **[golbin/hop](https://github.com/golbin/hop)** — the open-source HWP desktop app that wraps rhwp. Reference for editor UX patterns.
 - **[anthropics/skills](https://github.com/anthropics/skills)** — Anthropic's official skill repository. The `docx`, `pptx`, `xlsx` skills are the structural blueprint we mirror.
 
@@ -64,7 +64,7 @@ claw-hwp is part of a broader open-source movement around Korea's HWP formats. E
 | **[hop](https://github.com/golbin/hop)** | HWP desktop viewer (Tauri) | opening .hwp files on macOS / Linux |
 | **claw-hwp** | HWP skill for Claude/AI workflows | working on .hwp with AI — generate, summarize, edit |
 
-`rhwp` makes the whole ecosystem possible. Pick `hop` for desktop GUI, `claw-hwp` for AI-driven workflows.
+Pick `hop` for desktop GUI, `claw-hwp` for AI-driven workflows.
 
 ## Status
 
@@ -92,13 +92,13 @@ Pick the path that matches your environment. All three surfaces use the same ski
 
 ### New here? — just ask Claude (Claude Desktop, claude.ai web)
 
-Easiest path: ask Claude to install it for you. Paste this one line into any Claude chat (Desktop app or claude.ai web):
+One way: ask Claude to install it for you. Paste this one line into any Claude chat (Desktop app or claude.ai web):
 
 ```
 https://github.com/DoHyun468/claw-hwp help me install this skill
 ```
 
-Claude walks you through the steps based on your OS (Mac / Windows) and surface (app / web). You won't type a single command.
+Claude walks you through the steps based on your OS (Mac / Windows) and surface (app / web). No commands to type.
 
 <details>
 <summary>Prefer to install it by hand? (manual steps)</summary>
@@ -148,7 +148,7 @@ See `plugins/claw-hwp/skills/hwp/SKILL.md` for the full decision tree (read / cr
 
 Only the preview path differs by surface — the read/create/edit flow itself works the same everywhere. Find the row that matches your setup.
 
-### Claude Code Desktop (Code mode) — the smoothest path
+### Claude Code Desktop (Code mode)
 
 Drop a `.hwp`/`.hwpx` into chat (or just mention it by name). The rendered document opens **inline, in a pane next to your conversation** — the pane is the default and handles most of the flow. For a bigger view, side-by-side comparison, or sharing, Claude also emits an auxiliary link to the hosted viewer (<https://dohyun468.github.io/claw-hwp/>) — open it in your browser and drag the file in.
 
