@@ -108,11 +108,13 @@ See `plugins/claw-hwp/skills/hwp/SKILL.md` for the full decision tree (read / cr
 
 ## Usage by surface
 
+> This section covers only surfaces with Bash + filesystem access (Claude Code Desktop, Claude Code CLI, cowork modes). Plain chat surfaces without Bash (claude.ai web chat, Claude Desktop's non-cowork mode) can't run this skill at all — but the viewer page <https://dohyun468.github.io/claw-hwp/> itself works for anyone with a `.hwp` / `.hwpx` file (no skill/plugin install required).
+
 Only the preview path differs by surface — the read/create/edit flow itself works the same everywhere. Find the row that matches your setup.
 
 ### Claude Code Desktop (Code mode) — the smoothest path
 
-Drop a `.hwp`/`.hwpx` into chat (or just mention it by name). The rendered document opens **inline, in a pane next to your conversation** — no browser tab, no link to click. Best for quickly flipping through documents while chatting with Claude.
+Drop a `.hwp`/`.hwpx` into chat (or just mention it by name). The rendered document opens **inline, in a pane next to your conversation** — the pane is the default and handles most of the flow. For a bigger view, side-by-side comparison, or sharing, Claude also emits an auxiliary link to the hosted viewer (<https://dohyun468.github.io/claw-hwp/>) — open it in your browser and drag the file in.
 
 <!-- TODO(media): Desktop Code mode — inline preview pane screenshot/video -->
 

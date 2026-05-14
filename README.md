@@ -110,9 +110,11 @@ claude plugin install claw-hwp@claw-hwp
 
 미리보기 동작 방식만 환경마다 조금씩 다릅니다 (읽기/만들기/편집 흐름 자체는 어디서든 같음). 본인 환경에 맞는 항목을 보세요.
 
+> 이 섹션은 Bash + 파일시스템 접근이 있는 환경 (Claude Code Desktop / Claude Code CLI / cowork 모드) 만 다룹니다. Bash 가 없는 일반 chat (claude.ai 웹 chat, Claude Desktop 의 비-cowork 모드) 에서는 이 스킬 자체가 실행되지 않습니다 — 단, 미리보기 페이지 <https://dohyun468.github.io/claw-hwp/> 자체는 누구나 `.hwp` / `.hwpx` 파일만 있으면 브라우저에서 바로 쓸 수 있습니다 (스킬/플러그인 설치 불필요).
+
 ### Claude Code Desktop (Code 모드) — 가장 매끄러운 경험
 
-`.hwp`/`.hwpx` 파일을 채팅에 드롭하거나 파일 이름을 언급하면 됩니다. 렌더된 문서가 **대화 옆 패널에 인라인으로** 열립니다 — 브라우저 탭도, 클릭할 링크도 없습니다. 대화하면서 문서를 빠르게 넘겨볼 때 가장 편합니다.
+`.hwp`/`.hwpx` 파일을 채팅에 드롭하거나 파일 이름을 언급하면 됩니다. 렌더된 문서가 **대화 옆 패널에 인라인으로** 열립니다 — 기본은 패널 안에서 끝납니다. 큰 화면 / 사이드-바이-사이드 비교 / 다른 사람한테 공유가 필요하면 같이 emit 되는 웹 뷰어 링크 (<https://dohyun468.github.io/claw-hwp/>) 로 브라우저에서 열어 드래그 드롭하면 됩니다. 대화하면서 문서를 빠르게 넘겨볼 때 가장 편합니다.
 
 <!-- TODO(media): Desktop Code 모드 — 인라인 미리보기 패널 스크린샷/영상 -->
 

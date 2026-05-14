@@ -176,6 +176,14 @@ Lifecycle — the viewer is a long-lived page in a long-lived pane. You do NOT s
 
 Stuck pane recovery — when `preview_start` returns `reused: true` but nothing is visible (the prior pane was closed/hidden), hard-reset: `preview_stop` → `preview_start` → `preview_eval`. Don't ask the user, just do it.
 
+Pair with hosted-viewer link — after the inline pane is up, append a single auxiliary line so the user has a one-click escape to a full browser window (bigger view, side-by-side compare, easy sharing). The pane stays the primary path; this just gives them options:
+
+```
+큰 화면이나 공유가 필요하면 [브라우저에서 열기](https://dohyun468.github.io/claw-hwp/) — 파일을 끌어 놓으세요.
+```
+
+Don't repeat the link on every preview swap inside the same conversation — once per session is enough.
+
 #### Self-host link path (Claude Code CLI, local-bash API setups)
 
 No host-managed pane available, but Bash can reach the user's localhost. Health-check first; if dead, start it yourself — never ask the user to run anything.
