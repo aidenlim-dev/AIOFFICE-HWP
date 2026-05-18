@@ -193,8 +193,6 @@ MIT — [LICENSE](LICENSE) 참조. Copyright © 2026 RECON Labs Inc.
   </a>
 </p>
 
-<h3 align="center"><a href="https://www.reconlabs.ai/">RECON Labs</a> 에서 만들고 유지보수합니다</h3>
-
 <p align="center">
   Generative-AI 3D 콘텐츠 플랫폼 — <a href="https://www.reconlabs.ai/">reconlabs.ai</a> · <a href="https://github.com/RECON-Labs-Inc">@RECON-Labs-Inc</a>
 </p>
