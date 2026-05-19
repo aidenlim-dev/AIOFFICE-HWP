@@ -8,7 +8,47 @@ license: MIT
 
 This skill helps Claude work with Korean Hangul Word Processor documents — reading, creating, and editing both the binary `.hwp` (HWP 5.0) and the ZIP-based `.hwpx` formats.
 
-## Hancom Docs compatibility (1.4.0)
+## 🎯 Filling in an existing form (READ THIS FIRST)
+
+By a wide margin the most common task on this skill is **"fill in this Hangul form for me"** — the user hands you an existing `.hwp` (often empty-looking) and asks to add a row, complete a field, or update a number. This section is the *only* correct flow for that task. Every other branch below is for less common cases.
+
+**Trigger phrases (Korean / English):**
+
+> 양식 채워줘 · 양식 작성해줘 · 이 표에 N 채워줘 · 보고서 양식에 X 추가해줘 ·
+> "fill in this form" · "add to this report" · "complete this template" ·
+> "이번 주 일정 채워줘" · "셀에 Y 넣어줘"
+
+**Heuristic for recognising a form (do this before deciding the flow):**
+
+- Filename contains: `양식`, `template`, `보고서`, `계약서`, `공문`, `신청서`, `계획서`, or `_form` / `_template`
+- `extract_text.js` returns mostly empty lines (or just headings), but the file is not zero-bytes
+- `extract_text.js --inspect` reports `tableCount >= 1`
+
+If ANY of these hits, treat the file as a form. Skip the rest of the decision tree and follow steps 1–3 below.
+
+**Steps:**
+
+1. **Probe the form's tables (rhwp inspect) — do NOT extract_text or hwpx-convert for analysis.**
+   `extract_text.js` cannot read text inside `<hp:tbl>` cells (rhwp returns the body paragraph only). An "empty" extract_text result on a form does NOT mean the form is empty — it means the cells are unreadable through that API. Likewise `convert.js` drops tables entirely on hwp→hwpx, so converting to inspect the structure destroys the very thing you need to inspect.
+
+   Use the rhwp probe in Path B step 2 instead. It tells you `(section, paragraph, control, row, col)` for every cell in every table.
+
+2. **Edit with `set_cell_text` or `set_cell_text_by_label` ONLY.**
+   These ops route through the raw-patch path (see "Hancom Docs compatibility" below) and preserve the form's layout, fonts, header art, signature blocks, and page numbering exactly. The user gets a file they can open in Hancom Docs (cloud) and share.
+
+   Do NOT mix in `append_paragraph` / `append_heading` / `append_table` / `replace_text` etc. Mixed payloads silently fall back to the rhwp emit path, which produces files Hancom Docs cloud refuses to open. If the user really needs both kinds of edits, run two separate `create.js` calls and tell them the second output is Hancom-Office-Desktop-only.
+
+3. **Verify the response shows `"mode": "raw-patch"`** in the JSON output. Then `preview_start` / `preview_eval` to show the result. If the user is going to share via Hancom Docs, the raw-patch mode is required.
+
+**Things to NEVER do when filling in a form** (these are the recurring failure modes — every one of these has burned this skill in a past session):
+
+- ❌ `node convert.js form.hwp form.hwpx` to "analyse the structure" — drops every table, you'll never find the cells.
+- ❌ Conclude "the form is empty" from `extract_text.js` output. Form cells are systematically invisible to that tool.
+- ❌ Read `convert.js` output XML and try to plan edits from there — the XML is missing the tables.
+- ❌ `create.js` with `setup_document` as the first op — that emits a fresh blank document and overwrites the form.
+- ❌ Edit a copy named `*_filled.hwp` / `*_v2.hwp` from scratch — the user wanted in-place edits, not a new file with the same content shape.
+
+## Hancom Docs compatibility
 
 `set_cell_text` / `set_cell_text_by_label` on an existing `.hwp` use a **raw-patch** path that never calls `rhwp.exportHwp()`. The output keeps the original CFB layout (no `Sh33tJ5` fingerprint, original directory order) and **opens in Hancom Docs cloud**.
 
@@ -16,11 +56,13 @@ The raw-patch path is taken automatically when **every op in the payload is `set
 
 If you need a Hancom-Docs-compatible result, split the work: one call that only edits cells, separate calls for other op types (paragraph append, etc.).
 
-## ⚠️ Hard rules (read first)
+## ⚠️ Hard rules
 
 > **Default to in-place editing when the user asks to fill in / add to / modify an EXISTING `.hwp` or `.hwpx` form.** `create.js` from scratch destroys the form's layout, fonts, header art, signature blocks, and page numbering — which is almost never what the user wanted when they sent you a template. Reach for `set_cell_text*` (see Path B) first.
 >
 > **`replace_text` reporting 0 matches is NOT a "can't edit" signal — it's a "the anchor is inside a table" signal.** rhwp's `searchText` does not enter `<hp:tbl>`. The correct next step is `set_cell_text_by_label`, not regeneration. See Path B.
+>
+> **Do NOT use `convert.js` (.hwp → .hwpx) for *analysis*.** The conversion drops every table — by the time you `unpack.py` the result, the form's cells you wanted to inspect are gone. Convert.js is only for *delivering* output to a user who explicitly asked for `.hwpx`, and only when the document is text-heavy with no critical tables.
 >
 > **Before declaring a limitation, run the coordinate probe in Path B step 2.** If `getCellInfo` returns any table, you can edit those cells. The "HWPX tables are dropped by `exportHwpx()`" warning listed later applies to *conversion* and *new-document emission*, not to in-place edits.
 >
@@ -30,13 +72,14 @@ If you need a Hancom-Docs-compatible result, split the work: one call that only 
 
 | Task | Approach |
 |------|----------|
-| Read text content | `node scripts/extract_text.js <file>` — works for both .hwp and .hwpx |
+| Read text content (body paragraphs only — **misses table cells**, see ⚠️ below) | `node scripts/extract_text.js <file>` |
 | Read as markdown (preserves headings/tables) | `node scripts/extract_text.js --format markdown <file>` |
 | Inspect structure (pages, sections, tables) | `node scripts/extract_text.js --inspect <file>` |
+| **Fill in an existing form (cells)** | `set_cell_text` / `set_cell_text_by_label` op via `create.js` — see "🎯 Filling in an existing form" above |
 | Create new document from scratch | `echo '{"path":"out.hwp","operations":[...]}' \| node scripts/create.js` |
-| Edit existing `.hwpx` | unpack → edit XML directly with `Edit` tool → pack |
-| Edit existing `.hwp` (HWP 5.0 binary) | convert to `.hwpx` via `convert.js` first, then edit-as-hwpx |
-| Convert `.hwp` ↔ `.hwpx` | `node scripts/convert.js <input> <output>` |
+| Edit existing `.hwpx` body text (paragraphs, not table cells) | unpack → edit XML directly with `Edit` tool → pack |
+| Edit existing `.hwp` body text (paragraphs, not table cells) | `replace_text` op via `create.js` |
+| Convert `.hwp` ↔ `.hwpx` (delivery only, drops tables — never use for analysis) | `node scripts/convert.js <input> <output>` |
 | Validate output | `python scripts/validate.py <file.hwpx>` |
 | Preview file (Desktop = inline pane, CLI = browser link, cowork = drop-in viewer URL) | See Preview section for the surface decision rule |
 
@@ -52,6 +95,8 @@ When in doubt about format, read the first two bytes — `PK` indicates ZIP (tre
 ## Decision tree
 
 ### "Read this file" / "Summarize" / "Translate the content"
+
+> **Empty `extract_text.js` output does NOT mean the document is empty.** rhwp's text extractor reads body paragraphs but NOT text inside `<hp:tbl>` cells. A government form, a meeting-minute template, or a budget sheet will routinely look "empty" through `extract_text.js` because all the user-visible content lives in tables. If the input is a form and `extract_text.js` is empty, go to "🎯 Filling in an existing form" above — that's the case this skill handles best.
 
 ```bash
 node scripts/extract_text.js path/to/file.hwp > /tmp/text.txt

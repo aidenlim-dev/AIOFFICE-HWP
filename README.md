@@ -138,6 +138,8 @@ claude plugin install claw-hwp@claw-hwp
 
 설치 후 `.hwp` / `.hwpx` 파일을 언급하면 Claude Code 가 자동으로 스킬을 불러옵니다. 업데이트는 `claude plugin marketplace update claw-hwp`.
 
+> ⚠️ **플러그인 업데이트 후엔 새 세션을 띄워 주세요.** 진행 중인 세션은 시작 시점의 스킬 스냅샷을 계속 들고 갑니다 — cache 가 새 버전으로 올라가도 그 세션은 옛 SKILL.md / 옛 스크립트로 계속 동작합니다. 새 버전의 동작 (예: `set_cell_text*` 의 한컴독스-호환 raw-patch 경로) 을 보려면 기존 세션을 종료하고 새 세션을 여세요.
+
 > **별도 의존성 설치 불필요**. Node 의존성 (`@rhwp/core` WASM 약 5 MB, `fflate` 약 80 KB) 이 `scripts/vendor/` 에 vendoring 돼 있어, Node 18+ / Python 3.9+ 만 있으면 바로 작동합니다 — `npm install` 단계 없습니다.
 
 전체 결정 트리 (read / create / edit / convert / validate) 는 `plugins/claw-hwp/skills/hwp/SKILL.md` 를 참조하세요.
