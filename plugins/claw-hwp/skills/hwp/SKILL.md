@@ -8,6 +8,14 @@ license: MIT
 
 This skill helps Claude work with Korean Hangul Word Processor documents — reading, creating, and editing both the binary `.hwp` (HWP 5.0) and the ZIP-based `.hwpx` formats.
 
+## Hancom Docs compatibility (1.4.0)
+
+`set_cell_text` / `set_cell_text_by_label` on an existing `.hwp` use a **raw-patch** path that never calls `rhwp.exportHwp()`. The output keeps the original CFB layout (no `Sh33tJ5` fingerprint, original directory order) and **opens in Hancom Docs cloud**.
+
+The raw-patch path is taken automatically when **every op in the payload is `set_cell_text*` and the file already exists**. Mixed payloads (e.g. `set_cell_text` + `append_paragraph`) silently fall back to the regular rhwp emit path — those outputs open in Hancom Office Desktop but Hancom Docs will reject them. The `create.js` response shows `"mode": "raw-patch"` when the new path runs, so you can tell at a glance.
+
+If you need a Hancom-Docs-compatible result, split the work: one call that only edits cells, separate calls for other op types (paragraph append, etc.).
+
 ## ⚠️ Hard rules (read first)
 
 > **Default to in-place editing when the user asks to fill in / add to / modify an EXISTING `.hwp` or `.hwpx` form.** `create.js` from scratch destroys the form's layout, fonts, header art, signature blocks, and page numbering — which is almost never what the user wanted when they sent you a template. Reach for `set_cell_text*` (see Path B) first.
@@ -122,6 +130,7 @@ Inline `**bold**` and `*italic*` are parsed automatically inside `text` and tabl
 - **HWPX tables are dropped when re-emitting via `exportHwpx()`** — i.e. when converting `.hwp` → `.hwpx` or saving a fresh document as `.hwpx`. If a doc has tables, save as `.hwp`. This does **not** affect editing an existing `.hwp` in place; in-place edits via `set_cell_text*` preserve tables.
 - **HWP→HWPX downconversion is lossy** (tables, images, complex shapes). Default to `.hwp` for tables; default to `.hwpx` only when the document is text-heavy. Again, this is a *conversion* constraint, not an *edit* constraint.
 - **`replace_text` doesn't see table cells.** See the op table above and the discussion in Path B. The correct response to 0 matches is to switch to `set_cell_text_by_label`, not to regenerate the document.
+- **Hancom Docs (cloud) only accepts the raw-patch path** — see the Hancom Docs compatibility section near the top. Anything that goes through `rhwp.exportHwp()` (new document creation, mixed payloads, `convert.js` output) opens in Hancom Office Desktop but is rejected by Hancom Docs with "문서를 열 수 없습니다." If the user will share via Hancom Docs, restrict the payload to `set_cell_text*` only.
 
 ### "Edit this document" / "Replace X with Y" / "Add a new paragraph"
 

@@ -1114,6 +1114,82 @@ function applyCellText(doc, sec, para, ctrl, cellIdx, cellPara, text) {
   }
 }
 
+// ── Raw-patch helper ──────────────────────────────────────────────────────
+//
+// For the Hancom Docs raw-patch fast path. Converts each op into the shape
+// cell-patch.js expects: {section, para, control, row, col, text}. For
+// set_cell_text we already have those. For set_cell_text_by_label we open
+// rhwp briefly to find the anchor cell, then compute the target (row, col).
+async function resolveLabelEditsViaRhwp(filePath, ops) {
+  // Lazy-init rhwp once. We already loaded the WASM at module init.
+  if (typeof globalThis.measureTextWidth !== 'function') {
+    globalThis.measureTextWidth = (font, text) =>
+      text.length * (parseFloat(font) || 10) * 0.55;
+  }
+  const needsLabel = ops.some((o) => o.type === 'set_cell_text_by_label');
+  let doc = null;
+  if (needsLabel) {
+    doc = new HwpDocument(new Uint8Array(fs.readFileSync(filePath)));
+  }
+  try {
+    const out = [];
+    for (const op of ops) {
+      if (op.type === 'set_cell_text') {
+        const sec = requireInt(op, 'section');
+        const para = requireInt(op, 'para');
+        const ctrl = requireInt(op, 'control');
+        const text = op.text ?? '';
+        if (op.row != null && op.col != null) {
+          out.push({ section: sec, para, control: ctrl, row: op.row, col: op.col, text });
+        } else if (op.cell != null) {
+          // Convert flat cellIndex back to (row, col) via rhwp inspect.
+          if (!doc) doc = new HwpDocument(new Uint8Array(fs.readFileSync(filePath)));
+          const info = JSON.parse(doc.getCellInfo(sec, para, ctrl, op.cell));
+          out.push({ section: sec, para, control: ctrl, row: info.row, col: info.col, text });
+        } else {
+          throw new Error("set_cell_text: provide row+col or cell");
+        }
+        continue;
+      }
+      // set_cell_text_by_label — sweep tables, find the anchor, apply offset.
+      if (typeof op.label !== 'string' || op.label.length === 0) {
+        throw new Error("set_cell_text_by_label: 'label' is required");
+      }
+      const rowOff = op.row_offset ?? 0;
+      const colOff = op.col_offset ?? 0;
+      const occurrence = op.occurrence ?? 0;
+      const caseSensitive = !!op.case_sensitive;
+      const text = op.text ?? '';
+
+      const scoped = (op.section != null || op.para != null || op.control != null);
+      const candidates = scoped
+        ? [{ sec: requireInt(op, 'section'), para: requireInt(op, 'para'), ctrl: requireInt(op, 'control') }]
+        : enumerateTables(doc);
+
+      const hits = [];
+      for (const { sec, para, ctrl } of candidates) {
+        const grid = describeTable(doc, sec, para, ctrl);
+        if (!grid) continue;
+        for (const cell of grid.cells) {
+          const txt = caseSensitive ? cell.text : cell.text.toLowerCase();
+          const needle = caseSensitive ? op.label : op.label.toLowerCase();
+          if (txt.includes(needle)) hits.push({ sec, para, ctrl, cell });
+        }
+      }
+      if (hits.length === 0) throw new Error(`set_cell_text_by_label: no cell containing "${op.label}" found`);
+      if (occurrence >= hits.length) throw new Error(`set_cell_text_by_label: occurrence ${occurrence} out of range (${hits.length} hits)`);
+      const hit = hits[occurrence];
+      out.push({
+        section: hit.sec, para: hit.para, control: hit.ctrl,
+        row: hit.cell.row + rowOff, col: hit.cell.col + colOff, text,
+      });
+    }
+    return out;
+  } finally {
+    if (doc) { try { doc.free(); } catch { /* ignore */ } }
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 // ── HWPX picture post-patch ───────────────────────────────────────────────
@@ -1507,6 +1583,54 @@ async function readStdin() {
   if (ext !== ".hwp" && ext !== ".hwpx") {
     process.stdout.write(JSON.stringify({ status: "error", message: `path must end in .hwp or .hwpx (got ${ext})` }) + "\n");
     process.exit(1);
+  }
+
+  // ── Hancom Docs raw-patch fast path ─────────────────────────────────────
+  //
+  // rhwp.exportHwp() produces .hwp output that Hancom Office Desktop accepts
+  // but Hancom Docs (cloud) rejects with "문서를 열 수 없습니다." — the
+  // CFB layout it emits (a Sh33tJ5 fingerprint stream, reordered directory
+  // entries) trips Hancom Docs' strict parser. To stay compatible with the
+  // cloud, payloads that ONLY edit table cells of an existing .hwp skip
+  // rhwp.exportHwp() entirely and instead patch the original Section bytes
+  // surgically (see cell-patch.js).
+  //
+  // Eligibility:
+  //   - target file already exists (we need an authentic CFB to patch)
+  //   - extension is .hwp (raw-patch covers HWP 5.0 binary; hwpx goes
+  //     through the unpack/edit/pack flow elsewhere)
+  //   - every op is set_cell_text or set_cell_text_by_label
+  // Mixed payloads (set_cell_text* alongside append_*, replace_text, etc.)
+  // are NOT eligible — they fall through to the normal rhwp path and the
+  // result is Hancom-Office-only. We surface that with a log line so the
+  // caller knows their output may not open in Hancom Docs.
+  const CELL_OPS_FOR_RAW_PATCH = new Set(['set_cell_text', 'set_cell_text_by_label']);
+  const allCellOps = ops.length > 0 && ops.every((o) => CELL_OPS_FOR_RAW_PATCH.has(o.type));
+  if (ext === '.hwp' && fs.existsSync(outPath) && allCellOps) {
+    try {
+      const { patchCellsInPlace } = await import('./cell-patch.js');
+      // Resolve every op to {section, para, control, row, col, text}. For
+      // set_cell_text we already have row/col. For set_cell_text_by_label
+      // we need a one-shot rhwp inspect to find the anchor cell, then add
+      // the row/col offsets.
+      const resolvedEdits = await resolveLabelEditsViaRhwp(outPath, ops);
+      const summary = await patchCellsInPlace(outPath, resolvedEdits);
+      process.stdout.write(JSON.stringify({
+        status: 'success',
+        path: outPath,
+        bytes_written: fs.statSync(outPath).size,
+        ops_applied: summary.length,
+        mode: 'raw-patch',
+        edits: summary,
+        log: [`raw-patch path (Hancom Docs compatible) — ${summary.length} cell(s) edited`],
+      }) + "\n");
+      return;
+    } catch (err) {
+      process.stdout.write(JSON.stringify({
+        status: 'error', message: `raw-patch failed: ${err.message}`,
+      }) + "\n");
+      process.exit(1);
+    }
   }
 
   // Decide whether to start blank or load an existing file. If the path
