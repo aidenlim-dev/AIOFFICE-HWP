@@ -28,6 +28,20 @@ If ANY of these hits, treat the file as a form. Skip the rest of the decision tr
 
 **Steps:**
 
+0. **Decide where the result goes — and ASK if the user's wording is ambiguous.**
+
+   This is the single most common place where this skill goes wrong: the agent decides on the user's behalf that "원본을 보존하는 게 안전하니까 새 파일을 만들자" out of friendliness, and ends up writing a fresh blank document at `<orig>_updated.hwp` / `<orig>_filled.hwp` / `<orig>_v2.hwp` with none of the form's layout. The user wanted their form filled in, not a sidecar.
+
+   Read the user's wording carefully:
+
+   | User said | Where the result goes |
+   |-----------|----------------------|
+   | "이 파일 **고쳐줘** / **채워줘** / **추가해줘** / **수정해줘**", "여기에 적어줘", "fill in this form", "complete the template" | **In-place on the same file.** This is the default. |
+   | "**사본** 만들어줘", "**복사본**에 추가", "새 파일로 저장", "**다른 이름**으로", "copy and fill in", "save as a new file" | **New path** in the same directory, explicit. |
+   | User just sent the form and said "도와줘" / "처리해줘" / "이거 좀" / "help me with this" / etc. — no explicit verb about where to put the result | **ASK before doing anything.** One short sentence: "원본 `<filename>` 을 직접 수정할까요, 아니면 사본을 만들까요?" Wait for the answer; do not guess. |
+
+   Default to in-place. The user still has Time Machine / git / Finder undo if they want to revert. Creating sidecar files clutters the user's Downloads folder and obscures which file is the "real" one — they almost never want that unless they say so.
+
 1. **Probe the form's tables (rhwp inspect) — do NOT extract_text or hwpx-convert for analysis.**
    `extract_text.js` cannot read text inside `<hp:tbl>` cells (rhwp returns the body paragraph only). An "empty" extract_text result on a form does NOT mean the form is empty — it means the cells are unreadable through that API. Likewise `convert.js` drops tables entirely on hwp→hwpx, so converting to inspect the structure destroys the very thing you need to inspect.
 
@@ -47,6 +61,7 @@ If ANY of these hits, treat the file as a form. Skip the rest of the decision tr
 - ❌ Read `convert.js` output XML and try to plan edits from there — the XML is missing the tables.
 - ❌ `create.js` with `setup_document` as the first op on a path that already exists. As of 1.4.2 this is **enforced in code** — `create.js` rejects such payloads with a clear error that points back to `set_cell_text*`. It proceeds only if the caller adds `"allow_overwrite": true` at the top level of the payload, which is an explicit "yes, destroy the existing file" opt-in. Use that escape hatch only when the user really asked for a brand-new file at that path, never as a workaround when `set_cell_text*` looks complicated.
 - ❌ Edit a copy named `*_filled.hwp` / `*_v2.hwp` from scratch — the user wanted in-place edits, not a new file with the same content shape.
+- ❌ Decide on the user's behalf that "원본 보존이 안전하니까 새 파일을 만든다" when the prompt language (`추가해줘`, `채워줘`, `수정해줘`, `여기에 적어줘`) clearly meant in-place. Friendliness reflex that creates `<orig>_updated.hwp` is the exact failure mode that has shipped broken sidecar files to users for three releases running. If the user's wording is unambiguous, just edit in-place; if it's ambiguous, ASK (step 0).
 
 ## Hancom Docs compatibility
 
