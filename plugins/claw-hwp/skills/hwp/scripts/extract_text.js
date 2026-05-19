@@ -67,6 +67,17 @@ if (opts.help || !opts.input) {
 const inputBytes = fs.readFileSync(opts.input);
 const isHwpxZip = inputBytes[0] === 0x50 && inputBytes[1] === 0x4b; // 'PK'
 
+// For --inspect on .hwp input, count tables via rhwp wasm directly. We can't
+// reuse the hwpx-XML path here because rhwp.exportHwpx() drops every table,
+// so an inspect that goes through the hwpx zip always reports tableCount=0
+// on .hwp inputs. That made the "form has tables → use form-fill flow"
+// heuristic in SKILL.md silently misfire and convinced past agent sessions
+// that empty-looking forms were genuinely empty. We talk to rhwp directly.
+if (opts.inspect && !isHwpxZip) {
+  process.stdout.write(JSON.stringify(await inspectHwpViaRhwp(inputBytes), null, 2) + '\n');
+  process.exit(0);
+}
+
 let hwpxBytes;
 if (isHwpxZip) {
   hwpxBytes = inputBytes;
@@ -97,6 +108,60 @@ for (let i = 0; i < sectionXmls.length; i++) {
 process.stdout.write(lines.join('\n') + '\n');
 
 // ---
+
+// Count structure of a .hwp file by talking to rhwp directly, without
+// going through the lossy exportHwpx() conversion. Mirrors the table sweep
+// pattern used by create.js's enumerateTables(): walk every (section,
+// paragraph, controlIdx) triple up to MAX_CONTROL_IDX=64 and ask rhwp for
+// cell info. Breaking on the first non-table control would miss the table
+// at ctrl=3 on Korean government form cover pages (logo at 0, checkbox at
+// 1, textbox at 2, table at 3) — the exact bug we hit in 1.3.0.
+async function inspectHwpViaRhwp(bytes) {
+  const wasmPath = path.join(__dirname, 'vendor', 'rhwp', 'rhwp_bg.wasm');
+  const wasmBytes = fs.readFileSync(wasmPath);
+  const rhwp = await import('./vendor/rhwp/rhwp.js');
+  await rhwp.default({ module_or_path: wasmBytes });
+  // rhwp's layout pass calls globalThis.measureTextWidth during inspection;
+  // a cheap stub is enough for table counting.
+  if (typeof globalThis.measureTextWidth !== 'function') {
+    globalThis.measureTextWidth = (font, text) =>
+      text.length * (parseFloat(font) || 10) * 0.55;
+  }
+  const doc = new rhwp.HwpDocument(new Uint8Array(bytes));
+  try {
+    const sectionCount = doc.getSectionCount();
+    let paragraphCount = 0, tableCount = 0, cellCount = 0;
+    for (let s = 0; s < sectionCount; s++) {
+      const pc = doc.getParagraphCount(s);
+      paragraphCount += pc;
+      for (let p = 0; p < pc; p++) {
+        for (let c = 0; c < 64; c++) {
+          let info;
+          try { info = JSON.parse(doc.getCellInfo(s, p, c, 0)); } catch { continue; }
+          if (!info || typeof info.row !== 'number') continue;
+          tableCount++;
+          // Count cells in this table by walking until rhwp errors.
+          for (let i = 0; i < 10000; i++) {
+            let ci;
+            try { ci = JSON.parse(doc.getCellInfo(s, p, c, i)); } catch { break; }
+            if (!ci || typeof ci.row !== 'number') break;
+            cellCount++;
+          }
+        }
+      }
+    }
+    return {
+      fileType: 'hwp',
+      sectionCount,
+      paragraphCount,
+      tableCount,
+      cellCount,
+      imageCount: null,  // rhwp doesn't surface this directly; skip for now
+    };
+  } finally {
+    if (typeof doc.free === 'function') doc.free();
+  }
+}
 
 async function convertHwpToHwpx(bytes) {
   // Lazy-load rhwp only for binary .hwp inputs.

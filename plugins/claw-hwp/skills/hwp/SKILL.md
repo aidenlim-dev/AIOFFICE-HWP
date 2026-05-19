@@ -43,9 +43,9 @@ If ANY of these hits, treat the file as a form. Skip the rest of the decision tr
 **Things to NEVER do when filling in a form** (these are the recurring failure modes — every one of these has burned this skill in a past session):
 
 - ❌ `node convert.js form.hwp form.hwpx` to "analyse the structure" — drops every table, you'll never find the cells.
-- ❌ Conclude "the form is empty" from `extract_text.js` output. Form cells are systematically invisible to that tool.
+- ❌ Conclude "the form is empty" from `extract_text.js` output. Form cells are systematically invisible to that tool. (As of 1.4.2, `extract_text.js --inspect` reports the *real* `tableCount` for `.hwp` inputs by talking to rhwp directly, so `tableCount >= 1` is now a reliable form signal.)
 - ❌ Read `convert.js` output XML and try to plan edits from there — the XML is missing the tables.
-- ❌ `create.js` with `setup_document` as the first op — that emits a fresh blank document and overwrites the form.
+- ❌ `create.js` with `setup_document` as the first op on a path that already exists. As of 1.4.2 this is **enforced in code** — `create.js` rejects such payloads with a clear error that points back to `set_cell_text*`. It proceeds only if the caller adds `"allow_overwrite": true` at the top level of the payload, which is an explicit "yes, destroy the existing file" opt-in. Use that escape hatch only when the user really asked for a brand-new file at that path, never as a workaround when `set_cell_text*` looks complicated.
 - ❌ Edit a copy named `*_filled.hwp` / `*_v2.hwp` from scratch — the user wanted in-place edits, not a new file with the same content shape.
 
 ## Hancom Docs compatibility

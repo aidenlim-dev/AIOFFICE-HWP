@@ -1633,6 +1633,40 @@ async function readStdin() {
     }
   }
 
+  // ── Overwrite-existing-form guard ───────────────────────────────────────
+  //
+  // The single most damaging recurring failure of this skill is: agent gets
+  // an existing form, extract_text returns mostly empty (because table
+  // cells are invisible to that API), agent concludes "the form is empty",
+  // and emits `create.js` with `setup_document` as the first op — which
+  // BLOWS AWAY the original form, including its tables / header art / page
+  // numbering, and writes a brand-new bare document at the same path.
+  //
+  // SKILL.md tries to prevent this in several places, but agents still hit
+  // it in fresh sessions (snapshot races, reflex behavior, etc.). So we
+  // enforce it in code. The rule: starting with `setup_document` on a path
+  // that already exists is treated as "you are about to destroy an existing
+  // file". We refuse unless the caller passes a top-level
+  // `"allow_overwrite": true` in the payload — an explicit opt-in that
+  // surfaces in the SKILL guide for the rare cases where overwriting is
+  // genuinely intended.
+  const firstOpType = ops[0]?.type;
+  if (
+    fs.existsSync(outPath) &&
+    firstOpType === "setup_document" &&
+    !payload.allow_overwrite
+  ) {
+    process.stdout.write(JSON.stringify({
+      status: "error",
+      message:
+        `'${outPath}' already exists. Starting with 'setup_document' would overwrite the file with a brand-new blank document, destroying any form layout, tables, header art, or page numbering it contains. ` +
+        `If the user asked you to FILL IN or ADD TO this form, use set_cell_text or set_cell_text_by_label ops instead (no setup_document) — see SKILL.md "Filling in an existing form". ` +
+        `If you genuinely intend to overwrite the existing file with a brand-new one, re-send the same payload with "allow_overwrite": true at the top level.`,
+      hint: "set_cell_text* for form-fill; allow_overwrite:true to force overwrite",
+    }) + "\n");
+    process.exit(1);
+  }
+
   // Decide whether to start blank or load an existing file. If the path
   // already exists AND `setup_document` is NOT the first op, we treat it as
   // an edit-in-place. Otherwise blank.
