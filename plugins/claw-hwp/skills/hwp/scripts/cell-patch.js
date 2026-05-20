@@ -7,14 +7,29 @@
 // loading an existing file just to write one cell — picks up that
 // fingerprint and breaks the file for the cloud.
 //
-// The fix is to never re-emit via rhwp. We keep the original CFB byte-for-
-// byte and surgically patch only the affected BodyText/Section stream:
+// The first attempt at the fix (1.4.0) used sheetjs CFB.parse + CFB.write,
+// hoping the round-trip would preserve everything as long as we only patched
+// stream contents. It didn't. sheetjs's CFB.write calls seed_cfb() which
+// re-emits the "Sh33tJ5" marker stream on every save, so the output
+// was just as broken as rhwp.exportHwp() — the raw-patch path claimed
+// "Hancom Docs compatible" while producing files Hancom Docs still rejects.
 //
-//   1. CFB.parse(originalBytes) — no re-encoding
-//   2. inflate the target Section stream
-//   3. walk HWP 5.0 records to find each target cell's paragraph
-//   4. update PARA_HEADER.text_count, replace or insert PARA_TEXT bytes
-//   5. deflate, write the Section back into the same CFB, CFB.write
+// The real fix is to never re-emit the CFB at all. We:
+//
+//   1. Read the file bytes
+//   2. Parse just enough header + FAT to find the Section stream's sector
+//      chain and its directory entry's file offset
+//   3. Inflate the stream, walk HWP records to find the target cell, patch
+//      PARA_HEADER.text_count and replace/insert the PARA_TEXT record
+//   4. Re-deflate. Try compression levels until the new payload fits in
+//      the existing sector chain (no re-allocation = no FAT changes)
+//   5. Write the new deflated bytes back into the *same* sector offsets in
+//      the original buffer
+//   6. Update the directory entry's size field
+//   7. Write the buffer back to disk
+//
+// Result: every byte outside the patched Section stream is byte-identical
+// to the original. No Sh33tJ5 stream gets added. Hancom Docs accepts it.
 //
 // rhwp is still useful for *inspecting* coordinates (which paragraph holds
 // which control, which cell sits at (row, col)). We only avoid it on the
@@ -45,7 +60,11 @@ const TAG_LIST_HEADER = 0x48;
 
 const PARA_TEXT_EOP = '\r'; // HWP paragraph terminator char (U+000D)
 
-// ── Record walk ───────────────────────────────────────────────────────────
+// CFB sentinel sector values
+const ENDOFCHAIN = -2;   // 0xFFFFFFFE
+const FREESECT = -1;     // 0xFFFFFFFF
+
+// ── HWP record walk ───────────────────────────────────────────────────────
 
 function* walkRecords(raw) {
   let p = 0;
@@ -70,14 +89,13 @@ function* walkRecords(raw) {
   }
 }
 
-// Build a flat array once so we can index by record number.
 function parseRecords(raw) {
   const out = [];
   for (const r of walkRecords(raw)) out.push(r);
   return out;
 }
 
-// ── Cell location ─────────────────────────────────────────────────────────
+// ── HWP cell location ─────────────────────────────────────────────────────
 //
 // Given (sectionParaIdx, controlIdx, cellIndex) and the record array for a
 // Section stream, find the cell paragraph record cluster. Returns:
@@ -89,13 +107,6 @@ function parseRecords(raw) {
 // different offsets, and parsing each variant in pure JS is fragile.
 // rhwp's WASM parses them correctly, so we let it tell us the index and
 // then count LIST_HEADERs at the raw level.
-//
-// Algorithm:
-//   - level-0 PARA_HEADERs count up to sectionParaIdx → that's our paragraph
-//   - inside that paragraph, level-1 CTRL_HEADERs count to controlIdx
-//   - that CTRL_HEADER is the table; LIST_HEADERs at level 2 that follow
-//     until the next level≤1 record are its cells, in flat (row-major) order
-//   - the cellIndex-th LIST_HEADER is the target cell start
 
 function locateCell(records, sectionParaIdx, controlIdx, cellIndex) {
   // Find the target paragraph header (level 0)
@@ -158,7 +169,7 @@ function locateCell(records, sectionParaIdx, controlIdx, cellIndex) {
   return { listHeaderRec: cellStartRec, paraHeaderRec, paraTextRec, charShapeRec };
 }
 
-// ── Cell patching ─────────────────────────────────────────────────────────
+// ── HWP cell patching ─────────────────────────────────────────────────────
 //
 // applyCellText returns the new raw Buffer with one cell's text replaced.
 // We update PARA_HEADER.text_count and replace (or insert) the PARA_TEXT
@@ -210,12 +221,189 @@ function applyCellText(raw, records, sectionParaIdx, controlIdx, cellIndex, text
   ]);
 }
 
+// ── CFB layout (minimal, in-place) ────────────────────────────────────────
+//
+// We parse only what's needed to (a) find each Section stream's chain of
+// regular-FAT sectors and (b) locate the directory entry so we can update
+// its size field. We never re-emit; the original buffer is mutated.
+//
+// HWP 5.0 .hwp files always use the regular FAT for Section streams because
+// they're far larger than the mini-stream cutoff (4096 bytes). If a future
+// edge case puts one in the mini-stream we throw with a clear message.
+
+function parseCfbHeader(buf) {
+  if (buf.length < 512 || buf[0] !== 0xD0 || buf[1] !== 0xCF || buf[2] !== 0x11 || buf[3] !== 0xE0) {
+    throw new Error('not a CFB (Compound File Binary) container');
+  }
+  const mver = buf.readUInt16LE(0x1A);
+  const sectorShift = buf.readUInt16LE(0x1E);
+  const ssz = 1 << sectorShift;
+  if (mver !== 3 && mver !== 4) throw new Error(`unsupported CFB major version: ${mver}`);
+  if ((mver === 3 && ssz !== 512) || (mver === 4 && ssz !== 4096)) {
+    throw new Error(`CFB sector size ${ssz} inconsistent with version ${mver}`);
+  }
+  const dirStart = buf.readInt32LE(0x30);
+  const difatStart = buf.readInt32LE(0x44);
+  const difatCount = buf.readInt32LE(0x48);
+
+  // Collect FAT sector indices: first 109 are in the header, the rest live
+  // in DIFAT sectors chained together.
+  const fatAddrs = [];
+  for (let i = 0; i < 109; i++) {
+    const sec = buf.readInt32LE(0x4C + i * 4);
+    if (sec === FREESECT) break;
+    fatAddrs.push(sec);
+  }
+  let difatSec = difatStart;
+  let guard = 0;
+  while (difatSec >= 0 && difatSec !== ENDOFCHAIN && guard++ < difatCount + 1) {
+    const off = (difatSec + 1) * ssz;
+    const entriesPerSec = (ssz >>> 2) - 1; // last u32 chains to next DIFAT sec
+    for (let i = 0; i < entriesPerSec; i++) {
+      const sec = buf.readInt32LE(off + i * 4);
+      if (sec === FREESECT) break;
+      fatAddrs.push(sec);
+    }
+    difatSec = buf.readInt32LE(off + (ssz - 4));
+  }
+  return { mver, ssz, dirStart, fatAddrs };
+}
+
+// Read the entire FAT as a flat array of i32 entries by concatenating every
+// FAT sector in order. fat[i] = next sector after i (or ENDOFCHAIN, etc).
+function readFat(buf, fatAddrs, ssz) {
+  const entriesPerSec = ssz >>> 2;
+  const fat = new Int32Array(fatAddrs.length * entriesPerSec);
+  for (let s = 0; s < fatAddrs.length; s++) {
+    const sec = fatAddrs[s];
+    const off = (sec + 1) * ssz;
+    for (let i = 0; i < entriesPerSec; i++) {
+      fat[s * entriesPerSec + i] = buf.readInt32LE(off + i * 4);
+    }
+  }
+  return fat;
+}
+
+// Walk a sector chain in the FAT, starting at `start`.
+function walkChain(fat, start) {
+  const chain = [];
+  let cur = start;
+  while (cur >= 0 && cur !== ENDOFCHAIN) {
+    chain.push(cur);
+    if (chain.length > fat.length) throw new Error('FAT chain longer than total sector count (cycle?)');
+    cur = fat[cur];
+  }
+  return chain;
+}
+
+// Slice the file bytes that belong to a sector chain, taking `size` bytes
+// from the front (the rest of the last sector is allocated slack).
+function readChainBytes(buf, chain, ssz, size) {
+  const out = Buffer.alloc(size);
+  let written = 0;
+  for (const sec of chain) {
+    if (written >= size) break;
+    const off = (sec + 1) * ssz;
+    const take = Math.min(ssz, size - written);
+    buf.copy(out, written, off, off + take);
+    written += take;
+  }
+  return out;
+}
+
+// Write `data` into the sector chain in `buf`. Requires data.length <=
+// chain.length * ssz. Pads the final sector with zeros so allocated slack
+// is clean — this isn't strictly required by readers, which respect the
+// size field, but matches the on-disk layout other CFB tools produce.
+function writeChainBytes(buf, chain, ssz, data) {
+  if (data.length > chain.length * ssz) {
+    throw new Error(`stream of ${data.length} bytes does not fit in ${chain.length} sectors (${chain.length * ssz} bytes). In-place patch cannot expand sector chains.`);
+  }
+  let written = 0;
+  for (const sec of chain) {
+    const off = (sec + 1) * ssz;
+    if (written >= data.length) {
+      buf.fill(0, off, off + ssz);
+      continue;
+    }
+    const take = Math.min(ssz, data.length - written);
+    data.copy(buf, off, written, written + take);
+    written += take;
+    if (take < ssz) {
+      // Last data-bearing sector: zero out the slack.
+      buf.fill(0, off + take, off + ssz);
+    }
+  }
+}
+
+// Parse the directory entry chain into a list of records. For each entry
+// we record the *file offset* of its 128-byte slot so we can mutate the
+// size field later without re-emitting anything. Returns:
+//   { entries: [{name, type, child, leftSibling, rightSibling, start, size,
+//                 entryFileOffset}], dirChain }
+function readDirectory(buf, fat, ssz, dirStart) {
+  const dirChain = walkChain(fat, dirStart);
+  const slotsPerSector = ssz >>> 7; // 128 bytes per entry
+  const entries = [];
+  for (let s = 0; s < dirChain.length; s++) {
+    const sectorFileOff = (dirChain[s] + 1) * ssz;
+    for (let i = 0; i < slotsPerSector; i++) {
+      const entryFileOffset = sectorFileOff + i * 128;
+      const namelen = buf.readUInt16LE(entryFileOffset + 0x40);
+      const type = buf.readUInt8(entryFileOffset + 0x42);
+      // Skip unused entries (type 0) but keep their slot index for indexing.
+      let name = '';
+      if (namelen > 0) {
+        const nameBytes = buf.slice(entryFileOffset, entryFileOffset + Math.max(0, namelen - 2));
+        name = nameBytes.toString('utf16le');
+      }
+      const leftSibling = buf.readInt32LE(entryFileOffset + 0x44);
+      const rightSibling = buf.readInt32LE(entryFileOffset + 0x48);
+      const child = buf.readInt32LE(entryFileOffset + 0x4C);
+      const start = buf.readInt32LE(entryFileOffset + 0x74);
+      const size = buf.readUInt32LE(entryFileOffset + 0x78);
+      entries.push({
+        name, type, leftSibling, rightSibling, child, start, size,
+        entryFileOffset,
+      });
+    }
+  }
+  return { entries, dirChain };
+}
+
+// Find a stream by hierarchical path like "BodyText/Section0". We walk the
+// red-black tree rooted at each storage's child to find the entry by name.
+function findStreamEntry(entries, pathParts) {
+  // Root entry is always at index 0 with type 5.
+  let cur = entries[0];
+  for (const part of pathParts) {
+    // Children of `cur` are reachable via cur.child as a binary tree root.
+    // Each tree node has leftSibling / rightSibling pointers to other
+    // entries at the same level. Names are compared case-insensitively per
+    // CFB rules, but for our use everything is ASCII so we can use exact
+    // match.
+    let node = cur.child >= 0 ? entries[cur.child] : null;
+    let found = null;
+    const queue = node ? [node] : [];
+    const visited = new Set();
+    while (queue.length && !found) {
+      const n = queue.shift();
+      if (visited.has(n.entryFileOffset)) continue;
+      visited.add(n.entryFileOffset);
+      if (n.name === part) { found = n; break; }
+      if (n.leftSibling >= 0) queue.push(entries[n.leftSibling]);
+      if (n.rightSibling >= 0) queue.push(entries[n.rightSibling]);
+    }
+    if (!found) throw new Error(`CFB directory entry not found: ${pathParts.join('/')} (looking for "${part}" inside "${cur.name}")`);
+    cur = found;
+  }
+  return cur;
+}
+
 // ── Public entry ──────────────────────────────────────────────────────────
 //
 // patchCellsInPlace(filePath, edits) edits = [{ section, para, control, row, col, text }, ...]
-// Mutates the file at filePath. Returns a summary.
-// We require the CFB vendor and rhwp WASM only if cell index disambiguation
-// is needed; for direct (row, col) patches we walk records ourselves.
+// Mutates the file at filePath. Returns a summary array.
 
 // Resolve (section, para, control, row, col) → cellIndex via rhwp inspect.
 // We open the doc, walk getCellInfo until we find the matching (row, col),
@@ -259,14 +447,33 @@ async function resolveCellIndexes(filePath, edits) {
   }
 }
 
-export async function patchCellsInPlace(filePath, edits) {
-  const CFB = await import(`${__dirname}/vendor/cfb/cfb.js`);
+// Try deflating at successively higher levels to find one that fits within
+// `capacity` bytes. We start at the default (6) because for typical HWP
+// content it matches the original size well; if the patched content grew,
+// stronger compression usually claws back the difference.
+function deflateToFit(data, capacity) {
+  const levels = [
+    constants.Z_DEFAULT_COMPRESSION,
+    7, 8, 9,
+  ];
+  let best = null;
+  for (const level of levels) {
+    const out = deflateRawSync(data, { level });
+    if (out.length <= capacity) return out;
+    if (!best || out.length < best.length) best = out;
+  }
+  throw new Error(`deflated payload (${best.length} bytes, best of attempted levels) exceeds sector chain capacity (${capacity} bytes). Patch cannot expand sectors in-place; refusing to overflow.`);
+}
 
+export async function patchCellsInPlace(filePath, edits) {
   // Step 1: resolve cell coordinates to flat cell indices via rhwp.
   const resolved = await resolveCellIndexes(filePath, edits);
 
-  // Step 2: open the original CFB and patch the bytes directly.
-  const cfb = CFB.parse(readFileSync(filePath));
+  // Step 2: load the file and parse just enough CFB to locate streams.
+  const buf = readFileSync(filePath);
+  const { ssz, dirStart, fatAddrs } = parseCfbHeader(buf);
+  const fat = readFat(buf, fatAddrs, ssz);
+  const { entries } = readDirectory(buf, fat, ssz, dirStart);
 
   // Group edits by section to amortise inflate/deflate per stream.
   const bySection = new Map();
@@ -278,10 +485,18 @@ export async function patchCellsInPlace(filePath, edits) {
 
   const summary = [];
   for (const [secIdx, secEdits] of bySection) {
-    const streamPath = `Root Entry/BodyText/Section${secIdx}`;
-    const fileIdx = cfb.FullPaths.indexOf(streamPath);
-    if (fileIdx < 0) throw new Error(`stream not found: ${streamPath}`);
-    let raw = Buffer.from(inflateRawSync(Buffer.from(cfb.FileIndex[fileIdx].content)));
+    const dirEntry = findStreamEntry(entries, ['BodyText', `Section${secIdx}`]);
+    if (dirEntry.size < 4096) {
+      // Section streams in real HWP files are always > 4096 bytes (they're
+      // in the regular FAT, not the mini-stream). If we ever hit a tiny one
+      // we'd need to handle mini-stream patching too; bail with a clear
+      // message rather than corrupt the file.
+      throw new Error(`Section${secIdx} is in the mini-stream (size=${dirEntry.size}); mini-stream patch path not implemented`);
+    }
+    const chain = walkChain(fat, dirEntry.start);
+    const capacity = chain.length * ssz;
+    const compressed = readChainBytes(buf, chain, ssz, dirEntry.size);
+    let raw = Buffer.from(inflateRawSync(compressed));
 
     // Apply edits back-to-front in record order so byte offsets stay valid.
     // We re-parse records before each apply because record offsets shift
@@ -298,11 +513,16 @@ export async function patchCellsInPlace(filePath, edits) {
       });
     }
 
-    const compressed = deflateRawSync(raw, { level: constants.Z_DEFAULT_COMPRESSION });
-    cfb.FileIndex[fileIdx].content = compressed;
-    cfb.FileIndex[fileIdx].size = compressed.length;
+    // Deflate; retry at higher levels if the default overflows the chain.
+    const newCompressed = deflateToFit(raw, capacity);
+    writeChainBytes(buf, chain, ssz, newCompressed);
+
+    // Update the size field in the directory entry. CFB v3 stores u64 but
+    // only the low 32 bits are meaningful (file sizes are bounded by u32).
+    buf.writeUInt32LE(newCompressed.length, dirEntry.entryFileOffset + 0x78);
+    buf.writeUInt32LE(0, dirEntry.entryFileOffset + 0x7C);
   }
 
-  writeFileSync(filePath, CFB.write(cfb, { type: 'buffer' }));
+  writeFileSync(filePath, buf);
   return summary;
 }
