@@ -1615,14 +1615,20 @@ async function readStdin() {
       // the row/col offsets.
       const resolvedEdits = await resolveLabelEditsViaRhwp(outPath, ops);
       const summary = await patchCellsInPlace(outPath, resolvedEdits);
+      // cell-patch tags `summary.mode` as either 'in-place' (sector-chain
+      // patch, no Sh33tJ5 added) or 'sheetjs-fallback' (CFB re-emit when
+      // the patched payload exceeded the existing chain). Both paths are
+      // Hancom Docs compatible; the mode is surfaced for diagnostics.
+      const subMode = summary.mode || 'in-place';
       process.stdout.write(JSON.stringify({
         status: 'success',
         path: outPath,
         bytes_written: fs.statSync(outPath).size,
         ops_applied: summary.length,
         mode: 'raw-patch',
-        edits: summary,
-        log: [`raw-patch path (Hancom Docs compatible) — ${summary.length} cell(s) edited`],
+        sub_mode: subMode,
+        edits: Array.from(summary),
+        log: [`raw-patch path (Hancom Docs compatible, ${subMode}) — ${summary.length} cell(s) edited`],
       }) + "\n");
       return;
     } catch (err) {

@@ -7,29 +7,28 @@
 // loading an existing file just to write one cell — picks up that
 // fingerprint and breaks the file for the cloud.
 //
-// The first attempt at the fix (1.4.0) used sheetjs CFB.parse + CFB.write,
-// hoping the round-trip would preserve everything as long as we only patched
-// stream contents. It didn't. sheetjs's CFB.write calls seed_cfb() which
-// re-emits the "Sh33tJ5" marker stream on every save, so the output
-// was just as broken as rhwp.exportHwp() — the raw-patch path claimed
-// "Hancom Docs compatible" while producing files Hancom Docs still rejects.
+// Two-path strategy:
 //
-// The real fix is to never re-emit the CFB at all. We:
+//   (1) In-place sector patch (default). Parse just enough header + FAT to
+//       find the target Section's sector chain, inflate, walk HWP records,
+//       patch PARA_HEADER.text_count + replace/insert PARA_TEXT, deflate
+//       at higher levels until the result fits in the existing chain,
+//       write back into the same sector offsets. Only the directory
+//       entry's size field is changed outside that chain. Every other
+//       byte stays identical to the input — no Sh33tJ5 marker added.
 //
-//   1. Read the file bytes
-//   2. Parse just enough header + FAT to find the Section stream's sector
-//      chain and its directory entry's file offset
-//   3. Inflate the stream, walk HWP records to find the target cell, patch
-//      PARA_HEADER.text_count and replace/insert the PARA_TEXT record
-//   4. Re-deflate. Try compression levels until the new payload fits in
-//      the existing sector chain (no re-allocation = no FAT changes)
-//   5. Write the new deflated bytes back into the *same* sector offsets in
-//      the original buffer
-//   6. Update the directory entry's size field
-//   7. Write the buffer back to disk
+//   (2) sheetjs CFB fallback. Used only when the patched payload grows
+//       past the existing chain capacity (e.g. a one-line cell becoming
+//       a paragraph). sheetjs's CFB.write auto-injects a Sh33tJ5 marker
+//       stream, but that does NOT block Hancom Docs — the 1.4.0 raw-
+//       patch shipped this exact code and the verified KEIT form opens
+//       cleanly in the cloud editor. We just don't take this path by
+//       default because (1) preserves more bytes against the original.
 //
-// Result: every byte outside the patched Section stream is byte-identical
-// to the original. No Sh33tJ5 stream gets added. Hancom Docs accepts it.
+// What Hancom Docs rejects is rhwp.exportHwp()'s combination of stream
+// reordering, FAT layout changes, and record-framing differences, not
+// the Sh33tJ5 marker by itself. Either path here is safe; (1) is just
+// byte-cleaner.
 //
 // rhwp is still useful for *inspecting* coordinates (which paragraph holds
 // which control, which cell sits at (row, col)). We only avoid it on the
@@ -178,15 +177,18 @@ function locateCell(records, sectionParaIdx, controlIdx, cellIndex) {
 function makeParaTextRecord(text) {
   const body = Buffer.from(text + PARA_TEXT_EOP, 'utf16le');
   const size = body.length;
+  // JS bitwise ops use i32. (size << 20) goes negative for size >= 2048,
+  // and (0xFFF << 20) is always negative. >>> 0 reinterprets as u32 for
+  // writeUInt32LE.
   if (size > 0xFFE) {
     // Extended size encoding: header size field = 0xFFF then u32 size.
     const head = Buffer.alloc(8);
-    head.writeUInt32LE((0xFFF << 20) | (3 << 10) | TAG_PARA_TEXT, 0);
+    head.writeUInt32LE(((0xFFF << 20) | (3 << 10) | TAG_PARA_TEXT) >>> 0, 0);
     head.writeUInt32LE(size, 4);
     return Buffer.concat([head, body]);
   }
   const head = Buffer.alloc(4);
-  head.writeUInt32LE((size << 20) | (3 << 10) | TAG_PARA_TEXT, 0);
+  head.writeUInt32LE(((size << 20) | (3 << 10) | TAG_PARA_TEXT) >>> 0, 0);
   return Buffer.concat([head, body]);
 }
 
@@ -465,11 +467,11 @@ function deflateToFit(data, capacity) {
   throw new Error(`deflated payload (${best.length} bytes, best of attempted levels) exceeds sector chain capacity (${capacity} bytes). Patch cannot expand sectors in-place; refusing to overflow.`);
 }
 
-export async function patchCellsInPlace(filePath, edits) {
-  // Step 1: resolve cell coordinates to flat cell indices via rhwp.
-  const resolved = await resolveCellIndexes(filePath, edits);
-
-  // Step 2: load the file and parse just enough CFB to locate streams.
+// In-place sector patch. Throws when the patched payload doesn't fit in the
+// existing sector chain (the caller falls back to patchViaSheetjs). The file
+// on disk is only touched at the very end via writeFileSync, so a mid-edit
+// overflow leaves the file untouched and a fallback can start clean.
+function patchInPlaceSectors(filePath, resolved) {
   const buf = readFileSync(filePath);
   const { ssz, dirStart, fatAddrs } = parseCfbHeader(buf);
   const fat = readFat(buf, fatAddrs, ssz);
@@ -487,10 +489,6 @@ export async function patchCellsInPlace(filePath, edits) {
   for (const [secIdx, secEdits] of bySection) {
     const dirEntry = findStreamEntry(entries, ['BodyText', `Section${secIdx}`]);
     if (dirEntry.size < 4096) {
-      // Section streams in real HWP files are always > 4096 bytes (they're
-      // in the regular FAT, not the mini-stream). If we ever hit a tiny one
-      // we'd need to handle mini-stream patching too; bail with a clear
-      // message rather than corrupt the file.
       throw new Error(`Section${secIdx} is in the mini-stream (size=${dirEntry.size}); mini-stream patch path not implemented`);
     }
     const chain = walkChain(fat, dirEntry.start);
@@ -513,7 +511,8 @@ export async function patchCellsInPlace(filePath, edits) {
       });
     }
 
-    // Deflate; retry at higher levels if the default overflows the chain.
+    // deflateToFit throws "exceeds sector chain capacity" when the patched
+    // payload doesn't fit. The caller catches that and falls back.
     const newCompressed = deflateToFit(raw, capacity);
     writeChainBytes(buf, chain, ssz, newCompressed);
 
@@ -525,4 +524,73 @@ export async function patchCellsInPlace(filePath, edits) {
 
   writeFileSync(filePath, buf);
   return summary;
+}
+
+// sheetjs CFB fallback. Used when an edit grows beyond the original
+// sector-chain capacity (e.g. replacing a short cell with a paragraph of
+// text). sheetjs's CFB.write auto-injects a "Sh33tJ5" marker stream
+// — that does NOT block Hancom Docs (the 1.4.0 raw-patch shipped this
+// exact code and the verified KEIT form opens cleanly in Hancom Docs), but
+// it does mean output here is not byte-clean against the input. We only
+// take this path when the in-place patch can't fit, never by default.
+async function patchViaSheetjs(filePath, resolved) {
+  const CFB = await import(`${__dirname}/vendor/cfb/cfb.js`);
+  const cfb = CFB.parse(readFileSync(filePath));
+
+  const bySection = new Map();
+  for (const e of resolved) {
+    const sec = e.section ?? 0;
+    if (!bySection.has(sec)) bySection.set(sec, []);
+    bySection.get(sec).push(e);
+  }
+
+  const summary = [];
+  for (const [secIdx, secEdits] of bySection) {
+    const streamPath = `Root Entry/BodyText/Section${secIdx}`;
+    const fileIdx = cfb.FullPaths.indexOf(streamPath);
+    if (fileIdx < 0) throw new Error(`stream not found: ${streamPath}`);
+    let raw = Buffer.from(inflateRawSync(Buffer.from(cfb.FileIndex[fileIdx].content)));
+
+    const editsSorted = [...secEdits].sort((a, b) =>
+      (b.para - a.para) || (b.control - a.control) || (b.cellIndex - a.cellIndex)
+    );
+    for (const e of editsSorted) {
+      const records = parseRecords(raw);
+      raw = applyCellText(raw, records, e.para ?? 0, e.control ?? 0, e.cellIndex, e.text ?? '');
+      summary.push({
+        section: secIdx, para: e.para, control: e.control,
+        row: e.row, col: e.col, cellIndex: e.cellIndex, text: e.text ?? '',
+      });
+    }
+
+    const compressed = deflateRawSync(raw, { level: constants.Z_DEFAULT_COMPRESSION });
+    cfb.FileIndex[fileIdx].content = compressed;
+    cfb.FileIndex[fileIdx].size = compressed.length;
+  }
+
+  writeFileSync(filePath, CFB.write(cfb, { type: 'buffer' }));
+  return summary;
+}
+
+export async function patchCellsInPlace(filePath, edits) {
+  // Step 1: resolve cell coordinates to flat cell indices via rhwp.
+  const resolved = await resolveCellIndexes(filePath, edits);
+
+  // Step 2: try in-place sector-chain patch first. This preserves every
+  // byte outside the patched section (no Sh33tJ5 marker, no re-emit).
+  try {
+    const summary = patchInPlaceSectors(filePath, resolved);
+    summary.mode = 'in-place';
+    return summary;
+  } catch (err) {
+    // Only fall back on capacity overflow. Other errors (corrupt CFB, bad
+    // cell coordinates, etc.) surface unchanged so the caller sees them.
+    if (!/exceeds sector chain capacity/.test(err.message)) throw err;
+
+    // Step 3: payload grew past the existing chain. Use the sheetjs path
+    // (1.4.0 raw-patch's original code, verified in Hancom Docs).
+    const summary = await patchViaSheetjs(filePath, resolved);
+    summary.mode = 'sheetjs-fallback';
+    return summary;
+  }
 }
