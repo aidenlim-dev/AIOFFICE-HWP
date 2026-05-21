@@ -701,3 +701,164 @@ export async function patchCellsInPlace(filePath, edits) {
     return summary;
   }
 }
+
+// ── replace_text raw-patch (Phase 1: equal-length only) ───────────────────
+//
+// Finds `query` inside any body PARA_TEXT record (level-1) and rewrites
+// those bytes to `replacement` directly. PARA_TEXT body is UTF-16LE so the
+// search is byte-level on the encoded form, which keeps surrogate pairs
+// and HWP inline-control codes intact.
+//
+// This first cut only handles `Buffer.byteLength(query, 'utf16le') ===
+// Buffer.byteLength(replacement, 'utf16le')` — same encoded length. Under
+// that constraint:
+//   - PARA_TEXT record header (size field) is unchanged
+//   - PARA_HEADER text_count is unchanged
+//   - PARA_CHAR_SHAPE charPos entries stay valid (no position shift)
+// so the only mutation is the bytes inside the existing PARA_TEXT body.
+//
+// Different-length replacements need char_shape shifting + PARA_TEXT
+// header rewriting (extended size encoding crossover) + PARA_HEADER
+// text_count update. That comes in the next phase.
+//
+// Only body paragraphs (PARA_HEADER level 0, PARA_TEXT level 1) are
+// searched. Table cell text is invisible to this op — same as rhwp's
+// replaceOne and SKILL.md docs the constraint. Use set_cell_text* for
+// cells.
+
+function findReplaceTextTarget(records, raw, query, caseSensitive) {
+  const queryBuf = Buffer.from(query, 'utf16le');
+  const queryLower = query.toLowerCase();
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i];
+    if (r.tag !== TAG_PARA_TEXT || r.level !== 1) continue;
+    const body = raw.slice(r.dataOff, r.dataOff + r.size);
+    let byteOffset;
+    if (caseSensitive) {
+      byteOffset = body.indexOf(queryBuf);
+    } else {
+      const bodyStr = body.toString('utf16le').toLowerCase();
+      const charIdx = bodyStr.indexOf(queryLower);
+      byteOffset = charIdx >= 0 ? charIdx * 2 : -1;
+    }
+    if (byteOffset >= 0) {
+      return { paraTextRecIdx: i, paraTextRec: r, byteOffset };
+    }
+  }
+  return null;
+}
+
+function applyReplaceTextEqualLength(raw, op) {
+  const queryBuf = Buffer.from(op.query, 'utf16le');
+  const replBuf = Buffer.from(op.replacement ?? '', 'utf16le');
+  if (queryBuf.length !== replBuf.length) {
+    // Different-length replacements are Phase 2. Signal a clear error.
+    throw new Error(`replace_text different-length (query ${queryBuf.length}B, replacement ${replBuf.length}B): not yet supported in raw-patch path`);
+  }
+  const records = parseRecords(raw);
+  const caseSensitive = op.case_sensitive !== false;
+  const target = findReplaceTextTarget(records, raw, op.query, caseSensitive);
+  if (!target) return { raw, replaced: false };
+  // In-place byte swap.
+  replBuf.copy(raw, target.paraTextRec.dataOff + target.byteOffset);
+  return { raw, replaced: true };
+}
+
+export async function replaceTextInPlace(filePath, ops) {
+  if (!Array.isArray(ops) || ops.length === 0) {
+    return Object.assign([], { mode: 'in-place', replaced_count: 0 });
+  }
+  // Validate ops up front — surface "different length" before we touch the
+  // file, so a partial run can't leave the file partially patched.
+  for (const op of ops) {
+    if (typeof op.query !== 'string' || op.query.length === 0) {
+      throw new Error("replace_text: 'query' is required");
+    }
+    const replacement = op.replacement ?? '';
+    if (/[\n\r]/.test(replacement) || replacement.indexOf('\u2028') !== -1 || replacement.indexOf('\u2029') !== -1) {
+      throw new Error("replace_text: replacement cannot contain paragraph-break characters");
+    }
+    const qLen = Buffer.byteLength(op.query, 'utf16le');
+    const rLen = Buffer.byteLength(replacement, 'utf16le');
+    if (qLen !== rLen) {
+      throw new Error(`replace_text different-length (query ${qLen}B, replacement ${rLen}B): not yet supported in raw-patch path`);
+    }
+  }
+
+  const buf = readFileSync(filePath);
+  const { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
+  const fat = readFat(buf, fatAddrs, ssz);
+  const { entries } = readDirectory(buf, fat, ssz, dirStart);
+  const minifat = readMinifat(buf, fat, ssz, minifatStart);
+  let rootChain = null;
+  const ensureRootChain = () => {
+    if (rootChain) return rootChain;
+    if (entries[0].start < 0 || entries[0].start === ENDOFCHAIN) {
+      throw new Error('mini-stream needed but root entry has no chain');
+    }
+    rootChain = walkChain(fat, entries[0].start);
+    return rootChain;
+  };
+
+  // Walk every BodyText/SectionN stream once, applying every op to it (an
+  // op might match in any section). We bail with a clear error when a
+  // section can't be located — that means a malformed input file, not a
+  // user-correctable condition.
+  const summary = [];
+  let totalReplaced = 0;
+
+  for (let secIdx = 0; ; secIdx++) {
+    let dirEntry;
+    try {
+      dirEntry = findStreamEntry(entries, ['BodyText', `Section${secIdx}`]);
+    } catch {
+      break; // no more sections
+    }
+
+    const inMiniStream = dirEntry.size < 4096;
+    let chain, capacity, readBytes, writeBytes;
+    if (inMiniStream) {
+      const rc = ensureRootChain();
+      chain = walkChain(minifat, dirEntry.start);
+      capacity = chain.length * mssz;
+      readBytes = (size) => readMiniChainBytes(buf, chain, rc, ssz, mssz, size);
+      writeBytes = (data) => writeMiniChainBytes(buf, chain, rc, ssz, mssz, data);
+    } else {
+      chain = walkChain(fat, dirEntry.start);
+      capacity = chain.length * ssz;
+      readBytes = (size) => readChainBytes(buf, chain, ssz, size);
+      writeBytes = (data) => writeChainBytes(buf, chain, ssz, data);
+    }
+
+    const compressed = readBytes(dirEntry.size);
+    let raw = Buffer.from(inflateRawSync(compressed));
+    let dirty = false;
+    const sectionReplacements = [];
+
+    for (const op of ops) {
+      const r = applyReplaceTextEqualLength(raw, op);
+      if (r.replaced) {
+        dirty = true;
+        totalReplaced++;
+        sectionReplacements.push({ section: secIdx, query: op.query, replacement: op.replacement ?? '' });
+      }
+    }
+    if (!dirty) continue;
+
+    // Same-length edits don't change body size, but deflate(level 6) on
+    // the slightly-different raw can still bump compressed size up or down
+    // a handful of bytes. deflateToFit handles both directions.
+    const newCompressed = deflateToFit(raw, capacity);
+    writeBytes(newCompressed);
+    buf.writeUInt32LE(newCompressed.length, dirEntry.entryFileOffset + 0x78);
+    buf.writeUInt32LE(0, dirEntry.entryFileOffset + 0x7C);
+
+    summary.push(...sectionReplacements);
+  }
+
+  writeFileSync(filePath, buf);
+  const result = Object.assign([], summary);
+  result.mode = 'in-place';
+  result.replaced_count = totalReplaced;
+  return result;
+}

@@ -1604,31 +1604,44 @@ async function readStdin() {
   // are NOT eligible — they fall through to the normal rhwp path and the
   // result is Hancom-Office-only. We surface that with a log line so the
   // caller knows their output may not open in Hancom Docs.
-  const CELL_OPS_FOR_RAW_PATCH = new Set(['set_cell_text', 'set_cell_text_by_label']);
-  const allCellOps = ops.length > 0 && ops.every((o) => CELL_OPS_FOR_RAW_PATCH.has(o.type));
-  if (ext === '.hwp' && fs.existsSync(outPath) && allCellOps) {
+  // Op types eligible for the raw-patch fast path. Cell ops have been here
+  // since 1.4.0; replace_text was added in the v1.5 line (equal-length only
+  // for the first cut — see cell-patch.js / replaceTextInPlace).
+  const CELL_OPS = new Set(['set_cell_text', 'set_cell_text_by_label']);
+  const REPLACE_TEXT_OPS = new Set(['replace_text']);
+  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS]);
+  const allRawPatch = ops.length > 0 && ops.every((o) => RAW_PATCH_OPS.has(o.type));
+  if (ext === '.hwp' && fs.existsSync(outPath) && allRawPatch) {
     try {
-      const { patchCellsInPlace } = await import('./cell-patch.js');
-      // Resolve every op to {section, para, control, row, col, text}. For
-      // set_cell_text we already have row/col. For set_cell_text_by_label
-      // we need a one-shot rhwp inspect to find the anchor cell, then add
-      // the row/col offsets.
-      const resolvedEdits = await resolveLabelEditsViaRhwp(outPath, ops);
-      const summary = await patchCellsInPlace(outPath, resolvedEdits);
-      // cell-patch tags `summary.mode` as either 'in-place' (sector-chain
-      // patch, no Sh33tJ5 added) or 'sheetjs-fallback' (CFB re-emit when
-      // the patched payload exceeded the existing chain). Both paths are
-      // Hancom Docs compatible; the mode is surfaced for diagnostics.
-      const subMode = summary.mode || 'in-place';
+      const cellOps = ops.filter((o) => CELL_OPS.has(o.type));
+      const replaceOps = ops.filter((o) => REPLACE_TEXT_OPS.has(o.type));
+      const subModes = [];
+      const allEdits = [];
+
+      if (cellOps.length > 0) {
+        const { patchCellsInPlace } = await import('./cell-patch.js');
+        const resolvedEdits = await resolveLabelEditsViaRhwp(outPath, cellOps);
+        const cellSummary = await patchCellsInPlace(outPath, resolvedEdits);
+        subModes.push(`cells:${cellSummary.mode || 'in-place'}`);
+        for (const e of cellSummary) allEdits.push({ kind: 'cell', ...e });
+      }
+      if (replaceOps.length > 0) {
+        const { replaceTextInPlace } = await import('./cell-patch.js');
+        const repSummary = await replaceTextInPlace(outPath, replaceOps);
+        subModes.push(`replace:${repSummary.mode || 'in-place'}`);
+        for (const e of repSummary) allEdits.push({ kind: 'replace', ...e });
+      }
+
+      const subMode = subModes.join('+');
       process.stdout.write(JSON.stringify({
         status: 'success',
         path: outPath,
         bytes_written: fs.statSync(outPath).size,
-        ops_applied: summary.length,
+        ops_applied: allEdits.length,
         mode: 'raw-patch',
         sub_mode: subMode,
-        edits: Array.from(summary),
-        log: [`raw-patch path (Hancom Docs compatible, ${subMode}) — ${summary.length} cell(s) edited`],
+        edits: allEdits,
+        log: [`raw-patch path (Hancom Docs compatible, ${subMode}) — ${allEdits.length} edit(s) applied`],
       }) + "\n");
       return;
     } catch (err) {
