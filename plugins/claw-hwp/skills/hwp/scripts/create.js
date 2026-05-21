@@ -1609,7 +1609,10 @@ async function readStdin() {
   // for the first cut — see cell-patch.js / replaceTextInPlace).
   const CELL_OPS = new Set(['set_cell_text', 'set_cell_text_by_label']);
   const REPLACE_TEXT_OPS = new Set(['replace_text']);
-  const APPEND_PARA_OPS = new Set(['append_paragraph']);
+  // append_paragraph / append_page_break / insert_column_break all route
+  // through appendParagraphInPlace — they differ only in the break_val byte
+  // of the new paragraph's PARA_HEADER body (0 / 0x04 / 0x08).
+  const APPEND_PARA_OPS = new Set(['append_paragraph', 'append_page_break', 'insert_column_break']);
   const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS]);
   const allRawPatch = ops.length > 0 && ops.every((o) => RAW_PATCH_OPS.has(o.type));
   if (ext === '.hwp' && fs.existsSync(outPath) && allRawPatch) {
@@ -1635,7 +1638,17 @@ async function readStdin() {
       }
       if (appendOps.length > 0) {
         const { appendParagraphInPlace } = await import('./cell-patch.js');
-        const appSummary = await appendParagraphInPlace(outPath, appendOps);
+        // Map op type to break_val (HWP PARA_HEADER body offset 11):
+        //   append_paragraph     → 0       (no break)
+        //   append_page_break    → 0x04    (page break)
+        //   insert_column_break  → 0x08    (column break)
+        const BREAK_VAL = { 'append_paragraph': 0, 'append_page_break': 0x04, 'insert_column_break': 0x08 };
+        const normalizedAppendOps = appendOps.map((o) => ({
+          ...o,
+          text: o.text ?? '',
+          breakVal: BREAK_VAL[o.type] ?? 0,
+        }));
+        const appSummary = await appendParagraphInPlace(outPath, normalizedAppendOps);
         subModes.push(`append:${appSummary.mode || 'in-place'}`);
         for (const e of appSummary) allEdits.push({ kind: 'append', ...e });
       }

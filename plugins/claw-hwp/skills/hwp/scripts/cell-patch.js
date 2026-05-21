@@ -1511,7 +1511,7 @@ function findLastLevel0Paragraph(records) {
 //   - line_segs_count to 0 (Hancom recomputes line layout from text)
 //   - range_tags_count to 0
 //   - instance_id to a fresh unique value
-function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFlag, newInstanceId) {
+function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFlag, newInstanceId, breakValOverride) {
   const bodySize = srcParaHeaderRec.size;
   if (bodySize < 24) throw new Error(`PARA_HEADER body too short to clone properly: ${bodySize} (need >= 24)`);
   const body = Buffer.alloc(bodySize);
@@ -1519,7 +1519,10 @@ function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFla
   // char_count_raw with optional MSB flag.
   const flag = paragraphFlag ? 0x80000000 : 0;
   body.writeUInt32LE(((flag | (newCharCount & 0x7FFFFFFF)) >>> 0), 0);
-  // control_mask, para_shape_id, style_id, break_val: keep from source.
+  // control_mask, para_shape_id, style_id: keep from source.
+  // break_val (offset 11) → override if provided. Bit flags:
+  //   0x01 section break, 0x02 multi-column, 0x04 page break, 0x08 column break.
+  if (typeof breakValOverride === 'number') body.writeUInt8(breakValOverride & 0xFF, 11);
   // num_char_shapes (offset 12) → 1 (we emit a single charPos=0 entry)
   body.writeUInt16LE(1, 12);
   // range_tags_count (offset 14) → 0
@@ -1593,11 +1596,14 @@ export async function appendParagraphInPlace(filePath, ops) {
   if (!Array.isArray(ops) || ops.length === 0) {
     return Object.assign([], { mode: 'in-place', appended_count: 0 });
   }
+  // Op-type aliases the dispatcher routes through this entry point:
+  //   append_paragraph     -> break_val 0       (regular paragraph)
+  //   append_page_break    -> break_val 0x04    (page break)
+  //   insert_column_break  -> break_val 0x08    (column break)
+  // text is optional for break variants (empty string = pure break para).
   for (const op of ops) {
-    if (typeof op.text !== 'string') {
-      throw new Error("append_paragraph: 'text' is required");
-    }
-    if (/[\n\r]/.test(op.text) || op.text.indexOf(' ') !== -1 || op.text.indexOf(' ') !== -1) {
+    if (typeof op.text !== 'string') op.text = '';
+    if (/[\n\r]/.test(op.text) || op.text.indexOf('\u2028') !== -1 || op.text.indexOf('\u2029') !== -1) {
       throw new Error("append_paragraph: 'text' cannot contain paragraph-break characters (one op = one paragraph; use multiple ops)");
     }
   }
@@ -1659,7 +1665,9 @@ export async function appendParagraphInPlace(filePath, ops) {
     const newInstanceId = pickFreshInstanceId(records, raw);
     // Build the new paragraph WITHOUT the last-paragraph flag —
     // whichever paragraph in the file currently carries it keeps it.
-    const newHeader = buildClonedParaHeader(srcHeader, raw, newCharCount, false, newInstanceId);
+    // breakVal (if provided) overrides the template's break_val byte —
+    // append_page_break uses 0x04, insert_column_break uses 0x08.
+    const newHeader = buildClonedParaHeader(srcHeader, raw, newCharCount, false, newInstanceId, op.breakVal);
     const newText = buildBodyParaTextRecord(op.text);
     // Emit a single PARA_CHAR_SHAPE record (one entry at charPos=0).
     // This matches num_char_shapes=1 set in the PARA_HEADER above.
