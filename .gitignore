@@ -39,5 +39,5 @@ spike/
 _*.md
 
 # internal-only / cross-project notes — never publish
-MYAGENT*
 *SNAPSHOT*
+*_NOTES.md
