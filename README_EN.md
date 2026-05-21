@@ -91,9 +91,9 @@ Pick `hop` for desktop GUI, `claw-hwp` for AI-driven workflows.
 
 ### Regular users — add via the Customize menu (3 steps)
 
-1. In the Claude Desktop **Code** tab, click **Customize** in the left sidebar.
-2. Next to **Personal plugins**, click **`+`** → **Create plugin** → **Add marketplace**.
-3. Paste this URL into the field and click **Sync**:
+1. In the Claude Desktop **Code** tab, click **Customize** in the left sidebar *(the label stays "Customize" in both English and Korean UI)*.
+2. Next to **Personal plugins** *(개인 플러그인 in Korean UI)*, click **`+`** → **Create plugin** *(플러그인 생성)* → **Add marketplace** *(마켓플레이스 추가)*.
+3. Paste this URL into the field and click **Sync** *(동기화)*:
 
    ```
    https://github.com/DoHyun468/claw-hwp

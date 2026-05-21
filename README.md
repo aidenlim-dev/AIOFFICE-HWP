@@ -91,15 +91,15 @@ claw-hwp 는 한국 HWP 형식을 오픈소스로 다루려는 더 큰 흐름의
 
 ### 일반 사용자 — Customize 메뉴에서 추가 (3 단계)
 
-1. Claude Desktop 의 **Code** 탭에서 왼쪽 사이드바 **Customize** 클릭.
-2. **Personal plugins** 옆 **`+`** → **Create plugin** → **Add marketplace** 선택.
-3. URL 칸에 아래 한 줄 붙여넣고 **Sync** 클릭:
+1. Claude Desktop 의 **Code** 탭에서 왼쪽 사이드바 **Customize** 클릭 *(한글/영문 UI 모두 "Customize" 그대로 표시됩니다)*.
+2. **개인 플러그인** *(Personal plugins)* 옆 **`+`** → **플러그인 생성** *(Create plugin)* → **마켓플레이스 추가** *(Add marketplace)* 선택.
+3. URL 칸에 아래 한 줄 붙여넣고 **동기화** *(Sync)* 클릭:
 
    ```
    https://github.com/DoHyun468/claw-hwp
    ```
 
-**Sync 누르면 설치 끝.** Personal plugins 목록에 `claw-hwp` 가 자동으로 추가되고 바로 활성화됩니다. 이후 `.hwp` / `.hwpx` 파일을 채팅에 드롭하거나 파일명을 언급하면 자동으로 스킬이 작동합니다.
+**동기화 누르면 설치 끝.** 개인 플러그인 목록에 `claw-hwp` 가 자동으로 추가되고 바로 활성화됩니다. 이후 `.hwp` / `.hwpx` 파일을 채팅에 드롭하거나 파일명을 언급하면 자동으로 스킬이 작동합니다.
 
 <!-- TODO(media): Customize → Personal plugins → Add marketplace → Sync 클릭 흐름 스크린샷 -->
 
