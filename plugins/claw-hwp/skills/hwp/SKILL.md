@@ -39,8 +39,8 @@ When the user says "preview", they almost always mean "show me the file" — sta
 | Read as markdown (preserves headings/tables) | `node scripts/extract_text.js --format markdown <file>` |
 | Inspect structure (pages, sections, tables) | `node scripts/extract_text.js --inspect <file>` |
 | Create new document from scratch | `echo '{"path":"out.hwp","operations":[...]}' \| node scripts/create.js` |
-| Edit existing `.hwpx` | unpack → edit XML directly with `Edit` tool → pack |
-| Edit existing `.hwp` (HWP 5.0 binary) | convert to `.hwpx` via `convert.js` first, then edit-as-hwpx |
+| Edit existing `.hwpx` | `echo '{"path":"f.hwpx","operations":[...]}' \| node scripts/hwpx-edit.js` (op vocab in `references/hwpx-edit-ops.md`) |
+| Edit existing `.hwp` (HWP 5.0 binary) | convert to `.hwpx` via `convert.js` first, then `hwpx-edit.js` |
 | Convert `.hwp` ↔ `.hwpx` | `node scripts/convert.js <input> <output>` |
 | Validate output | `python scripts/validate.py <file.hwpx>` |
 | Preview file (Desktop = inline pane, CLI = browser link, cowork = drop-in viewer URL) | See Preview section for the surface decision rule |
@@ -144,68 +144,50 @@ There are **two editing paths** with different capabilities. Pick by checking th
 
 | Input | Edit touches a table cell? | Use |
 |-------|----------------------------|-----|
-| `.hwpx` | yes or no | **Path A** — unpack + XML edit + pack |
-| `.hwp` | no (body text / paragraph only) | **Path A** — convert to `.hwpx` first, then unpack/edit/pack. Save back to `.hwp` only if required. |
+| `.hwpx` | yes or no | **Path A** — `hwpx-edit.js` ops (fallback: unpack/edit/pack) |
+| `.hwp` | no (body text / paragraph only) | **Path A** — convert to `.hwpx` first, then `hwpx-edit.js`. Save back to `.hwp` only if required. |
 | `.hwp` | **yes** | **Path B** — wasm op vocab on the original `.hwp`. Do NOT convert: rhwp's hwp→hwpx step drops tables. |
 
 Detect format by reading the first two bytes — `PK` = HWPX (treat as `.hwpx` regardless of extension).
 
-#### Path A — `.hwpx` XML edit (preferred for non-table edits)
+#### Path A — `.hwpx` editing via `hwpx-edit.js` (preferred)
 
-Same archetype as `.docx`. Unpack → edit XML directly with the `Edit` tool → pack.
+`scripts/hwpx-edit.js` applies deterministic, named operations to a `.hwpx` directly on its OWPML XML — no hand-editing. Pipe a JSON payload to stdin: one ZIP load, N ops applied in order, one save. It mirrors `create.js`'s stdin-JSON shape.
 
-1. Unpack:
-   ```bash
-   python scripts/unpack.py path/to/file.hwpx /tmp/unpacked/
-   ```
-2. Edit files in `/tmp/unpacked/Contents/`:
-   - `section0.xml` (plus `section1.xml`, ...) — body content
-   - `header.xml` — document-level styles, fonts, page settings
-   - `content.hpf` — manifest
+```bash
+echo '{
+  "path": "path/to/file.hwpx",
+  "output": "out.hwpx",
+  "operations": [
+    {"type": "fill_template", "values": {"{{이름}}": "남대현", "{{회사}}": "RECON Labs"}},
+    {"type": "set_cell_text", "table": 2, "row": 1, "col": 1, "text": "100만원"},
+    {"type": "append_paragraph", "text": "새 문단"}
+  ]
+}' | node scripts/hwpx-edit.js
+```
 
-   Common patterns:
+Returns JSON `{ ok, output, results: [...] }`. The whole batch is **atomic** — if any op errors, nothing is saved and the error names the failing op index. `output` defaults to `<input>_edited.hwpx`; pass `"output": "<same path>"` to overwrite in place.
 
-   ```xml
-   <!-- Body paragraph -->
-   <hp:p id="..."><hp:run charPrIDRef="..."><hp:t>본문 텍스트</hp:t></hp:run>
-     <hp:linesegarray>
-       <hp:lineseg textpos="0" .../>
-     </hp:linesegarray>
-   </hp:p>
+The full operation vocabulary (text, paragraph, table row/column/merge, char & paragraph styling, image insert/replace/delete, field) is documented in **`references/hwpx-edit-ops.md`** — read it before composing a payload. Table/paragraph indices are **document-order, 0-based**; discover them with `extract_text.js --inspect` and `--format markdown`.
 
-   <!-- Table cell -->
-   <hp:tbl rowCnt="3" colCnt="2" ...>
-     <hp:tr>
-       <hp:tc rowSpan="1" colSpan="1">
-         <hp:subList>
-           <hp:p><hp:run charPrIDRef="..."><hp:t>100만원</hp:t></hp:run>
-             <hp:linesegarray><hp:lineseg textpos="0" .../></hp:linesegarray>
-           </hp:p>
-         </hp:subList>
-       </hp:tc>
-     </hp:tr>
-   </hp:tbl>
-   ```
+Notes:
+- `hwpx-edit.js` is **`.hwpx` only** — it rejects `.hwp` with a clear error. Use Path B (or convert first) for `.hwp`.
+- It strips the stale `<hp:linesegarray>` cache on paragraphs/rows it rebuilds, so Hancom relayouts correctly on open (no manual lineseg surgery needed).
+- It keeps `mimetype` stored-uncompressed and bumps `itemCnt` on `hh:charProperties` / `hh:paraProperties` when adding styles, so output stays Hancom-strict-valid.
 
-   **Lineseg cache invalidation.** `<hp:linesegarray>` is a precomputed line-break cache. If you change a `<hp:t>` text, the cache becomes stale and non-Hancom readers will draw text at wrong positions. Two ways to fix:
-   - **Delete the `<hp:linesegarray>` block** on edited paragraphs. Hancom recalculates on open; the preview viewer's "자동 보정 ON" (default) does the same via `reflowLinesegs()`.
-   - **Or** leave the cache and accept that the inline preview may show slight offsets until 자동 보정 is toggled.
+**Fallback — manual unpack/edit/pack** (only for edits no op covers, e.g. exotic OWPML the op set doesn't reach):
 
-3. Repack:
-   ```bash
-   python scripts/pack.py /tmp/unpacked/ output.hwpx --original path/to/file.hwpx
-   ```
-4. Validate:
-   ```bash
-   python scripts/validate.py output.hwpx
-   ```
+1. Unpack: `python scripts/unpack.py path/to/file.hwpx /tmp/unpacked/`
+2. Edit `/tmp/unpacked/Contents/section0.xml` (body), `header.xml` (styles/fonts), `content.hpf` (manifest) with the `Edit` tool.
+   **Lineseg cache:** after changing any `<hp:t>`, delete that paragraph's `<hp:linesegarray>` block — it's a stale line-break cache; Hancom recomputes on open (the preview viewer's "자동 보정 ON" does the same via `reflowLinesegs()`).
+3. Repack: `python scripts/pack.py /tmp/unpacked/ output.hwpx --original path/to/file.hwpx`
+4. Validate: `python scripts/validate.py output.hwpx`
 
-**When the input is `.hwp` but the edit doesn't touch tables**: convert first, then proceed.
+**When the input is `.hwp` but the edit doesn't touch tables**: convert first, then run `hwpx-edit.js` on the result.
 ```bash
 node scripts/convert.js input.hwp /tmp/converted.hwpx
-# Then unpack /tmp/converted.hwpx as above.
-# To save back to .hwp afterwards:
-node scripts/convert.js output.hwpx final.hwp
+# edit /tmp/converted.hwpx with hwpx-edit.js, then if .hwp output is required:
+node scripts/convert.js out.hwpx final.hwp
 ```
 
 #### Path B — `.hwp` wasm ops (only path for in-place table-cell edits)
@@ -359,6 +341,7 @@ In Desktop and CLI paths, "fire preview" means open the viewer / link directly. 
 |--------|---------|---------|
 | `scripts/extract_text.js` | Node | Read text, markdown, or metadata from .hwp/.hwpx via rhwp WASM |
 | `scripts/create.js` | Node | Generate a new .hwp / .hwpx from a stdin JSON op script via rhwp |
+| `scripts/hwpx-edit.js` | Node | Edit an existing **.hwpx** via stdin JSON ops (text/table/style/image) — direct OWPML XML, no rhwp. See `references/hwpx-edit-ops.md` |
 | `scripts/convert.js` | Node | Convert `.hwp ↔ .hwpx` via rhwp WASM (no LibreOffice required) |
 | `scripts/unpack.py` | Python | Unzip .hwpx → directory of pretty-printed XML |
 | `scripts/pack.py` | Python | Repack directory → .hwpx with auto-repair |
@@ -374,4 +357,5 @@ In Desktop and CLI paths, "fire preview" means open the viewer / link directly. 
 ## References
 
 - `references/hwpx-format.md` — HWPX file structure, XML schema cheatsheet, common edit patterns
+- `references/hwpx-edit-ops.md` — `hwpx-edit.js` operation vocabulary (every op, its args, and examples)
 - `references/rhwp-api.md` — `@rhwp/core` API surface for create/convert operations
