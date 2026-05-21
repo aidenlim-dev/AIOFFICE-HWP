@@ -1421,6 +1421,184 @@ export async function replaceTextInPlace(filePath, ops) {
   return result;
 }
 
+// ── append_table raw-patch (Phase 4-6) ────────────────────────────────────
+//
+// Strategy: find an existing table-container paragraph in the section
+// (a level-0 paragraph whose cluster contains a CTRL_HEADER with id
+// 'tbl ' and an HWPTAG_TABLE record), and clone its entire cluster
+// byte-for-byte at the new location. Cell text is then emptied so the
+// caller gets an empty table.
+//
+// LIMITATIONS (raw-patch can't synthesize new control records from
+// scratch — too much HWP 5.0 spec). The cloned table:
+//   - keeps the source table's rows × cols (the user can't pick a
+//     custom size; pick the form's smallest table as the template, or
+//     use set_cell_text on an existing form table)
+//   - keeps border / cell width / cell height from the source
+//   - has cell PARA_TEXT records dropped (cells become empty)
+// Documented in SKILL.md as the append_table limitation.
+
+const TAG_TABLE = 0x4D;
+const TBL_CTRL_ID = 0x74626c20; // 'tbl '
+
+// Find a table-container paragraph cluster: level-0 PARA_HEADER whose
+// cluster contains a CTRL_HEADER ('tbl ') + HWPTAG_TABLE.
+// Returns { paraStartIdx, clusterEndIdx, rows, cols } for the smallest
+// table in the section. We prefer small tables as templates so the
+// cloned cluster bytes are minimal.
+function findTemplateTableCluster(records, raw) {
+  let best = null;
+  for (let i = 0; i < records.length; i++) {
+    if (records[i].tag !== TAG_PARA_HEADER || records[i].level !== 0) continue;
+    // Locate cluster end (next level-0 PARA_HEADER or records.length)
+    let end = records.length;
+    for (let j = i + 1; j < records.length; j++) {
+      if (records[j].tag === TAG_PARA_HEADER && records[j].level === 0) { end = j; break; }
+    }
+    // Look for CTRL_HEADER 'tbl ' + TABLE inside this cluster
+    for (let j = i + 1; j < end - 1; j++) {
+      const r = records[j];
+      if (r.tag !== TAG_CTRL_HEADER || r.level !== 1) continue;
+      if (r.size < 4) continue;
+      const ctrlId = raw.readUInt32LE(r.dataOff);
+      if (ctrlId !== TBL_CTRL_ID) continue;
+      // Next record should be HWPTAG_TABLE
+      if (records[j + 1].tag !== TAG_TABLE || records[j + 1].level !== 2) continue;
+      const tableBody = raw.slice(records[j + 1].dataOff, records[j + 1].dataOff + records[j + 1].size);
+      if (tableBody.length < 8) continue;
+      const rows = tableBody.readUInt16LE(4);
+      const cols = tableBody.readUInt16LE(6);
+      const area = rows * cols;
+      if (!best || area < best.area) {
+        best = { paraStartIdx: i, clusterEndIdx: end, rows, cols, area };
+      }
+      break;
+    }
+  }
+  if (!best) throw new Error('append_table: no existing table found in section to use as a template — raw-patch needs a template (form-design tables in advance, or call append_table on a form that already has at least one table)');
+  return best;
+}
+
+// Copy all cluster bytes from raw[records[startIdx].headOff .. records[endIdx-1] end],
+// then strip every PARA_TEXT record inside it (cells become empty). The
+// paragraph_flag bit on the cloned PARA_HEADER (if any) is also cleared
+// — the new table is not the last paragraph of the section.
+function cloneTableClusterBytes(records, raw, startIdx, endIdx) {
+  // Build a fresh buffer: walk the cluster records, emit each one
+  // except PARA_TEXT (drop). Adjust PARA_HEADER text_count to 1 (EOP
+  // only) for each paragraph in the cluster, since we just dropped
+  // their text bodies. Strip MSB from the top-level paragraph's text
+  // count too.
+  const parts = [];
+  const topLevelParaHeaderRecIdx = startIdx;
+  for (let i = startIdx; i < endIdx; i++) {
+    const r = records[i];
+    if (r.tag === TAG_PARA_TEXT) continue; // drop
+    const isParaHeader = r.tag === TAG_PARA_HEADER;
+    const headLen = r.ext ? 8 : 4;
+    if (isParaHeader && r.size >= 4) {
+      // emit header + tweaked body (text_count → 1, MSB cleared on top)
+      const head = raw.slice(r.headOff, r.headOff + headLen);
+      const body = Buffer.from(raw.slice(r.dataOff, r.dataOff + r.size));
+      const old = body.readUInt32LE(0);
+      const newCount = (i === topLevelParaHeaderRecIdx)
+        ? 1 // top-level: clear flag, char_count=1 (EOP)
+        : ((old & 0x80000000) >>> 0) | 1; // nested cell paragraphs keep MSB, count=1
+      body.writeUInt32LE(newCount >>> 0, 0);
+      parts.push(head);
+      parts.push(body);
+    } else {
+      parts.push(raw.slice(r.headOff, r.dataOff + r.size));
+    }
+  }
+  return Buffer.concat(parts);
+}
+
+export async function appendTableInPlace(filePath, ops) {
+  if (!Array.isArray(ops) || ops.length === 0) {
+    return Object.assign([], { mode: 'in-place', appended_count: 0 });
+  }
+
+  let buf = readFileSync(filePath);
+  let { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
+  let fat = readFat(buf, fatAddrs, ssz);
+  const { entries } = readDirectory(buf, fat, ssz, dirStart);
+  let minifat = readMinifat(buf, fat, ssz, minifatStart);
+  let rootChain = null;
+  const ensureRootChain = () => {
+    if (rootChain) return rootChain;
+    if (entries[0].start < 0 || entries[0].start === ENDOFCHAIN) {
+      throw new Error('mini-stream needed but root entry has no chain');
+    }
+    rootChain = walkChain(fat, entries[0].start);
+    return rootChain;
+  };
+
+  const dirEntry = findStreamEntry(entries, ['BodyText', 'Section0']);
+  const inMiniStream = dirEntry.size < 4096;
+  let chain, compressed;
+  if (inMiniStream) {
+    const rc = ensureRootChain();
+    chain = walkChain(minifat, dirEntry.start);
+    compressed = readMiniChainBytes(buf, chain, rc, ssz, mssz, dirEntry.size);
+  } else {
+    chain = walkChain(fat, dirEntry.start);
+    compressed = readChainBytes(buf, chain, ssz, dirEntry.size);
+  }
+  let raw = Buffer.from(inflateRawSync(compressed));
+
+  const summary = [];
+  for (const op of ops) {
+    const records = parseRecords(raw);
+    const tpl = findTemplateTableCluster(records, raw);
+    const cluster = cloneTableClusterBytes(records, raw, tpl.paraStartIdx, tpl.clusterEndIdx);
+
+    // Insert after the last simple body paragraph (same anchor as
+    // append_paragraph) so the new table lands in a reasonable place.
+    const insertCluster = findLastSimpleBodyParagraph(records);
+    const insertAt = insertCluster.endIdx < records.length
+      ? records[insertCluster.endIdx].headOff
+      : raw.length;
+    raw = Buffer.concat([raw.slice(0, insertAt), cluster, raw.slice(insertAt)]);
+    summary.push({ section: 0, rows: tpl.rows, cols: tpl.cols, note: 'cloned from existing table template' });
+  }
+
+  // Deflate + write back
+  let newCompressed;
+  if (inMiniStream) {
+    const rc = ensureRootChain();
+    const ext = deflateMiniChainWithExpansion(
+      { buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain: rc, rootEntry: entries[0] },
+      raw, chain
+    );
+    buf = ext.buf; fat = ext.fat; minifat = ext.minifat; minifatStart = ext.minifatStart;
+    newCompressed = ext.compressed;
+    if (ext.promoted) {
+      chain = ext.newRegularChain;
+      writeChainBytes(buf, chain, ssz, newCompressed);
+      buf.writeInt32LE(chain[0], dirEntry.entryFileOffset + 0x74);
+    } else {
+      rootChain = ext.rootChain;
+      chain = ext.miniChain;
+      writeMiniChainBytes(buf, chain, rootChain, ssz, mssz, newCompressed);
+    }
+  } else {
+    const capacity = chain.length * ssz;
+    const ext = deflateAndFitWithExpansion(raw, capacity, ssz, fat, fatAddrs, chain, buf, false);
+    buf = ext.buf; fat = ext.fat; chain = ext.chain;
+    newCompressed = ext.compressed;
+    writeChainBytes(buf, chain, ssz, newCompressed);
+  }
+  buf.writeUInt32LE(newCompressed.length, dirEntry.entryFileOffset + 0x78);
+  buf.writeUInt32LE(0, dirEntry.entryFileOffset + 0x7C);
+
+  writeFileSync(filePath, buf);
+  const result = Object.assign([], summary);
+  result.mode = 'in-place';
+  result.appended_count = summary.length;
+  return result;
+}
+
 // ── append_paragraph raw-patch (Phase 4-1) ────────────────────────────────
 //
 // Strategy: clone the last body-level paragraph cluster (PARA_HEADER +

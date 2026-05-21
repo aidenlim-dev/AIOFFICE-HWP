@@ -1609,6 +1609,7 @@ async function readStdin() {
   // for the first cut — see cell-patch.js / replaceTextInPlace).
   const CELL_OPS = new Set(['set_cell_text', 'set_cell_text_by_label']);
   const REPLACE_TEXT_OPS = new Set(['replace_text']);
+  const APPEND_TABLE_OPS = new Set(['append_table']);
   // All paragraph-shaped append ops route through appendParagraphInPlace.
   // Some carry a break_val (page/column break); the rest just add text.
   //   append_paragraph                    → break_val 0
@@ -1632,7 +1633,7 @@ async function readStdin() {
     'insert_column_break',
     'setup_columns',
   ]);
-  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS]);
+  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS, ...APPEND_TABLE_OPS]);
   const allRawPatch = ops.length > 0 && ops.every((o) => RAW_PATCH_OPS.has(o.type));
   if (ext === '.hwp' && fs.existsSync(outPath) && allRawPatch) {
     try {
@@ -1654,6 +1655,13 @@ async function readStdin() {
         const repSummary = await replaceTextInPlace(outPath, replaceOps);
         subModes.push(`replace:${repSummary.mode || 'in-place'}`);
         for (const e of repSummary) allEdits.push({ kind: 'replace', ...e });
+      }
+      const tableOps = ops.filter((o) => APPEND_TABLE_OPS.has(o.type));
+      if (tableOps.length > 0) {
+        const { appendTableInPlace } = await import('./cell-patch.js');
+        const tSummary = await appendTableInPlace(outPath, tableOps);
+        subModes.push(`table:${tSummary.mode || 'in-place'}`);
+        for (const e of tSummary) allEdits.push({ kind: 'table', ...e });
       }
       if (appendOps.length > 0) {
         const { appendParagraphInPlace } = await import('./cell-patch.js');
