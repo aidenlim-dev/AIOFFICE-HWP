@@ -26,7 +26,7 @@
 - **convert** — `.hwp ↔ .hwpx` both directions via rhwp WASM. Not lossless — round-tripping can damage tables and images
 - **preview** — view rhwp-rendered pages inline or in a browser (the path differs by surface — see [Usage by surface](#usage-by-surface))
 
-Read / create / edit / convert work everywhere Claude has Bash and filesystem access — Claude Code CLI, Claude Code Desktop (Code mode), Claude Desktop cowork mode, and claude.ai cowork.
+Read / create / edit / convert work in desktop-app surfaces where Claude has Bash and filesystem access — Claude Code CLI, Claude Code Desktop (Code mode), and Claude Desktop cowork mode. (claude.ai web doesn't support plugin install in v1.)
 
 The preview surface coverage:
 
@@ -35,7 +35,6 @@ The preview surface coverage:
 | Claude Code Desktop (Code mode) | Inline pane next to the chat |
 | Claude Code CLI | Browser link to local `localhost:3737` (agent self-launches the server) |
 | Claude Desktop cowork mode | Drag-drop the file onto <https://dohyun468.github.io/claw-hwp/> (no Node install) |
-| claude.ai cowork (web) | Drag-drop the file onto <https://dohyun468.github.io/claw-hwp/> (no Node install) |
 
 No Hancom Office, no LibreOffice, no Windows COM required.
 
@@ -88,45 +87,40 @@ Pick `hop` for desktop GUI, `claw-hwp` for AI-driven workflows.
 
 ## Install
 
-Pick the path that matches your environment. All three surfaces use the same skill files.
+> **Claude Desktop app (Mac / Windows)** only. claude.ai web doesn't yet support plugin installation, so v1 of claw-hwp runs in the desktop app — web users, please grab [Claude Desktop](https://claude.com/download) to proceed.
 
-### New here? — just ask Claude (Claude Desktop, claude.ai web)
+### Regular users — add via the Customize menu (3 steps)
 
-One way: ask Claude to install it for you. Paste this one line into any Claude chat (Desktop app or claude.ai web):
+1. In the Claude Desktop **Code** tab, click **Customize** in the left sidebar.
+2. Next to **Personal plugins**, click **`+`** → **Create plugin** → **Add marketplace**.
+3. Paste this URL into the field and click **Sync**:
 
-```
-https://github.com/DoHyun468/claw-hwp help me install this skill
-```
+   ```
+   https://github.com/DoHyun468/claw-hwp
+   ```
 
-Claude walks you through the steps based on your OS (Mac / Windows) and surface (app / web). No commands to type.
+**Sync finishes the install.** `claw-hwp` shows up in your Personal plugins list and is enabled right away. From there, drop a `.hwp` / `.hwpx` file into chat (or just mention one by name) and the skill kicks in automatically.
 
-<details>
-<summary>Prefer to install it by hand? (manual steps)</summary>
+<!-- TODO(media): Customize → Personal plugins → Add marketplace → Sync screenshot -->
 
-**1. Download the repo as a zip**
+### First time — talk to Claude this way
 
-Open <https://github.com/DoHyun468/claw-hwp> → click the green **`Code`** button above the file list → **`Download ZIP`**. You'll get something like `claw-hwp-main.zip`.
+Once installed, Claude automatically invokes this skill when a `.hwp` / `.hwpx` shows up in context. Abstract "set up" / "build me one" requests can confuse Claude into trying to scaffold a brand-new skill or walking through an extra install step.
 
-**2. Re-zip just the skill folder**
+| ✅ Works well | ⚠️ Confuses Claude |
+|---|---|
+| `Show me report.hwp` (file attached) | `Build me a claw-hwp` |
+| `Open this Hangul file for me` | `Install the preview feature` |
+| `Add this line to meeting-notes.hwp` | `Set up the claw-hwp skill` |
+| `Replace 2026 with 2027` | `Set up the Hangul plugin` |
 
-Double-click the downloaded zip to expand it. Inside `claw-hwp-main`, drill into `plugins` → `claw-hwp` → `skills` → `hwp` (you should see `SKILL.md`, `scripts/`, `references/`).
+Rule of thumb: mention the `.hwp` file (or attach it) and the skill auto-fires. Preview comes up automatically — no separate install / setup step.
 
-Compress that `hwp` folder into its own zip:
-- **Mac**: right-click the `hwp` folder → **Compress** → `hwp.zip`
-- **Windows**: right-click the `hwp` folder → **Send to → Compressed (zipped) folder** → `hwp.zip`
+### After updates, start a fresh session
 
-**3. Upload to Claude**
+A running session keeps the skill snapshot it loaded at the start. Even after `claude plugin marketplace update claw-hwp` or Customize → Sync pulls a newer version into cache, **the already-open session keeps using the old SKILL.md and old scripts**. To pick up new behavior (e.g. the Hancom-Docs-compatible raw-patch path for cell edits), close the session and open a new one.
 
-Pick your surface:
-
-- **Claude Desktop app**: **Settings → Skills → Upload skill** → choose `hwp.zip`
-- **claude.ai web** (Pro / Max / Team / Enterprise plans): **Settings → Capabilities → Skills → Add skill** → choose `hwp.zip`
-
-Done. Attach a `.hwp` / `.hwpx` file or ask Claude to "draft a Korean report" and the skill kicks in.
-
-</details>
-
-### Claude Code (CLI) — one command (developers)
+### Developers — Claude Code CLI (one command)
 
 ```bash
 # 1. Add the marketplace (one-time)
@@ -144,7 +138,7 @@ See `plugins/claw-hwp/skills/hwp/SKILL.md` for the full decision tree (read / cr
 
 ## Usage by surface
 
-> This section covers only surfaces with Bash + filesystem access (Claude Code Desktop, Claude Code CLI, cowork modes). Plain chat surfaces without Bash (claude.ai web chat, Claude Desktop's non-cowork mode) can't run this skill at all — but the viewer page <https://dohyun468.github.io/claw-hwp/> itself works for anyone with a `.hwp` / `.hwpx` file (no skill/plugin install required).
+> This section covers only desktop-app surfaces with Bash + filesystem access (Claude Code Desktop's Code mode and cowork mode) plus the Claude Code CLI. Claude Desktop's plain chat mode and claude.ai web (no plugin install in v1) can't run this skill — but the viewer page <https://dohyun468.github.io/claw-hwp/> itself works for anyone with a `.hwp` / `.hwpx` file (no install required).
 
 Only the preview path differs by surface — the read/create/edit flow itself works the same everywhere. Find the row that matches your setup.
 
@@ -160,7 +154,7 @@ Drop a `.hwp`/`.hwpx` into chat. Claude prints a clickable link → click it →
 
 <!-- TODO(media): CLI — markdown link emission + browser preview screenshot/video -->
 
-### Cowork (claude.ai web cowork, Claude Desktop's cowork mode)
+### Claude Desktop — Cowork mode
 
 Cowork runs Claude in a remote sandbox, so it can't reach a preview server on your machine. Instead, the same viewer is hosted as a **static page on GitHub Pages**:
 

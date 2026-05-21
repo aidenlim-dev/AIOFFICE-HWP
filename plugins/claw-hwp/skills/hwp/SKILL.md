@@ -8,96 +8,38 @@ license: MIT
 
 This skill helps Claude work with Korean Hangul Word Processor documents — reading, creating, and editing both the binary `.hwp` (HWP 5.0) and the ZIP-based `.hwpx` formats.
 
-## 🎯 Filling in an existing form (READ THIS FIRST)
+## Already installed — don't re-scaffold
 
-By a wide margin the most common task on this skill is **"fill in this Hangul form for me"** — the user hands you an existing `.hwp` (often empty-looking) and asks to add a row, complete a field, or update a number. This section is the *only* correct flow for that task. Every other branch below is for less common cases.
+If you're reading this SKILL.md, the `claw-hwp:hwp` skill is **already loaded** in this session. Everything below — read / create / edit / convert / preview for `.hwp` and `.hwpx` — is provided by this skill. You don't need to install, scaffold, or set anything up.
 
-**Trigger phrases (Korean / English):**
+Treat the following user phrasings as **"show me a HWP file"** or **"edit a HWP file"** intent, not as setup requests:
 
-> 양식 채워줘 · 양식 작성해줘 · 이 표에 N 채워줘 · 보고서 양식에 X 추가해줘 ·
-> "fill in this form" · "add to this report" · "complete this template" ·
-> "이번 주 일정 채워줘" · "셀에 Y 넣어줘"
+| User says | Means | What to do |
+|---|---|---|
+| "claw-hwp 따라서 만들어줘" | "show me how to use it" | Wait for an actual `.hwp` / `.hwpx` file or task. Don't scaffold a new skill directory. |
+| "preview 기능 설치해줘" / "preview 설정해줘" | "I want to view a HWP file" | The preview server is part of this skill. Start it with the launcher in the `Preview` section below. **No npm/node install step.** |
+| "claw-hwp 스킬 설정해줘" / "set up the HWP plugin" | "make it work" | It already works. Ask the user which `.hwp` file they want to read / edit / preview. |
 
-**Heuristic for recognising a form (do this before deciding the flow):**
+Do **not** run `npm install`, create new plugin/skill folders, or fetch dependencies — every script the user needs is already in `scripts/` (rhwp WASM and fflate are vendored under `scripts/vendor/`).
 
-- Filename contains: `양식`, `template`, `보고서`, `계약서`, `공문`, `신청서`, `계획서`, or `_form` / `_template`
-- `extract_text.js` returns mostly empty lines (or just headings), but the file is not zero-bytes
-- `extract_text.js --inspect` reports `tableCount >= 1`
+### Two "preview" terms that collide
 
-If ANY of these hits, treat the file as a form. Skip the rest of the decision tree and follow steps 1–3 below.
+- **Claude Code app's Preview side pane** (the side panel in the Code Desktop UI). This is a **host feature** of Claude Code itself. You don't install or configure it — it auto-discovers a process serving on `localhost:3737`.
+- **`scripts/preview-server.js`** — the **claw-hwp local server** that fills that pane. Start it via the launcher described in the `Preview` section. Default port is `3737`, the same port the Code pane auto-discovers.
 
-**Steps:**
-
-0. **Decide where the result goes — and ASK if the user's wording is ambiguous.**
-
-   This is the single most common place where this skill goes wrong: the agent decides on the user's behalf that "원본을 보존하는 게 안전하니까 새 파일을 만들자" out of friendliness, and ends up writing a fresh blank document at `<orig>_updated.hwp` / `<orig>_filled.hwp` / `<orig>_v2.hwp` with none of the form's layout. The user wanted their form filled in, not a sidecar.
-
-   Read the user's wording carefully:
-
-   | User said | Where the result goes | How to do it |
-   |-----------|----------------------|--------------|
-   | "이 파일 **고쳐줘** / **채워줘** / **추가해줘** / **수정해줘**", "여기에 적어줘", "fill in this form", "complete the template" | **In-place on the same file.** This is the default. | Steps 1–3 below on the original path. |
-   | "**사본** 만들어줘", "**복사본**에 추가", "새 파일로 저장", "**다른 이름**으로", "copy and fill in", "save as a new file" | **New path** in the same directory, explicit. | `cp <orig.hwp> <new.hwp>` FIRST, then run steps 1–3 on `<new.hwp>`. The cp preserves the form's layout/tables/fonts — never reach for `create.js` with `setup_document` to "make the copy from scratch". |
-   | User just sent the form and said "도와줘" / "처리해줘" / "이거 좀" / "help me with this" / etc. — no explicit verb about where to put the result | **ASK before doing anything.** One short sentence: "원본 `<filename>` 을 직접 수정할까요, 아니면 사본을 만들까요?" Wait for the answer; do not guess. | — |
-
-   Default to in-place. The user still has Time Machine / git / Finder undo if they want to revert. Creating sidecar files clutters the user's Downloads folder and obscures which file is the "real" one — they almost never want that unless they say so.
-
-   **A "copy" means a byte-for-byte file copy (`cp`), not a regenerated document.** This is the next failure mode after the in-place vs new-path decision: the agent picks "new path" correctly, then reaches for `create.js {setup_document, append_*}` to "build the copy". That isn't a copy — it's a brand-new blank document with a sidecar filename, which loses the form's tables, fonts, header art, and page numbering exactly as if it had overwritten the original. The 1.4.2 code guard on `setup_document` only blocks overwriting the *same* path, not a new path; sidecar regeneration slips past the guard. The only correct way to make a copy of a form is `cp <orig> <new>` (a real filesystem copy) and then edit the copy with `set_cell_text*`.
-
-1. **Probe the form's tables (rhwp inspect) — do NOT extract_text or hwpx-convert for analysis.**
-   `extract_text.js` cannot read text inside `<hp:tbl>` cells (rhwp returns the body paragraph only). An "empty" extract_text result on a form does NOT mean the form is empty — it means the cells are unreadable through that API. Likewise `convert.js` drops tables entirely on hwp→hwpx, so converting to inspect the structure destroys the very thing you need to inspect.
-
-   Use the rhwp probe in Path B step 2 instead. It tells you `(section, paragraph, control, row, col)` for every cell in every table.
-
-2. **Edit with `set_cell_text` or `set_cell_text_by_label` ONLY.**
-   These ops route through the raw-patch path (see "Hancom Docs compatibility" below) and preserve the form's layout, fonts, header art, signature blocks, and page numbering exactly. The user gets a file they can open in Hancom Docs (cloud) and share.
-
-   Do NOT mix in `append_paragraph` / `append_heading` / `append_table` / `replace_text` etc. Mixed payloads silently fall back to the rhwp emit path, which produces files Hancom Docs cloud refuses to open. If the user really needs both kinds of edits, run two separate `create.js` calls and tell them the second output is Hancom-Office-Desktop-only.
-
-3. **Verify the response shows `"mode": "raw-patch"`** in the JSON output. Then `preview_start` / `preview_eval` to show the result. If the user is going to share via Hancom Docs, the raw-patch mode is required.
-
-**Things to NEVER do when filling in a form** (these are the recurring failure modes — every one of these has burned this skill in a past session):
-
-- ❌ `node convert.js form.hwp form.hwpx` to "analyse the structure" — drops every table, you'll never find the cells.
-- ❌ Conclude "the form is empty" from `extract_text.js` output. Form cells are systematically invisible to that tool. (As of 1.4.2, `extract_text.js --inspect` reports the *real* `tableCount` for `.hwp` inputs by talking to rhwp directly, so `tableCount >= 1` is now a reliable form signal.)
-- ❌ Read `convert.js` output XML and try to plan edits from there — the XML is missing the tables.
-- ❌ `create.js` with `setup_document` as the first op on a path that already exists. As of 1.4.2 this is **enforced in code** — `create.js` rejects such payloads with a clear error that points back to `set_cell_text*`. It proceeds only if the caller adds `"allow_overwrite": true` at the top level of the payload, which is an explicit "yes, destroy the existing file" opt-in. Use that escape hatch only when the user really asked for a brand-new file at that path, never as a workaround when `set_cell_text*` looks complicated.
-- ❌ Edit a copy named `*_filled.hwp` / `*_v2.hwp` from scratch — the user wanted in-place edits, not a new file with the same content shape.
-- ❌ Decide on the user's behalf that "원본 보존이 안전하니까 새 파일을 만든다" when the prompt language (`추가해줘`, `채워줘`, `수정해줘`, `여기에 적어줘`) clearly meant in-place. Friendliness reflex that creates `<orig>_updated.hwp` is the exact failure mode that has shipped broken sidecar files to users for three releases running. If the user's wording is unambiguous, just edit in-place; if it's ambiguous, ASK (step 0).
-- ❌ Build "the copy" with `create.js` + `setup_document` even when the user explicitly asked for a copy. A copy of a form means a `cp <orig> <new>` filesystem copy, period. Generating a fresh blank document at a sidecar path is NOT a copy — it's a brand-new file that happens to share a similar name, with none of the original form's tables / layout / signatures. The 1.4.2 guard does not catch this because the output path is different from the input. Read step 0's "How to do it" column: `cp` first, then edit the copy with `set_cell_text*`.
-
-## Hancom Docs compatibility
-
-`set_cell_text` / `set_cell_text_by_label` on an existing `.hwp` use a **raw-patch** path that never calls `rhwp.exportHwp()`. The output keeps the original CFB layout (no `Sh33tJ5` fingerprint, original directory order) and **opens in Hancom Docs cloud**.
-
-The raw-patch path is taken automatically when **every op in the payload is `set_cell_text*` and the file already exists**. Mixed payloads (e.g. `set_cell_text` + `append_paragraph`) silently fall back to the regular rhwp emit path — those outputs open in Hancom Office Desktop but Hancom Docs will reject them. The `create.js` response shows `"mode": "raw-patch"` when the new path runs, so you can tell at a glance.
-
-If you need a Hancom-Docs-compatible result, split the work: one call that only edits cells, separate calls for other op types (paragraph append, etc.).
-
-## ⚠️ Hard rules
-
-> **Default to in-place editing when the user asks to fill in / add to / modify an EXISTING `.hwp` or `.hwpx` form.** `create.js` from scratch destroys the form's layout, fonts, header art, signature blocks, and page numbering — which is almost never what the user wanted when they sent you a template. Reach for `set_cell_text*` (see Path B) first.
->
-> **`replace_text` reporting 0 matches is NOT a "can't edit" signal — it's a "the anchor is inside a table" signal.** rhwp's `searchText` does not enter `<hp:tbl>`. The correct next step is `set_cell_text_by_label`, not regeneration. See Path B.
->
-> **Do NOT use `convert.js` (.hwp → .hwpx) for *analysis*.** The conversion drops every table — by the time you `unpack.py` the result, the form's cells you wanted to inspect are gone. Convert.js is only for *delivering* output to a user who explicitly asked for `.hwpx`, and only when the document is text-heavy with no critical tables.
->
-> **Before declaring a limitation, run the coordinate probe in Path B step 2.** If `getCellInfo` returns any table, you can edit those cells. The "HWPX tables are dropped by `exportHwpx()`" warning listed later applies to *conversion* and *new-document emission*, not to in-place edits.
->
-> **When regeneration IS the right answer**: only after the probe shows the target content is NOT inside an `<hp:tbl>` (e.g. it lives inside an `<hp:rect>` or other shape that this skill's ops can't reach), AND the user has been told that regenerating will lose the original layout, OR the user explicitly asks for a fresh document. State the trade-off plainly first — don't silently swap "fill in" for "create new".
+When the user says "preview", they almost always mean "show me the file" — start the server, hand them the link or fire `preview_start` per the surface decision rule below. Do not interpret it as "install a new preview feature".
 
 ## Quick reference
 
 | Task | Approach |
 |------|----------|
-| Read text content (body paragraphs only — **misses table cells**, see ⚠️ below) | `node scripts/extract_text.js <file>` |
+| Read text content | `node scripts/extract_text.js <file>` — works for both .hwp and .hwpx |
 | Read as markdown (preserves headings/tables) | `node scripts/extract_text.js --format markdown <file>` |
 | Inspect structure (pages, sections, tables) | `node scripts/extract_text.js --inspect <file>` |
-| **Fill in an existing form (cells)** | `set_cell_text` / `set_cell_text_by_label` op via `create.js` — see "🎯 Filling in an existing form" above |
 | Create new document from scratch | `echo '{"path":"out.hwp","operations":[...]}' \| node scripts/create.js` |
-| Edit existing `.hwpx` body text (paragraphs, not table cells) | unpack → edit XML directly with `Edit` tool → pack |
-| Edit existing `.hwp` body text (paragraphs, not table cells) | `replace_text` op via `create.js` |
-| Convert `.hwp` ↔ `.hwpx` (delivery only, drops tables — never use for analysis) | `node scripts/convert.js <input> <output>` |
+| Edit existing `.hwpx` | unpack → edit XML directly with `Edit` tool → pack |
+| Edit existing `.hwp` (HWP 5.0 binary) | convert to `.hwpx` via `convert.js` first, then edit-as-hwpx |
+| Convert `.hwp` ↔ `.hwpx` | `node scripts/convert.js <input> <output>` |
 | Validate output | `python scripts/validate.py <file.hwpx>` |
 | Preview file (Desktop = inline pane, CLI = browser link, cowork = drop-in viewer URL) | See Preview section for the surface decision rule |
 
@@ -113,8 +55,6 @@ When in doubt about format, read the first two bytes — `PK` indicates ZIP (tre
 ## Decision tree
 
 ### "Read this file" / "Summarize" / "Translate the content"
-
-> **Empty `extract_text.js` output does NOT mean the document is empty.** rhwp's text extractor reads body paragraphs but NOT text inside `<hp:tbl>` cells. A government form, a meeting-minute template, or a budget sheet will routinely look "empty" through `extract_text.js` because all the user-visible content lives in tables. If the input is a form and `extract_text.js` is empty, go to "🎯 Filling in an existing form" above — that's the case this skill handles best.
 
 ```bash
 node scripts/extract_text.js path/to/file.hwp > /tmp/text.txt
@@ -188,12 +128,11 @@ Errors come back as `{"status": "error", "message": "...", "op_index": N}`. Alwa
 
 Inline `**bold**` and `*italic*` are parsed automatically inside `text` and table cell strings. `runs:[{text, bold?, italic?, fontSize?, color?}]` overrides the parser when you need finer control.
 
-**Known limitations** (rhwp serializer constraints — these apply to *creation* and *format conversion*. They do NOT apply to in-place editing of an existing `.hwp` file: see Path B in the Edit section, which preserves tables completely):
+**Known limitations** (rhwp serializer constraints — applies to anything emitted via this skill):
 
-- **HWPX tables are dropped when re-emitting via `exportHwpx()`** — i.e. when converting `.hwp` → `.hwpx` or saving a fresh document as `.hwpx`. If a doc has tables, save as `.hwp`. This does **not** affect editing an existing `.hwp` in place; in-place edits via `set_cell_text*` preserve tables.
-- **HWP→HWPX downconversion is lossy** (tables, images, complex shapes). Default to `.hwp` for tables; default to `.hwpx` only when the document is text-heavy. Again, this is a *conversion* constraint, not an *edit* constraint.
-- **`replace_text` doesn't see table cells.** See the op table above and the discussion in Path B. The correct response to 0 matches is to switch to `set_cell_text_by_label`, not to regenerate the document.
-- **Hancom Docs (cloud) only accepts the raw-patch path** — see the Hancom Docs compatibility section near the top. Anything that goes through `rhwp.exportHwp()` (new document creation, mixed payloads, `convert.js` output) opens in Hancom Office Desktop but is rejected by Hancom Docs with "문서를 열 수 없습니다." If the user will share via Hancom Docs, restrict the payload to `set_cell_text*` only.
+- **HWPX tables are dropped by rhwp's `exportHwpx()`**. If a doc has tables, write `.hwp` and (if HWPX is required) round-trip through Hancom Office or 한컴독스 to re-emit the table XML. `convert.js` won't help — it goes through the same rhwp serializer.
+- **HWP→HWPX downconversion is lossy** (tables, images, complex shapes). Default to `.hwp` for tables; default to `.hwpx` only when the document is text-heavy.
+- **`replace_text` doesn't see table cells** (see op table above). For table-cell edits on an existing file, the `set_cell_text*` ops are the only path.
 
 ### "Edit this document" / "Replace X with Y" / "Add a new paragraph"
 
@@ -284,44 +223,9 @@ When the input is `.hwp` and a table cell needs to change, the hwpx round-trip d
    }' | node scripts/create.js
    ```
 
-2. **Coordinate discovery** — when you don't already know `section / para / control / row / col`, do NOT guess and do NOT give up. Run this probe via `node -e` or a temp `.mjs` and read the output:
+2. To discover the right `section / para / control / row / col` coordinates when you don't already know them, dump table structure with `extract_text.js --inspect` (table count + per-table dimensions), or write a tiny probe that calls rhwp's `getCellInfo(sec, para, ctrl, idx)` until it errors. The `set_cell_text_by_label` op handles the common case ("set the cell next to the row labeled X") with no coordinates needed.
 
-   ```javascript
-   // Save as /tmp/probe.mjs, run: node /tmp/probe.mjs <path-to.hwp>
-   import { readFileSync } from 'node:fs';
-   const DIR = '<absolute path to plugin>/skills/hwp/scripts'; // see Bundled scripts below
-   globalThis.measureTextWidth = (f, t) => t.length * (parseFloat(f) || 10) * 0.55;
-   const rhwp = await import(`${DIR}/vendor/rhwp/rhwp.js`);
-   await rhwp.default({ module_or_path: readFileSync(`${DIR}/vendor/rhwp/rhwp_bg.wasm`) });
-   const doc = new rhwp.HwpDocument(new Uint8Array(readFileSync(process.argv[2])));
-   for (let sec = 0; sec < doc.getSectionCount(); sec++) {
-     for (let p = 0, P = doc.getParagraphCount(sec); p < P; p++) {
-       for (let c = 0; c < 64; c++) { // critical: scan all 64 indices per paragraph
-         let info; try { info = JSON.parse(doc.getCellInfo(sec, p, c, 0)); } catch { continue; }
-         if (!info || typeof info.row !== 'number') continue;
-         // It's a table. Walk every cell and print the first non-empty text per row.
-         let rows = 0, cols = 0;
-         const cells = [];
-         for (let i = 0; i < 2000; i++) {
-           let ci; try { ci = JSON.parse(doc.getCellInfo(sec, p, c, i)); } catch { break; }
-           if (!ci || typeof ci.row !== 'number') break;
-           let t = ''; try { t = doc.getTextInCell(sec, p, c, i, 0, 0, 80); } catch {}
-           cells.push({ i, r: ci.row, col: ci.col, t: t.replace(/\s+/g, ' ').trim() });
-           rows = Math.max(rows, ci.row + 1); cols = Math.max(cols, ci.col + 1);
-         }
-         console.log(`sec=${sec} para=${p} ctrl=${c} (${rows}×${cols})`);
-         for (const x of cells) if (x.t) console.log(`  [${x.i}] r=${x.r} c=${x.col} "${x.t}"`);
-       }
-     }
-   }
-   doc.free();
-   ```
-
-   **Why ALL 64 controls per paragraph**: government and corporate forms commonly stack a logo at `ctrl=0`, a checkbox at `ctrl=1`, a textbox at `ctrl=2`, and only THEN the actual cover table at `ctrl=3`. Breaking on the first non-table index silently hides every table behind it. Always scan up to `MAX_CONTROL_IDX = 64`.
-
-   The probe output gives you `sec=X para=Y ctrl=Z` for every table and the labeled cells inside. Pick the table you need, find the row whose anchor matches the user's mention, then write either `set_cell_text` (you have exact `row`+`col`) or `set_cell_text_by_label` with `section`/`para`/`control` scope.
-
-3. **`replace_text` silently misses table cells. This is the most common source of false "can't edit" judgments.** rhwp's `searchText` (and therefore `replaceOne`) does not enter `<hp:tbl>`. If `replace_text` reports 0 matches on what looks like a present anchor, it does NOT mean the document is uneditable. It means the anchor lives in a table cell. **Run the probe above and switch to `set_cell_text_by_label`** — don't fall back to creating a new file.
+3. **`replace_text` will silently miss table cells.** rhwp's `searchText` (and therefore `replaceOne`) does not enter `<hp:tbl>`. If `replace_text` reports 0 matches on what looks like a present anchor, the anchor is almost certainly inside a table — switch to `set_cell_text_by_label`.
 
 4. **Auto-preview after writes.** Per the trigger guidance below, fire `preview_start` / `preview_eval` immediately after the write so the user sees the edit, instead of asking them to verify.
 
@@ -441,7 +345,6 @@ In Desktop and CLI paths, "fire preview" means open the viewer / link directly. 
 
 ## Common pitfalls
 
-- **Don't silently regenerate an existing form just because `replace_text` returned 0 matches.** The most common failure mode of this skill: `replace_text` returns 0 → Claude concludes "table editing is unsupported" → calls `create.js` with `setup_document`, destroying the form's layout, header, fonts, signature blocks, and page numbering. The correct first response to 0 matches is the Path B coordinate probe + `set_cell_text_by_label`. Regeneration is acceptable as a final fallback when (a) the probe shows the target isn't in an `<hp:tbl>` and (b) the user has been told the original layout will be lost — not as a silent first reflex.
 - **HWP 5.0 lossy round-trip**: `.hwp` → `.hwpx` → `.hwp` may drop formatting. Default to `.hwpx` output. Only round-trip back to `.hwp` on explicit user request, and warn first.
 - **Misnamed extensions**: a `.hwp` file may actually be HWPX (starts with `PK`). Detect by reading the magic bytes before deciding on workflow.
 - **Encoding**: all HWPX XML is UTF-8. Never transcode. Don't escape Korean characters as XML entities — write them as-is.

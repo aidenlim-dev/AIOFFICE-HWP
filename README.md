@@ -26,7 +26,7 @@
 - **변환** — `.hwp ↔ .hwpx` 양방향 변환 (rhwp WASM). 무손실은 아닙니다 — 라운드트립 시 표·이미지가 손상될 수 있습니다
 - **미리보기** — rhwp 가 렌더한 페이지를 인라인 또는 브라우저에서 확인 (환경별로 방식이 다름 — 아래 [환경별 사용법](#환경별-사용법) 참조)
 
-읽기 / 만들기 / 편집 / 변환은 Claude 가 Bash 와 파일 시스템을 쓸 수 있는 모든 환경에서 작동합니다 — Claude Code CLI, Claude Code Desktop (Code 모드), Claude Desktop cowork 모드, claude.ai cowork.
+읽기 / 만들기 / 편집 / 변환은 Bash 와 파일 시스템을 쓸 수 있는 데스크탑 앱 환경에서 작동합니다 — Claude Code CLI, Claude Code Desktop (Code 모드), Claude Desktop cowork 모드. (claude.ai 웹은 v1 에서 플러그인 설치 미지원)
 
 미리보기는 환경마다 방식이 다릅니다:
 
@@ -35,7 +35,6 @@
 | Claude Code Desktop (Code 모드) | 대화 옆 인라인 패널 |
 | Claude Code CLI | 로컬 `localhost:3737` 브라우저 링크 (에이전트가 서버 자동 기동) |
 | Claude Desktop cowork 모드 | <https://dohyun468.github.io/claw-hwp/> 페이지에 파일 끌어 놓기 (Node 설치 불필요) |
-| claude.ai cowork (웹) | <https://dohyun468.github.io/claw-hwp/> 페이지에 파일 끌어 놓기 (Node 설치 불필요) |
 
 한컴오피스 / LibreOffice / Windows COM 모두 **필요 없습니다**.
 
@@ -88,45 +87,40 @@ claw-hwp 는 한국 HWP 형식을 오픈소스로 다루려는 더 큰 흐름의
 
 ## 설치
 
-본인이 쓰는 환경에 따라 한 가지 길만 따라하면 됩니다. 세 환경 모두 같은 스킬 파일을 씁니다.
+> **Claude Desktop 앱 (Mac / Windows)** 기준입니다. claude.ai 웹은 현재 플러그인 설치를 지원하지 않아 v1 에서는 데스크탑 앱에서만 동작합니다 — 웹 사용자는 [Claude Desktop](https://claude.com/download) 을 받아서 진행해 주세요.
 
-### 처음이세요? — Claude 에게 부탁하세요 (Claude Desktop, claude.ai 웹)
+### 일반 사용자 — Customize 메뉴에서 추가 (3 단계)
 
-Claude 한테 직접 시키는 방법: Claude 채팅 (Desktop 앱이든 claude.ai 웹이든) 에 아래 한 줄을 그대로 붙여넣으세요:
+1. Claude Desktop 의 **Code** 탭에서 왼쪽 사이드바 **Customize** 클릭.
+2. **Personal plugins** 옆 **`+`** → **Create plugin** → **Add marketplace** 선택.
+3. URL 칸에 아래 한 줄 붙여넣고 **Sync** 클릭:
 
-```
-https://github.com/DoHyun468/claw-hwp 이 스킬 설치 도와줘
-```
+   ```
+   https://github.com/DoHyun468/claw-hwp
+   ```
 
-사용 중인 OS (Mac / Windows) 와 환경 (앱 / 웹) 에 맞춰 Claude 가 단계별로 안내해 줍니다. 명령어 입력 없이 진행됩니다.
+**Sync 누르면 설치 끝.** Personal plugins 목록에 `claw-hwp` 가 자동으로 추가되고 바로 활성화됩니다. 이후 `.hwp` / `.hwpx` 파일을 채팅에 드롭하거나 파일명을 언급하면 자동으로 스킬이 작동합니다.
 
-<details>
-<summary>직접 손으로 깔고 싶다면 (수동 단계)</summary>
+<!-- TODO(media): Customize → Personal plugins → Add marketplace → Sync 클릭 흐름 스크린샷 -->
 
-**1. GitHub 에서 zip 받기**
+### 첫 사용 — Claude 에게 이렇게 말하세요
 
-<https://github.com/DoHyun468/claw-hwp> 페이지를 엽니다 → 파일 목록 위쪽의 녹색 **`Code`** 버튼 클릭 → **`Download ZIP`**. `claw-hwp-main.zip` 같은 파일이 다운로드 됩니다.
+설치 끝났으면 Claude 는 `.hwp` / `.hwpx` 가 컨텍스트에 있을 때 자동으로 이 스킬을 부릅니다. 추상적인 "설정해줘" / "만들어줘" 요청은 Claude 가 새 스킬을 처음부터 만들려 하거나 별도 install 단계를 안내할 수 있어서 헷갈리는 결과로 이어집니다.
 
-**2. 스킬 폴더만 다시 zip 으로 묶기**
+| ✅ 잘 통하는 요청 | ⚠️ Claude 가 헷갈리는 요청 |
+|---|---|
+| `report.hwp 보여줘` (파일 첨부) | `claw-hwp 따라서 만들어줘` |
+| `이 한글 파일 열어줘` | `preview 기능 설치해줘` |
+| `회의록.hwp 에 다음 줄 추가해줘` | `claw-hwp 스킬 설정해줘` |
+| `2026 → 2027 로 바꿔줘` | `한글 플러그인 셋업해줘` |
 
-받은 zip 을 더블클릭해서 풀면 `claw-hwp-main` 폴더가 생깁니다. 그 안에서 `plugins` → `claw-hwp` → `skills` → `hwp` 폴더까지 들어갑니다 (`SKILL.md` 파일과 `scripts/`, `references/` 폴더가 보이면 맞아요).
+요지: `.hwp` 파일이나 파일명을 함께 언급하면 자동 호출됩니다. preview 도 자동으로 떠요 — 별도 설치/설정 단계 없습니다.
 
-이 `hwp` 폴더를 통째로 다시 zip 으로 압축합니다:
-- **Mac**: `hwp` 폴더 우클릭 → **압축** → `hwp.zip` 생성됨
-- **Windows**: `hwp` 폴더 우클릭 → **보내기 → 압축(zip) 폴더** → `hwp.zip` 생성됨
+### 업데이트 후엔 새 세션을 띄워 주세요
 
-**3. Claude 에 업로드**
+진행 중인 세션은 시작 시점의 스킬 스냅샷을 끝까지 들고 갑니다 — `claude plugin marketplace update claw-hwp` 또는 Customize → Sync 로 cache 가 새 버전으로 올라가도, **이미 열려 있던 세션은 옛 SKILL.md / 옛 스크립트로 계속 동작합니다**. 새 버전 동작 (예: 표 셀 채우기의 한컴독스-호환 raw-patch 경로) 을 보려면 기존 세션을 종료하고 새 세션을 여세요.
 
-본인 환경에 따라:
-
-- **Claude Desktop 앱**: **Settings → Skills → Upload skill** → 방금 만든 `hwp.zip` 선택
-- **claude.ai 웹** (Pro / Max / Team / Enterprise 플랜 필요): **Settings → Capabilities → Skills → Add skill** → 방금 만든 `hwp.zip` 선택
-
-업로드 후 `.hwp` / `.hwpx` 파일을 채팅에 첨부하거나 "한글 보고서 만들어줘" 같이 한글 문서 관련 작업을 시키면 자동으로 스킬이 작동합니다.
-
-</details>
-
-### Claude Code (CLI) — 명령어 한 줄 (개발자용)
+### 개발자 — Claude Code CLI (명령어 한 줄)
 
 ```bash
 # 1. 마켓플레이스 등록 (한 번만)
@@ -138,8 +132,6 @@ claude plugin install claw-hwp@claw-hwp
 
 설치 후 `.hwp` / `.hwpx` 파일을 언급하면 Claude Code 가 자동으로 스킬을 불러옵니다. 업데이트는 `claude plugin marketplace update claw-hwp`.
 
-> ⚠️ **플러그인 업데이트 후엔 새 세션을 띄워 주세요.** 진행 중인 세션은 시작 시점의 스킬 스냅샷을 계속 들고 갑니다 — cache 가 새 버전으로 올라가도 그 세션은 옛 SKILL.md / 옛 스크립트로 계속 동작합니다. 새 버전의 동작 (예: `set_cell_text*` 의 한컴독스-호환 raw-patch 경로) 을 보려면 기존 세션을 종료하고 새 세션을 여세요.
-
 > **별도 의존성 설치 불필요**. Node 의존성 (`@rhwp/core` WASM 약 5 MB, `fflate` 약 80 KB) 이 `scripts/vendor/` 에 vendoring 돼 있어, Node 18+ / Python 3.9+ 만 있으면 바로 작동합니다 — `npm install` 단계 없습니다.
 
 전체 결정 트리 (read / create / edit / convert / validate) 는 `plugins/claw-hwp/skills/hwp/SKILL.md` 를 참조하세요.
@@ -148,7 +140,7 @@ claude plugin install claw-hwp@claw-hwp
 
 미리보기 동작 방식만 환경마다 조금씩 다릅니다 (읽기/만들기/편집 흐름 자체는 어디서든 같음). 본인 환경에 맞는 항목을 보세요.
 
-> 이 섹션은 Bash + 파일시스템 접근이 있는 환경 (Claude Code Desktop / Claude Code CLI / cowork 모드) 만 다룹니다. Bash 가 없는 일반 chat (claude.ai 웹 chat, Claude Desktop 의 비-cowork 모드) 에서는 이 스킬 자체가 실행되지 않습니다 — 단, 미리보기 페이지 <https://dohyun468.github.io/claw-hwp/> 자체는 누구나 `.hwp` / `.hwpx` 파일만 있으면 브라우저에서 바로 쓸 수 있습니다 (스킬/플러그인 설치 불필요).
+> 이 섹션은 Bash + 파일시스템 접근이 있는 데스크탑 앱 환경 (Code 모드 / cowork 모드) 과 Claude Code CLI 만 다룹니다. Claude Desktop 의 일반 chat 모드 와 claude.ai 웹 (v1 플러그인 미지원) 에서는 이 스킬이 동작하지 않습니다 — 단, 미리보기 페이지 <https://dohyun468.github.io/claw-hwp/> 자체는 누구나 `.hwp` / `.hwpx` 파일만 있으면 브라우저에서 바로 쓸 수 있습니다 (설치 불필요).
 
 ### Claude Code Desktop (Code 모드)
 
@@ -162,7 +154,7 @@ claude plugin install claw-hwp@claw-hwp
 
 <!-- TODO(media): CLI — 마크다운 링크 + 브라우저 미리보기 스크린샷/영상 -->
 
-### Cowork (claude.ai 웹 cowork, Claude Desktop 의 cowork 모드)
+### Claude Desktop — Cowork 모드
 
 Cowork 는 Claude 가 원격 샌드박스에서 돌기 때문에 미리보기 서버에 직접 접근할 수 없습니다. 대신 같은 뷰어를 **GitHub Pages 정적 페이지** 로 호스팅해 둡니다:
 
