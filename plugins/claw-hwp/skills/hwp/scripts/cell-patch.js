@@ -1511,7 +1511,7 @@ function findLastLevel0Paragraph(records) {
 //   - line_segs_count to 0 (Hancom recomputes line layout from text)
 //   - range_tags_count to 0
 //   - instance_id to a fresh unique value
-function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFlag, newInstanceId, breakValOverride) {
+function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFlag, newInstanceId, breakValOverride, lineSegCount) {
   const bodySize = srcParaHeaderRec.size;
   if (bodySize < 24) throw new Error(`PARA_HEADER body too short to clone properly: ${bodySize} (need >= 24)`);
   const body = Buffer.alloc(bodySize);
@@ -1527,8 +1527,10 @@ function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFla
   body.writeUInt16LE(1, 12);
   // range_tags_count (offset 14) → 0
   body.writeUInt16LE(0, 14);
-  // line_segs_count (offset 16) → 0 (let Hancom recompute on open)
-  body.writeUInt16LE(0, 16);
+  // line_segs_count (offset 16) → caller-supplied. 0 for plain paragraphs
+  // (Hancom recomputes layout from text), 1 for break paragraphs (where
+  // we emit a PARA_LINE_SEG record to match the ktx-style structure).
+  body.writeUInt16LE(lineSegCount | 0, 16);
   // instance_id (offset 18..21) → fresh unique value
   body.writeUInt32LE(newInstanceId >>> 0, 18);
   // bytes 22..23 stay as cloned from source.
@@ -1563,6 +1565,31 @@ function pickFreshInstanceId(records, raw) {
 function buildBodyParaTextRecord(text) {
   const body = Buffer.from(text + PARA_TEXT_EOP, 'utf16le');
   return buildParaTextRecord(body, 1);
+}
+
+// Find any level-1 PARA_LINE_SEG record in the section and return its
+// body bytes (36 bytes / line-seg entry). Used to seed a sensible
+// line_seg for break paragraphs we emit — Hancom recomputes line layout
+// on open anyway, so the source values don't have to be accurate; they
+// just have to be present and well-formed.
+function findAnyLineSegBody(records, raw) {
+  const TAG_PARA_LINE_SEG = 0x45;
+  for (const r of records) {
+    if (r.tag === TAG_PARA_LINE_SEG && r.level === 1 && r.size >= 36) {
+      // Take exactly one entry (36 bytes) — the first.
+      return Buffer.from(raw.slice(r.dataOff, r.dataOff + 36));
+    }
+  }
+  // No reference available — fall back to all-zero entry. Hancom will
+  // recompute layout from text + paraShape, and an all-zero entry is
+  // still well-formed in shape (just doesn't describe anything yet).
+  return Buffer.alloc(36);
+}
+
+function buildLineSegRecord(body36, level) {
+  const head = Buffer.alloc(4);
+  head.writeUInt32LE(((36 << 20) | (level << 10) | 0x45) >>> 0, 0);
+  return Buffer.concat([head, body36]);
 }
 
 // Emit a fresh PARA_CHAR_SHAPE record with a single entry (charPos=0,
@@ -1661,20 +1688,30 @@ export async function appendParagraphInPlace(filePath, ops) {
     const template = findLastSimpleBodyParagraph(records);
     const srcHeader = records[template.startIdx];
 
-    const newCharCount = op.text.length + 1; // + EOP
+    const isBreakOnly = (op.breakVal | 0) !== 0 && op.text === '';
+    const newCharCount = isBreakOnly ? 1 : (op.text.length + 1); // EOP only for break-only
     const newInstanceId = pickFreshInstanceId(records, raw);
-    // Build the new paragraph WITHOUT the last-paragraph flag —
-    // whichever paragraph in the file currently carries it keeps it.
-    // breakVal (if provided) overrides the template's break_val byte —
-    // append_page_break uses 0x04, insert_column_break uses 0x08.
-    const newHeader = buildClonedParaHeader(srcHeader, raw, newCharCount, false, newInstanceId, op.breakVal);
-    const newText = buildBodyParaTextRecord(op.text);
-    // Emit a single PARA_CHAR_SHAPE record (one entry at charPos=0).
-    // This matches num_char_shapes=1 set in the PARA_HEADER above.
-    // We drop PARA_LINE_SEG / PARA_RANGE_TAG entirely (Hancom recomputes
-    // line layout from the text + paraShape on open).
+    // Two shapes:
+    //   - Plain paragraph: PARA_HEADER + PARA_TEXT + PARA_CHAR_SHAPE
+    //     (line_segs_count=0; Hancom recomputes line layout)
+    //   - Break-only paragraph: PARA_HEADER + PARA_CHAR_SHAPE + PARA_LINE_SEG
+    //     (no PARA_TEXT; matches ktx's empty page-break paragraphs).
+    //     ktx's #13/#90 (page break) carry line_segs_count=1 and a
+    //     PARA_LINE_SEG record. Hancom Docs rejects break paragraphs
+    //     that have line_segs_count=0 (the v1 attempt of Phase 4-2/3).
+    const lineSegCount = isBreakOnly ? 1 : 0;
+    const newHeader = buildClonedParaHeader(srcHeader, raw, newCharCount, false, newInstanceId, op.breakVal, lineSegCount);
     const newCharShape = buildSingleCharShapeRecord(records, raw, template.startIdx, template.endIdx, 1);
-    const newCluster = Buffer.concat([newHeader, newText, newCharShape]);
+
+    let newCluster;
+    if (isBreakOnly) {
+      const lineSegBody = findAnyLineSegBody(records, raw);
+      const newLineSeg = buildLineSegRecord(lineSegBody, 1);
+      newCluster = Buffer.concat([newHeader, newCharShape, newLineSeg]);
+    } else {
+      const newText = buildBodyParaTextRecord(op.text);
+      newCluster = Buffer.concat([newHeader, newText, newCharShape]);
+    }
 
     // Insert at the end of the template cluster — i.e. right between
     // the last simple paragraph and whatever comes next (typically a
