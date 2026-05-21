@@ -1,9 +1,7 @@
 // preview-viewer.js — Canvas-based HWP/HWPX viewer for the Claude Code
-// preview pane. Direct vanilla-JS port of MyAgent-frontend's HwpViewer.tsx
-// render path. The class names and identifiers below are kept close to the
-// React source so cross-comparison stays trivial.
+// preview pane. Vanilla-JS canvas renderer driven by rhwp WASM.
 //
-// Key points from MyAgent's tsx that you MUST preserve when editing:
+// Key points to preserve when editing:
 //   - Set globalThis.measureTextWidth via a hidden <canvas> 2d context
 //     BEFORE initialising rhwp WASM. rhwp calls it during text layout.
 //   - Cap canvas pixel area at MAX_CANVAS_PIXELS so very large pages don't
@@ -121,7 +119,7 @@ function scrollToPage(n) {
   syncPageNav();
 }
 
-// ── 6. Layout helpers (copied directly from MyAgent HwpViewer.tsx) ────────
+// ── 6. Layout helpers ─────────────────────────────────────────────────────
 const MAX_CANVAS_PIXELS = 67_108_864; // ≈ 8192 × 8192
 function pickEffectiveDpr(pageW, pageH, zoom, rawDpr) {
   const phys = pageW * zoom * rawDpr * pageH * zoom * rawDpr;

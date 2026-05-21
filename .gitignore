@@ -37,3 +37,7 @@ spike/
 
 # internal-only docs (marketing / strategy notes shared across local sessions)
 _*.md
+
+# internal-only / cross-project notes — never publish
+MYAGENT*
+*SNAPSHOT*

@@ -13,7 +13,7 @@ End-to-end create + edit pipeline working, **zero-config** (deps vendored).
 | `unpack.py` | ✅ v0 | `zipfile` + `xml.dom.minidom` pretty-print. `--no-pretty` flag for raw mode |
 | `pack.py` | ✅ v0 | mimetype-first uncompressed entry per OPF spec. Sorted file order for reproducibility |
 | `validate.py` | ✅ v0 | Zip integrity + mimetype + required files + XML well-formedness |
-| `create.js` | ✅ v0 | stdin-JSON op runner. Op vocabulary in `SKILL.md`. Mirrors MyAgent's `create_hwp.mjs` byte-for-byte (only random `id`/`instid` differ on `.hwpx`). |
+| `create.js` | ✅ v0 | stdin-JSON op runner. Op vocabulary in `SKILL.md`. |
 | `vendor/` | ✅ v0 | `@rhwp/core` (rhwp.js + rhwp_bg.wasm, ~5 MB), `fflate` (index.mjs, ~80 KB), and `cfb` (cfb.js, ~62 KB) bundled. Each subdir keeps the upstream LICENSE |
 
 ## Verified pipeline

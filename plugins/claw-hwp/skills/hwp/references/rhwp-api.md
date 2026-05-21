@@ -385,4 +385,4 @@ try {
 }
 ```
 
-This pattern — `createEmpty` → mutate via insert/apply methods → `exportHwpx` → `free` — is the canonical scaffold for `create.js`. Note that `create.js` itself should align with MyAgent's existing HWP creation tool (see project notes); the example above is the rhwp-side primitive set, not a finished implementation.
+This pattern — `createEmpty` → mutate via insert/apply methods → `exportHwpx` → `free` — is the canonical scaffold for `create.js`. The example above is the rhwp-side primitive set, not a finished implementation.
