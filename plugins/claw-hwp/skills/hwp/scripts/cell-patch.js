@@ -830,29 +830,80 @@ function deflateToFit(data, capacity) {
   throw new Error(`deflated payload (${best.length} bytes, best of attempted levels) exceeds sector chain capacity (${capacity} bytes). Patch cannot expand sectors in-place; refusing to overflow.`);
 }
 
+// Allocate a fresh regular-FAT chain of N sectors at the end of the file.
+// Threads them together in the FAT, returns { buf, fat, chain }.
+function allocateRegularChain(buf, ssz, fat, fatAddrs, sectorCount) {
+  let workBuf = buf;
+  let workFat = fat;
+  const chain = [];
+  for (let i = 0; i < sectorCount; i++) {
+    const projectedIdx = workBuf.length / ssz - 1 + 1;
+    const exp = expandFatCapacity(workBuf, ssz, workFat, fatAddrs, projectedIdx + 1);
+    workBuf = exp.buf;
+    workFat = exp.fat;
+    const alloc = appendBlankSector(workBuf, ssz);
+    workBuf = alloc.buf;
+    const newSec = alloc.newSecIdx;
+    if (chain.length === 0) {
+      writeFatEntry(workBuf, ssz, fatAddrs, newSec, ENDOFCHAIN);
+      workFat[newSec] = ENDOFCHAIN;
+    } else {
+      const prev = chain[chain.length - 1];
+      writeFatEntry(workBuf, ssz, fatAddrs, prev, newSec);
+      writeFatEntry(workBuf, ssz, fatAddrs, newSec, ENDOFCHAIN);
+      workFat[prev] = newSec;
+      workFat[newSec] = ENDOFCHAIN;
+    }
+    chain.push(newSec);
+  }
+  return { buf: workBuf, fat: workFat, chain };
+}
+
 // Phase 3b helper for mini-stream Sections. Mirrors
 // deflateAndFitWithExpansion but works through mini-FAT / root-chain
-// machinery. Throws "would exceed 4096-byte mini-stream cutoff" when the
-// patched payload would no longer fit a mini-stream — Phase 3b-2 will
-// handle promotion to the regular FAT in that case.
+// machinery. Two outcomes for an overflow:
+//   - patched payload still fits under 4096 bytes (the mini-stream
+//     cutoff) → extend the mini-FAT chain via extendMinifatChain
+//   - patched payload would be >= 4096 bytes → promote to the regular
+//     FAT (allocate a new chain, free the old mini-sectors, signal the
+//     caller via `promoted: true` so it updates dir entry start/size)
 function deflateMiniChainWithExpansion(ctx, raw, miniChain) {
-  const { ssz, mssz } = ctx;
+  const { ssz, mssz, minifatStart, fatAddrs, rootChain, rootEntry } = ctx;
+  let { buf, fat, minifat } = ctx;
   const capacity = miniChain.length * mssz;
   try {
     const compressed = deflateToFit(raw, capacity);
-    return { ...ctx, miniChain, compressed };
+    return { ...ctx, miniChain, compressed, promoted: false };
   } catch (err) {
     if (!/exceeds sector chain capacity/.test(err.message)) throw err;
     const minimal = deflateRawSync(raw, { level: 9 });
+
     if (minimal.length >= 4096) {
-      throw new Error(`Mini-stream patch would exceed the 4096-byte mini-stream cutoff (deflated ${minimal.length} bytes); promotion to regular FAT not yet implemented`);
+      // ── Promotion: mini-stream → regular FAT ────────────────────────
+      const neededSectors = Math.ceil(minimal.length / ssz);
+      const alloc = allocateRegularChain(buf, ssz, fat, fatAddrs, neededSectors);
+      buf = alloc.buf;
+      fat = alloc.fat;
+      const newChain = alloc.chain;
+      // Release the old mini-sector chain (each entry → FREESECT).
+      for (const miniIdx of miniChain) {
+        writeMinifatEntry(buf, ssz, mssz, fat, minifatStart, miniIdx, FREESECT);
+        minifat[miniIdx] = FREESECT;
+      }
+      const compressed = deflateToFit(raw, newChain.length * ssz);
+      return {
+        buf, fat, fatAddrs, minifat, minifatStart, ssz, mssz, rootChain, rootEntry,
+        newRegularChain: newChain, compressed, promoted: true,
+      };
     }
+
+    // ── Mini-FAT chain extension (stays in mini-stream) ──────────────
     const neededMiniSectors = Math.ceil(minimal.length / mssz);
     const additionalMiniSectors = neededMiniSectors - miniChain.length;
     const ext = extendMinifatChain(ctx, miniChain, additionalMiniSectors);
     const newCapacity = ext.miniChain.length * mssz;
     const compressed = deflateToFit(raw, newCapacity);
-    return { ...ext, compressed };
+    return { ...ext, compressed, promoted: false };
   }
 }
 
@@ -952,8 +1003,8 @@ function patchInPlaceSectors(filePath, resolved) {
 
     // Deflate + fit. Regular-FAT chains auto-expand if the patched payload
     // grew past capacity (Phase 3); mini-stream chains do the same via
-    // mini-FAT expansion (Phase 3b). Promotion to regular FAT when the
-    // patched payload crosses 4096 bytes still throws — Phase 3b-2.
+    // mini-FAT expansion, and promote to regular FAT when the payload
+    // crosses the 4096-byte mini-stream cutoff (Phase 3b).
     let newCompressed;
     if (inMiniStream) {
       const rc = ensureRootChain();
@@ -965,10 +1016,20 @@ function patchInPlaceSectors(filePath, resolved) {
       fat = ext.fat;
       minifat = ext.minifat;
       minifatStart = ext.minifatStart;
-      rootChain = ext.rootChain;
-      chain = ext.miniChain;
       newCompressed = ext.compressed;
-      writeMiniChainBytes(buf, chain, rootChain, ssz, mssz, newCompressed);
+      if (ext.promoted) {
+        // Stream just moved from mini → regular FAT. Update dir entry's
+        // start field; CFB readers infer storage from size (>= 4096 →
+        // regular FAT, < 4096 → mini-stream), so updating size below
+        // also flips the interpretation.
+        chain = ext.newRegularChain;
+        writeChainBytes(buf, chain, ssz, newCompressed);
+        buf.writeInt32LE(chain[0], dirEntry.entryFileOffset + 0x74);
+      } else {
+        rootChain = ext.rootChain;
+        chain = ext.miniChain;
+        writeMiniChainBytes(buf, chain, rootChain, ssz, mssz, newCompressed);
+      }
     } else {
       const r = deflateAndFitWithExpansion(raw, capacity, ssz, fat, fatAddrs, chain, buf, false);
       buf = r.buf;
@@ -1315,9 +1376,9 @@ export async function replaceTextInPlace(filePath, ops) {
     }
     if (!dirty) continue;
 
-    // Deflate + fit. Both regular-FAT and mini-stream chains auto-expand
-    // (Phase 3 / 3b). Promotion to regular FAT when a mini-stream patch
-    // crosses 4096 bytes still throws — Phase 3b-2.
+    // Deflate + fit. Both regular-FAT and mini-stream chains auto-expand,
+    // and mini-stream Sections promote to regular FAT when the patched
+    // payload exceeds the 4096-byte mini-stream cutoff (Phase 3 / 3b).
     let newCompressed;
     if (inMiniStream) {
       const rc = ensureRootChain();
@@ -1329,10 +1390,16 @@ export async function replaceTextInPlace(filePath, ops) {
       fat = ext.fat;
       minifat = ext.minifat;
       minifatStart = ext.minifatStart;
-      rootChain = ext.rootChain;
-      chain = ext.miniChain;
       newCompressed = ext.compressed;
-      writeMiniChainBytes(buf, chain, rootChain, ssz, mssz, newCompressed);
+      if (ext.promoted) {
+        chain = ext.newRegularChain;
+        writeChainBytes(buf, chain, ssz, newCompressed);
+        buf.writeInt32LE(chain[0], dirEntry.entryFileOffset + 0x74);
+      } else {
+        rootChain = ext.rootChain;
+        chain = ext.miniChain;
+        writeMiniChainBytes(buf, chain, rootChain, ssz, mssz, newCompressed);
+      }
     } else {
       const r = deflateAndFitWithExpansion(raw, capacity, ssz, fat, fatAddrs, chain, buf, false);
       buf = r.buf;
