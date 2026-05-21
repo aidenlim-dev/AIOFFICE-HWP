@@ -1609,10 +1609,29 @@ async function readStdin() {
   // for the first cut — see cell-patch.js / replaceTextInPlace).
   const CELL_OPS = new Set(['set_cell_text', 'set_cell_text_by_label']);
   const REPLACE_TEXT_OPS = new Set(['replace_text']);
-  // append_paragraph / append_page_break / insert_column_break all route
-  // through appendParagraphInPlace — they differ only in the break_val byte
-  // of the new paragraph's PARA_HEADER body (0 / 0x04 / 0x08).
-  const APPEND_PARA_OPS = new Set(['append_paragraph', 'append_page_break', 'insert_column_break']);
+  // All paragraph-shaped append ops route through appendParagraphInPlace.
+  // Some carry a break_val (page/column break); the rest just add text.
+  //   append_paragraph                    → break_val 0
+  //   append_heading                      → break_val 0 (no styling — see SKILL.md limitation)
+  //   append_bullet_list                  → break_val 0 (no marker — see SKILL.md limitation)
+  //   append_numbered_list                → break_val 0 (no marker — see SKILL.md limitation)
+  //   append_page_break                   → break_val 0x04 (empty paragraph)
+  //   insert_column_break                 → break_val 0x08 (empty paragraph)
+  //   setup_columns                       → break_val 0x02 (multi-column / empty paragraph)
+  // append_heading / append_*_list run as plain paragraphs in raw-patch:
+  // raw-patch can't synthesize new char-shape entries in DocInfo, so
+  // visual styling (font size, bold, list markers) doesn't change. The
+  // text shows up in the right position; users wanting visual headings
+  // pre-design the form with heading paragraphs and use replace_text.
+  const APPEND_PARA_OPS = new Set([
+    'append_paragraph',
+    'append_heading',
+    'append_bullet_list',
+    'append_numbered_list',
+    'append_page_break',
+    'insert_column_break',
+    'setup_columns',
+  ]);
   const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS]);
   const allRawPatch = ops.length > 0 && ops.every((o) => RAW_PATCH_OPS.has(o.type));
   if (ext === '.hwp' && fs.existsSync(outPath) && allRawPatch) {
@@ -1638,11 +1657,21 @@ async function readStdin() {
       }
       if (appendOps.length > 0) {
         const { appendParagraphInPlace } = await import('./cell-patch.js');
-        // Map op type to break_val (HWP PARA_HEADER body offset 11):
-        //   append_paragraph     → 0       (no break)
-        //   append_page_break    → 0x04    (page break)
-        //   insert_column_break  → 0x08    (column break)
-        const BREAK_VAL = { 'append_paragraph': 0, 'append_page_break': 0x04, 'insert_column_break': 0x08 };
+        // Map op type to break_val (HWP PARA_HEADER body offset 11).
+        // Plain paragraph / heading / list ops carry break_val 0 — the
+        // dispatcher treats them all as paragraphs with text. Break-
+        // family ops set their corresponding bit and have empty text
+        // (the break paragraph itself is empty; user adds text via a
+        // following append_paragraph).
+        const BREAK_VAL = {
+          'append_paragraph': 0,
+          'append_heading': 0,
+          'append_bullet_list': 0,
+          'append_numbered_list': 0,
+          'append_page_break': 0x04,
+          'insert_column_break': 0x08,
+          'setup_columns': 0x02,
+        };
         const normalizedAppendOps = appendOps.map((o) => ({
           ...o,
           text: o.text ?? '',
