@@ -244,7 +244,11 @@ function parseCfbHeader(buf) {
   if ((mver === 3 && ssz !== 512) || (mver === 4 && ssz !== 4096)) {
     throw new Error(`CFB sector size ${ssz} inconsistent with version ${mver}`);
   }
+  const miniSectorShift = buf.readUInt16LE(0x20);
+  const mssz = 1 << miniSectorShift; // typically 64 bytes
   const dirStart = buf.readInt32LE(0x30);
+  const minifatStart = buf.readInt32LE(0x3C);
+  const numMinifat = buf.readInt32LE(0x40);
   const difatStart = buf.readInt32LE(0x44);
   const difatCount = buf.readInt32LE(0x48);
 
@@ -268,7 +272,73 @@ function parseCfbHeader(buf) {
     }
     difatSec = buf.readInt32LE(off + (ssz - 4));
   }
-  return { mver, ssz, dirStart, fatAddrs };
+  return { mver, ssz, mssz, dirStart, fatAddrs, minifatStart, numMinifat };
+}
+
+// Read the entire mini-FAT as a flat array. Mini-FAT sectors themselves
+// live in the regular FAT (we walk that chain from minifatStart), and each
+// mini-FAT sector is the usual ssz bytes packed with i32 entries that point
+// to the next mini-sector index in a mini-stream's chain.
+function readMinifat(buf, fat, ssz, minifatStart) {
+  if (minifatStart < 0 || minifatStart === ENDOFCHAIN) return new Int32Array(0);
+  const minifatSectors = walkChain(fat, minifatStart);
+  const entriesPerSec = ssz >>> 2;
+  const minifat = new Int32Array(minifatSectors.length * entriesPerSec);
+  for (let s = 0; s < minifatSectors.length; s++) {
+    const off = (minifatSectors[s] + 1) * ssz;
+    for (let i = 0; i < entriesPerSec; i++) {
+      minifat[s * entriesPerSec + i] = buf.readInt32LE(off + i * 4);
+    }
+  }
+  return minifat;
+}
+
+// Mini-stream content lives inside the root entry's regular-FAT chain.
+// A mini-sector index addresses a 64-byte slot inside that chain: slot N
+// is at offset (rootChain[N / slotsPerSec] + 1) * ssz + (N % slotsPerSec) * mssz.
+function miniSectorFileOffset(miniIdx, rootChain, ssz, mssz) {
+  const slotsPerSec = ssz / mssz;
+  const regSecIdx = Math.floor(miniIdx / slotsPerSec);
+  const inSec = miniIdx % slotsPerSec;
+  if (regSecIdx >= rootChain.length) throw new Error(`mini-sector ${miniIdx} outside root chain (${rootChain.length} regular sectors)`);
+  return (rootChain[regSecIdx] + 1) * ssz + inSec * mssz;
+}
+
+function readMiniChainBytes(buf, miniChain, rootChain, ssz, mssz, size) {
+  const out = Buffer.alloc(size);
+  let written = 0;
+  for (const mIdx of miniChain) {
+    if (written >= size) break;
+    const off = miniSectorFileOffset(mIdx, rootChain, ssz, mssz);
+    const take = Math.min(mssz, size - written);
+    buf.copy(out, written, off, off + take);
+    written += take;
+  }
+  return out;
+}
+
+// Mirror of writeChainBytes for mini-streams. The error message is kept
+// in lock-step with the regular-chain version so patchCellsInPlace's
+// fallback regex catches both overflow cases identically.
+function writeMiniChainBytes(buf, miniChain, rootChain, ssz, mssz, data) {
+  const capacity = miniChain.length * mssz;
+  if (data.length > capacity) {
+    throw new Error(`mini-stream of ${data.length} bytes does not fit in ${miniChain.length} mini-sectors (${capacity} bytes). exceeds sector chain capacity.`);
+  }
+  let written = 0;
+  for (const mIdx of miniChain) {
+    const off = miniSectorFileOffset(mIdx, rootChain, ssz, mssz);
+    if (written >= data.length) {
+      buf.fill(0, off, off + mssz);
+      continue;
+    }
+    const take = Math.min(mssz, data.length - written);
+    data.copy(buf, off, written, written + take);
+    written += take;
+    if (take < mssz) {
+      buf.fill(0, off + take, off + mssz);
+    }
+  }
 }
 
 // Read the entire FAT as a flat array of i32 entries by concatenating every
@@ -473,9 +543,22 @@ function deflateToFit(data, capacity) {
 // overflow leaves the file untouched and a fallback can start clean.
 function patchInPlaceSectors(filePath, resolved) {
   const buf = readFileSync(filePath);
-  const { ssz, dirStart, fatAddrs } = parseCfbHeader(buf);
+  const { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
   const fat = readFat(buf, fatAddrs, ssz);
   const { entries } = readDirectory(buf, fat, ssz, dirStart);
+  const minifat = readMinifat(buf, fat, ssz, minifatStart);
+  // The mini-stream content lives in the root storage entry's regular-FAT
+  // chain. We lazily walk it when (and only when) at least one Section to
+  // patch is in the mini-stream.
+  let rootChain = null;
+  const ensureRootChain = () => {
+    if (rootChain) return rootChain;
+    if (entries[0].start < 0 || entries[0].start === ENDOFCHAIN) {
+      throw new Error('mini-stream needed but root entry has no chain');
+    }
+    rootChain = walkChain(fat, entries[0].start);
+    return rootChain;
+  };
 
   // Group edits by section to amortise inflate/deflate per stream.
   const bySection = new Map();
@@ -488,12 +571,28 @@ function patchInPlaceSectors(filePath, resolved) {
   const summary = [];
   for (const [secIdx, secEdits] of bySection) {
     const dirEntry = findStreamEntry(entries, ['BodyText', `Section${secIdx}`]);
-    if (dirEntry.size < 4096) {
-      throw new Error(`Section${secIdx} is in the mini-stream (size=${dirEntry.size}); mini-stream patch path not implemented`);
+
+    // Mini-stream vs regular FAT routing. CFB uses size < 4096 (the mini
+    // stream cutoff in the header) to mean "this stream lives in the mini-
+    // stream addressed by mini-FAT mini-sector indices". Tiny report
+    // templates (h22_work_report-style) hit this; larger forms don't.
+    const inMiniStream = dirEntry.size < 4096;
+    let chain, capacity;
+    let readBytes, writeBytes;
+    if (inMiniStream) {
+      const rc = ensureRootChain();
+      chain = walkChain(minifat, dirEntry.start);
+      capacity = chain.length * mssz;
+      readBytes = (size) => readMiniChainBytes(buf, chain, rc, ssz, mssz, size);
+      writeBytes = (data) => writeMiniChainBytes(buf, chain, rc, ssz, mssz, data);
+    } else {
+      chain = walkChain(fat, dirEntry.start);
+      capacity = chain.length * ssz;
+      readBytes = (size) => readChainBytes(buf, chain, ssz, size);
+      writeBytes = (data) => writeChainBytes(buf, chain, ssz, data);
     }
-    const chain = walkChain(fat, dirEntry.start);
-    const capacity = chain.length * ssz;
-    const compressed = readChainBytes(buf, chain, ssz, dirEntry.size);
+
+    const compressed = readBytes(dirEntry.size);
     let raw = Buffer.from(inflateRawSync(compressed));
 
     // Apply edits back-to-front in record order so byte offsets stay valid.
@@ -512,9 +611,11 @@ function patchInPlaceSectors(filePath, resolved) {
     }
 
     // deflateToFit throws "exceeds sector chain capacity" when the patched
-    // payload doesn't fit. The caller catches that and falls back.
+    // payload doesn't fit. writeMiniChainBytes also throws with the same
+    // substring when a mini-chain overflows, so the caller's fallback
+    // regex catches both cases.
     const newCompressed = deflateToFit(raw, capacity);
-    writeChainBytes(buf, chain, ssz, newCompressed);
+    writeBytes(newCompressed);
 
     // Update the size field in the directory entry. CFB v3 stores u64 but
     // only the low 32 bits are meaningful (file sizes are bounded by u32).
