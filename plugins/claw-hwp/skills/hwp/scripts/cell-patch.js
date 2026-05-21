@@ -583,12 +583,18 @@ export async function patchCellsInPlace(filePath, edits) {
     summary.mode = 'in-place';
     return summary;
   } catch (err) {
-    // Only fall back on capacity overflow. Other errors (corrupt CFB, bad
-    // cell coordinates, etc.) surface unchanged so the caller sees them.
-    if (!/exceeds sector chain capacity/.test(err.message)) throw err;
+    // Fall back to sheetjs for any limitation the in-place patcher can't
+    // handle:
+    //   - sector-chain overflow: patched payload grew past the existing
+    //     chain (e.g. a short cell turning into a paragraph)
+    //   - mini-stream Section: tiny forms keep Section0 inside the CFB
+    //     mini-stream, which the in-place patcher doesn't navigate
+    //     (h22_work_report-style 27KB report templates hit this)
+    // Other errors (corrupt CFB, bad cell coordinates, etc.) surface
+    // unchanged so the caller sees them.
+    const fallbackTriggers = /exceeds sector chain capacity|mini-stream patch path not implemented/;
+    if (!fallbackTriggers.test(err.message)) throw err;
 
-    // Step 3: payload grew past the existing chain. Use the sheetjs path
-    // (1.4.0 raw-patch's original code, verified in Hancom Docs).
     const summary = await patchViaSheetjs(filePath, resolved);
     summary.mode = 'sheetjs-fallback';
     return summary;
