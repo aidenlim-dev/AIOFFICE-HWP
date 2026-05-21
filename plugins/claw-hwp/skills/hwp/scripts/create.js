@@ -1609,12 +1609,14 @@ async function readStdin() {
   // for the first cut — see cell-patch.js / replaceTextInPlace).
   const CELL_OPS = new Set(['set_cell_text', 'set_cell_text_by_label']);
   const REPLACE_TEXT_OPS = new Set(['replace_text']);
-  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS]);
+  const APPEND_PARA_OPS = new Set(['append_paragraph']);
+  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS]);
   const allRawPatch = ops.length > 0 && ops.every((o) => RAW_PATCH_OPS.has(o.type));
   if (ext === '.hwp' && fs.existsSync(outPath) && allRawPatch) {
     try {
       const cellOps = ops.filter((o) => CELL_OPS.has(o.type));
       const replaceOps = ops.filter((o) => REPLACE_TEXT_OPS.has(o.type));
+      const appendOps = ops.filter((o) => APPEND_PARA_OPS.has(o.type));
       const subModes = [];
       const allEdits = [];
 
@@ -1630,6 +1632,12 @@ async function readStdin() {
         const repSummary = await replaceTextInPlace(outPath, replaceOps);
         subModes.push(`replace:${repSummary.mode || 'in-place'}`);
         for (const e of repSummary) allEdits.push({ kind: 'replace', ...e });
+      }
+      if (appendOps.length > 0) {
+        const { appendParagraphInPlace } = await import('./cell-patch.js');
+        const appSummary = await appendParagraphInPlace(outPath, appendOps);
+        subModes.push(`append:${appSummary.mode || 'in-place'}`);
+        for (const e of appSummary) allEdits.push({ kind: 'append', ...e });
       }
 
       const subMode = subModes.join('+');

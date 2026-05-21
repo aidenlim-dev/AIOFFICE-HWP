@@ -1420,3 +1420,209 @@ export async function replaceTextInPlace(filePath, ops) {
   result.replaced_count = totalReplaced;
   return result;
 }
+
+// ── append_paragraph raw-patch (Phase 4-1) ────────────────────────────────
+//
+// Strategy: clone the last body-level paragraph cluster (PARA_HEADER +
+// PARA_TEXT + PARA_CHAR_SHAPE + ...) and append it right after the
+// original. text_count and the PARA_TEXT body are swapped for the new
+// text; everything else — paraShape ref, charShape pairs, styleRef,
+// control_mask — comes from the cloned paragraph and inherits the
+// existing form's styling. The high-bit "this is the last paragraph"
+// flag is moved from the original onto the clone so the cursor still
+// terminates at the end.
+//
+// Why clone the last paragraph specifically: it's the only one that
+// definitely exists in every document and is guaranteed to be a regular
+// body paragraph (not a heading, list, table, etc.). For
+// append_heading and friends in later phases we'll let the caller pick
+// a template.
+
+function findLastBodyParagraphCluster(records) {
+  // Walk forward to find the last level-0 PARA_HEADER. Then determine
+  // which records belong to it: every record after it whose level > 0
+  // (or whose level === 0 but isn't a PARA_HEADER — there's no such
+  // thing in normal docs, but stay safe).
+  let lastIdx = -1;
+  for (let i = 0; i < records.length; i++) {
+    if (records[i].tag === TAG_PARA_HEADER && records[i].level === 0) lastIdx = i;
+  }
+  if (lastIdx < 0) throw new Error('append_paragraph: no level-0 PARA_HEADER found in section');
+  // Cluster end = first record after lastIdx that is itself a level-0
+  // record (next paragraph) OR end of stream.
+  let clusterEnd = records.length;
+  for (let i = lastIdx + 1; i < records.length; i++) {
+    if (records[i].tag === TAG_PARA_HEADER && records[i].level === 0) {
+      clusterEnd = i;
+      break;
+    }
+  }
+  return { paraHeaderIdx: lastIdx, clusterEndIdx: clusterEnd };
+}
+
+// Build a fresh PARA_HEADER record (header + body) by cloning the given
+// source paragraph's PARA_HEADER body bytes and overwriting the
+// text_count field with `newCharCount` (paragraph flag bit preserved
+// from the source).
+function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFlag) {
+  const bodySize = srcParaHeaderRec.size;
+  if (bodySize < 4) throw new Error(`PARA_HEADER body too short to clone: ${bodySize}`);
+  const body = Buffer.alloc(bodySize);
+  raw.copy(body, 0, srcParaHeaderRec.dataOff, srcParaHeaderRec.dataOff + bodySize);
+  // text_count: low 31 bits = char count (incl EOP), high bit = last-
+  // paragraph flag.
+  const flag = paragraphFlag ? 0x80000000 : 0;
+  body.writeUInt32LE(((flag | (newCharCount & 0x7FFFFFFF)) >>> 0), 0);
+  // Header: same level (0), same tag (PARA_HEADER), size field
+  // matches body.
+  if (bodySize > 0xFFE) {
+    const head = Buffer.alloc(8);
+    head.writeUInt32LE(((0xFFF << 20) | (0 << 10) | TAG_PARA_HEADER) >>> 0, 0);
+    head.writeUInt32LE(bodySize, 4);
+    return Buffer.concat([head, body]);
+  }
+  const head = Buffer.alloc(4);
+  head.writeUInt32LE(((bodySize << 20) | (0 << 10) | TAG_PARA_HEADER) >>> 0, 0);
+  return Buffer.concat([head, body]);
+}
+
+// Build a level-1 PARA_TEXT record for new body text. EOP appended.
+function buildBodyParaTextRecord(text) {
+  const body = Buffer.from(text + PARA_TEXT_EOP, 'utf16le');
+  return buildParaTextRecord(body, 1);
+}
+
+// Clone all records that belong to the source cluster except the
+// PARA_HEADER itself (we built a fresh one) and the PARA_TEXT (we
+// supply a new one). Returns the raw byte concatenation of the
+// remaining records (PARA_CHAR_SHAPE, PARA_LINE_SEG, controls, etc.)
+// taken from `raw` as-is. PARA_LINE_SEG entries from the source would
+// describe a stale line layout for the cloned text; we drop them so
+// Hancom recomputes on open.
+function cloneClusterTrailer(records, raw, clusterStartIdx, clusterEndIdx) {
+  const TAG_PARA_LINE_SEG = 0x45;
+  const parts = [];
+  // Start at clusterStartIdx + 1 (skip the source PARA_HEADER).
+  for (let i = clusterStartIdx + 1; i < clusterEndIdx; i++) {
+    const r = records[i];
+    // Skip the source PARA_TEXT — caller emits a fresh one.
+    if (r.tag === TAG_PARA_TEXT && r.level === 1) continue;
+    // Drop PARA_LINE_SEG; Hancom regenerates from text + paraShape.
+    if (r.tag === TAG_PARA_LINE_SEG) continue;
+    // Copy the full record bytes (header + body).
+    const headLen = r.ext ? 8 : 4;
+    parts.push(raw.slice(r.headOff, r.dataOff + r.size));
+  }
+  return Buffer.concat(parts);
+}
+
+export async function appendParagraphInPlace(filePath, ops) {
+  if (!Array.isArray(ops) || ops.length === 0) {
+    return Object.assign([], { mode: 'in-place', appended_count: 0 });
+  }
+  for (const op of ops) {
+    if (typeof op.text !== 'string') {
+      throw new Error("append_paragraph: 'text' is required");
+    }
+    if (/[\n\r]/.test(op.text) || op.text.indexOf(' ') !== -1 || op.text.indexOf(' ') !== -1) {
+      throw new Error("append_paragraph: 'text' cannot contain paragraph-break characters (one op = one paragraph; use multiple ops)");
+    }
+  }
+
+  // Load the file and the CFB structures we need.
+  let buf = readFileSync(filePath);
+  let { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
+  let fat = readFat(buf, fatAddrs, ssz);
+  const { entries } = readDirectory(buf, fat, ssz, dirStart);
+  let minifat = readMinifat(buf, fat, ssz, minifatStart);
+  let rootChain = null;
+  const ensureRootChain = () => {
+    if (rootChain) return rootChain;
+    if (entries[0].start < 0 || entries[0].start === ENDOFCHAIN) {
+      throw new Error('mini-stream needed but root entry has no chain');
+    }
+    rootChain = walkChain(fat, entries[0].start);
+    return rootChain;
+  };
+
+  // Target stream: BodyText/Section0 by default (we don't yet support
+  // multi-section append; SKILL.md gates that for callers).
+  const dirEntry = findStreamEntry(entries, ['BodyText', 'Section0']);
+  const inMiniStream = dirEntry.size < 4096;
+  let chain, compressed;
+  if (inMiniStream) {
+    const rc = ensureRootChain();
+    chain = walkChain(minifat, dirEntry.start);
+    compressed = readMiniChainBytes(buf, chain, rc, ssz, mssz, dirEntry.size);
+  } else {
+    chain = walkChain(fat, dirEntry.start);
+    compressed = readChainBytes(buf, chain, ssz, dirEntry.size);
+  }
+  let raw = Buffer.from(inflateRawSync(compressed));
+
+  // Append each paragraph onto raw.
+  const summary = [];
+  for (const op of ops) {
+    const records = parseRecords(raw);
+    const { paraHeaderIdx, clusterEndIdx } = findLastBodyParagraphCluster(records);
+    const srcHeader = records[paraHeaderIdx];
+    // The source paragraph carries the "is-last" flag we need to move.
+    const srcText_count_word = raw.readUInt32LE(srcHeader.dataOff);
+    const srcWasLast = (srcText_count_word & 0x80000000) >>> 0 ? true : false;
+    // Strip the flag on the source if it had one (the clone takes over
+    // the last-paragraph role).
+    if (srcWasLast) {
+      const stripped = srcText_count_word & 0x7FFFFFFF;
+      raw.writeUInt32LE(stripped >>> 0, srcHeader.dataOff);
+    }
+
+    const newCharCount = op.text.length + 1; // + EOP
+    const newHeader = buildClonedParaHeader(srcHeader, raw, newCharCount, srcWasLast);
+    const newText = buildBodyParaTextRecord(op.text);
+    const trailer = cloneClusterTrailer(records, raw, paraHeaderIdx, clusterEndIdx);
+    const newCluster = Buffer.concat([newHeader, newText, trailer]);
+
+    // Insertion point: end of the source cluster (i.e. right before the
+    // next paragraph, or end of stream).
+    const insertAt = clusterEndIdx < records.length
+      ? records[clusterEndIdx].headOff
+      : raw.length;
+    raw = Buffer.concat([raw.slice(0, insertAt), newCluster, raw.slice(insertAt)]);
+    summary.push({ section: 0, text: op.text });
+  }
+
+  // Deflate + write back (Phase 3/3b infrastructure).
+  let newCompressed;
+  if (inMiniStream) {
+    const rc = ensureRootChain();
+    const ext = deflateMiniChainWithExpansion(
+      { buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain: rc, rootEntry: entries[0] },
+      raw, chain
+    );
+    buf = ext.buf; fat = ext.fat; minifat = ext.minifat; minifatStart = ext.minifatStart;
+    newCompressed = ext.compressed;
+    if (ext.promoted) {
+      chain = ext.newRegularChain;
+      writeChainBytes(buf, chain, ssz, newCompressed);
+      buf.writeInt32LE(chain[0], dirEntry.entryFileOffset + 0x74);
+    } else {
+      rootChain = ext.rootChain;
+      chain = ext.miniChain;
+      writeMiniChainBytes(buf, chain, rootChain, ssz, mssz, newCompressed);
+    }
+  } else {
+    const capacity = chain.length * ssz;
+    const ext = deflateAndFitWithExpansion(raw, capacity, ssz, fat, fatAddrs, chain, buf, false);
+    buf = ext.buf; fat = ext.fat; chain = ext.chain;
+    newCompressed = ext.compressed;
+    writeChainBytes(buf, chain, ssz, newCompressed);
+  }
+  buf.writeUInt32LE(newCompressed.length, dirEntry.entryFileOffset + 0x78);
+  buf.writeUInt32LE(0, dirEntry.entryFileOffset + 0x7C);
+
+  writeFileSync(filePath, buf);
+  const result = Object.assign([], summary);
+  result.mode = 'in-place';
+  result.appended_count = summary.length;
+  return result;
+}
