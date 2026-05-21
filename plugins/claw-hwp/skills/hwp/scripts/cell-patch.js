@@ -1479,26 +1479,70 @@ function findTemplateTableCluster(records, raw) {
   return best;
 }
 
-// Copy cluster bytes byte-for-byte and clear only the MSB
-// (last-paragraph flag) on the top-level PARA_HEADER. We do NOT drop
-// PARA_TEXT records: the table-container paragraph's PARA_TEXT carries
-// inline extended-ctrl chars that reference the child CTRL_HEADERs by
-// index; dropping it breaks that linkage. Cell PARA_TEXT records (which
-// hold the cell text the user might want empty) stay too — users can
-// edit them afterward via set_cell_text.
+// Clone the table cluster while emptying cell content.
+//
+// Three positions for PARA_TEXT records in a table cluster:
+//   - level 1 PARA_TEXT  → table-container paragraph's own text. Holds
+//                          the inline extended-ctrl char that references
+//                          child CTRL_HEADER ('tbl ') by index. MUST
+//                          be kept verbatim.
+//   - level 3 PARA_TEXT  → text inside a cell paragraph (the cell's
+//                          actual content). Drop these to empty cells.
+//   - higher-level PARA_TEXT (>3) → text inside nested cells (cell-in-
+//                          cell). Drop too. Same logic applies.
+//
+// Each level-2 PARA_HEADER (cell paragraph) whose PARA_TEXT we drop
+// gets its text_count rewritten to 1 (EOP only) so the header/body
+// match. Top-level (level 0) PARA_HEADER's MSB last-paragraph flag is
+// cleared so the new table doesn't claim to terminate the section.
 function cloneTableClusterBytes(records, raw, startIdx, endIdx) {
-  const startOff = records[startIdx].headOff;
-  const endOff = endIdx < records.length ? records[endIdx].headOff : raw.length;
-  const out = Buffer.from(raw.slice(startOff, endOff));
-  // Clear the MSB on the top-level PARA_HEADER (the first record in
-  // the cluster). The first 4 bytes of that record's BODY (not header)
-  // are the char_count field with MSB = last-paragraph flag. We need
-  // to offset past the record header (4 or 8 bytes) to reach the body.
-  const topHdr = records[startIdx];
-  const topHdrLen = topHdr.ext ? 8 : 4;
-  const oldWord = out.readUInt32LE(topHdrLen);
-  out.writeUInt32LE((oldWord & 0x7FFFFFFF) >>> 0, topHdrLen);
-  return out;
+  const parts = [];
+  const topLevel = records[startIdx].level;
+  // First pass: figure out which level-2+ PARA_HEADERs have their
+  // PARA_TEXT dropped (so we can rewrite their text_count). Map from
+  // record index → true.
+  const parasNeedingCountReset = new Set();
+  for (let i = startIdx + 1; i < endIdx; i++) {
+    const r = records[i];
+    if (r.tag !== TAG_PARA_TEXT || r.level <= topLevel + 1) continue;
+    // Find the most recent PARA_HEADER above this with matching level
+    // (PARA_TEXT level = PARA_HEADER level + 1).
+    const targetHdrLevel = r.level - 1;
+    for (let j = i - 1; j > startIdx; j--) {
+      if (records[j].tag === TAG_PARA_HEADER && records[j].level === targetHdrLevel) {
+        parasNeedingCountReset.add(j);
+        break;
+      }
+    }
+  }
+  for (let i = startIdx; i < endIdx; i++) {
+    const r = records[i];
+    // Drop PARA_TEXT inside cells (level > top+1) but keep the table-
+    // container paragraph's own PARA_TEXT (level == top+1).
+    if (r.tag === TAG_PARA_TEXT && r.level > topLevel + 1) continue;
+    const headLen = r.ext ? 8 : 4;
+    if (r.tag === TAG_PARA_HEADER && r.size >= 4) {
+      const head = raw.slice(r.headOff, r.headOff + headLen);
+      const body = Buffer.from(raw.slice(r.dataOff, r.dataOff + r.size));
+      const old = body.readUInt32LE(0);
+      let newCount;
+      if (i === startIdx) {
+        // top-level: clear MSB, keep its char_count
+        newCount = (old & 0x7FFFFFFF) >>> 0;
+      } else if (parasNeedingCountReset.has(i)) {
+        // cell paragraph whose PARA_TEXT we dropped → text_count = 1 (EOP)
+        newCount = ((old & 0x80000000) >>> 0) | 1;
+      } else {
+        newCount = old;
+      }
+      body.writeUInt32LE(newCount >>> 0, 0);
+      parts.push(head);
+      parts.push(body);
+    } else {
+      parts.push(raw.slice(r.headOff, r.dataOff + r.size));
+    }
+  }
+  return Buffer.concat(parts);
 }
 
 export async function appendTableInPlace(filePath, ops) {
