@@ -729,8 +729,13 @@ export async function patchCellsInPlace(filePath, edits) {
 function findReplaceTextTarget(records, raw, query, caseSensitive) {
   const queryBuf = Buffer.from(query, 'utf16le');
   const queryLower = query.toLowerCase();
+  // Track the most recent level-0 PARA_HEADER as we walk — that's the
+  // paragraph whose text_count we update when the replacement changes
+  // length, and whose level-1 PARA_CHAR_SHAPE we shift.
+  let paraHeaderIdx = -1;
   for (let i = 0; i < records.length; i++) {
     const r = records[i];
+    if (r.tag === TAG_PARA_HEADER && r.level === 0) paraHeaderIdx = i;
     if (r.tag !== TAG_PARA_TEXT || r.level !== 1) continue;
     const body = raw.slice(r.dataOff, r.dataOff + r.size);
     let byteOffset;
@@ -741,27 +746,134 @@ function findReplaceTextTarget(records, raw, query, caseSensitive) {
       const charIdx = bodyStr.indexOf(queryLower);
       byteOffset = charIdx >= 0 ? charIdx * 2 : -1;
     }
-    if (byteOffset >= 0) {
-      return { paraTextRecIdx: i, paraTextRec: r, byteOffset };
+    if (byteOffset >= 0 && paraHeaderIdx >= 0) {
+      // Walk forward looking for the level-1 PARA_CHAR_SHAPE that belongs
+      // to this paragraph. Stop at the next level-0 PARA_HEADER.
+      let charShape = null;
+      for (let j = i + 1; j < records.length; j++) {
+        const r2 = records[j];
+        if (r2.tag === TAG_PARA_HEADER && r2.level === 0) break;
+        if (r2.tag === TAG_PARA_CHAR_SHAPE && r2.level === 1) { charShape = r2; break; }
+      }
+      return {
+        paraHeaderRec: records[paraHeaderIdx],
+        paraTextRec: r,
+        charShapeRec: charShape,
+        byteOffset,
+      };
     }
   }
   return null;
 }
 
+// Builds a raw PARA_TEXT record (header + body) for the given level. The
+// header uses inline 12-bit size when body fits in 0xFFE bytes, otherwise
+// extended encoding (12-bit field set to 0xFFF followed by a u32 real
+// size). JS bitwise is i32, so we coerce to u32 with `>>> 0`.
+function buildParaTextRecord(body, level) {
+  const size = body.length;
+  if (size > 0xFFE) {
+    const head = Buffer.alloc(8);
+    head.writeUInt32LE(((0xFFF << 20) | (level << 10) | TAG_PARA_TEXT) >>> 0, 0);
+    head.writeUInt32LE(size, 4);
+    return Buffer.concat([head, body]);
+  }
+  const head = Buffer.alloc(4);
+  head.writeUInt32LE(((size << 20) | (level << 10) | TAG_PARA_TEXT) >>> 0, 0);
+  return Buffer.concat([head, body]);
+}
+
+// Equal-length replace: bytes-in-place. Returns { raw, replaced }. raw is
+// the same buffer object (mutated). No record-size or text_count changes.
 function applyReplaceTextEqualLength(raw, op) {
   const queryBuf = Buffer.from(op.query, 'utf16le');
   const replBuf = Buffer.from(op.replacement ?? '', 'utf16le');
-  if (queryBuf.length !== replBuf.length) {
-    // Different-length replacements are Phase 2. Signal a clear error.
-    throw new Error(`replace_text different-length (query ${queryBuf.length}B, replacement ${replBuf.length}B): not yet supported in raw-patch path`);
-  }
   const records = parseRecords(raw);
   const caseSensitive = op.case_sensitive !== false;
   const target = findReplaceTextTarget(records, raw, op.query, caseSensitive);
   if (!target) return { raw, replaced: false };
-  // In-place byte swap.
   replBuf.copy(raw, target.paraTextRec.dataOff + target.byteOffset);
   return { raw, replaced: true };
+}
+
+// Different-length replace: rebuild the PARA_TEXT record, shift the
+// paragraph's PARA_CHAR_SHAPE charPos entries past the match, and update
+// PARA_HEADER text_count. Returns { raw, replaced } where raw is a NEW
+// buffer (length changes because the record header and/or body grew or
+// shrank).
+//
+// The three coordinated edits, in order:
+//   (1) char_shape charPos shift — must happen on the old buffer so the
+//       paraTextRec.dataOff offsets we read are still valid
+//   (2) PARA_HEADER text_count update — same reason
+//   (3) PARA_TEXT record swap — last, builds the new buffer
+function applyReplaceTextDifferentLength(raw, op) {
+  const queryBuf = Buffer.from(op.query, 'utf16le');
+  const replBuf = Buffer.from(op.replacement ?? '', 'utf16le');
+  const records = parseRecords(raw);
+  const caseSensitive = op.case_sensitive !== false;
+  const target = findReplaceTextTarget(records, raw, op.query, caseSensitive);
+  if (!target) return { raw, replaced: false };
+
+  const { paraHeaderRec, paraTextRec, charShapeRec, byteOffset } = target;
+  const queryChars = queryBuf.length / 2;
+  const replChars = replBuf.length / 2;
+  const deltaChars = replChars - queryChars;
+  const matchCharPos = byteOffset / 2;
+
+  // (1) PARA_CHAR_SHAPE entries shift. Each entry is 8 bytes:
+  //     [u32 charPos, u32 shapeId]. We touch only charPos.
+  if (charShapeRec) {
+    const csOff = charShapeRec.dataOff;
+    const entryCount = Math.floor(charShapeRec.size / 8);
+    for (let i = 0; i < entryCount; i++) {
+      const entryOff = csOff + i * 8;
+      const pos = raw.readUInt32LE(entryOff);
+      let newPos;
+      if (pos <= matchCharPos) {
+        newPos = pos;
+      } else if (pos >= matchCharPos + queryChars) {
+        newPos = pos + deltaChars;
+      } else {
+        // Entry sits *inside* the replaced span. Clamp to match start so
+        // the entry still references a valid character position.
+        newPos = matchCharPos;
+      }
+      raw.writeUInt32LE((newPos >>> 0) >>> 0, entryOff);
+    }
+  }
+
+  // (2) PARA_HEADER.text_count update. The high bit is a paragraph flag we
+  // must preserve; only the low 31 bits hold the char count.
+  const oldCount = raw.readUInt32LE(paraHeaderRec.dataOff);
+  const high = (oldCount & 0x80000000) >>> 0;
+  const low = oldCount & 0x7FFFFFFF;
+  const newLow = (low + deltaChars) >>> 0;
+  raw.writeUInt32LE((high | newLow) >>> 0, paraHeaderRec.dataOff);
+
+  // (3) PARA_TEXT swap. Build the new body, then a fresh record, then
+  // splice it into raw.
+  const oldBody = raw.slice(paraTextRec.dataOff, paraTextRec.dataOff + paraTextRec.size);
+  const newBody = Buffer.concat([
+    oldBody.slice(0, byteOffset),
+    replBuf,
+    oldBody.slice(byteOffset + queryBuf.length),
+  ]);
+  const newRecord = buildParaTextRecord(newBody, 1);
+  const oldRecordLen = (paraTextRec.ext ? 8 : 4) + paraTextRec.size;
+  const newRaw = Buffer.concat([
+    raw.slice(0, paraTextRec.headOff),
+    newRecord,
+    raw.slice(paraTextRec.headOff + oldRecordLen),
+  ]);
+  return { raw: newRaw, replaced: true };
+}
+
+function applyReplaceText(raw, op) {
+  const qLen = Buffer.byteLength(op.query, 'utf16le');
+  const rLen = Buffer.byteLength(op.replacement ?? '', 'utf16le');
+  if (qLen === rLen) return applyReplaceTextEqualLength(raw, op);
+  return applyReplaceTextDifferentLength(raw, op);
 }
 
 export async function replaceTextInPlace(filePath, ops) {
@@ -777,11 +889,6 @@ export async function replaceTextInPlace(filePath, ops) {
     const replacement = op.replacement ?? '';
     if (/[\n\r]/.test(replacement) || replacement.indexOf('\u2028') !== -1 || replacement.indexOf('\u2029') !== -1) {
       throw new Error("replace_text: replacement cannot contain paragraph-break characters");
-    }
-    const qLen = Buffer.byteLength(op.query, 'utf16le');
-    const rLen = Buffer.byteLength(replacement, 'utf16le');
-    if (qLen !== rLen) {
-      throw new Error(`replace_text different-length (query ${qLen}B, replacement ${rLen}B): not yet supported in raw-patch path`);
     }
   }
 
@@ -836,8 +943,12 @@ export async function replaceTextInPlace(filePath, ops) {
     const sectionReplacements = [];
 
     for (const op of ops) {
-      const r = applyReplaceTextEqualLength(raw, op);
+      const r = applyReplaceText(raw, op);
+      // Different-length replacements return a freshly-allocated buffer;
+      // equal-length returns the same buffer mutated. Either way, reassign
+      // so the next op (and the deflate below) sees the latest state.
       if (r.replaced) {
+        raw = r.raw;
         dirty = true;
         totalReplaced++;
         sectionReplacements.push({ section: secIdx, query: op.query, replacement: op.replacement ?? '' });
@@ -845,9 +956,11 @@ export async function replaceTextInPlace(filePath, ops) {
     }
     if (!dirty) continue;
 
-    // Same-length edits don't change body size, but deflate(level 6) on
-    // the slightly-different raw can still bump compressed size up or down
-    // a handful of bytes. deflateToFit handles both directions.
+    // Equal-length edits don't change body size; different-length edits do.
+    // deflateToFit handles both — it retries at higher compression levels
+    // until the result fits the existing sector chain, then throws
+    // "exceeds sector chain capacity" if it can't (caller falls back to
+    // sheetjs path).
     const newCompressed = deflateToFit(raw, capacity);
     writeBytes(newCompressed);
     buf.writeUInt32LE(newCompressed.length, dirEntry.entryFileOffset + 0x78);
