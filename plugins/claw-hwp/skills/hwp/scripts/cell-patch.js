@@ -408,6 +408,129 @@ function writeChainBytes(buf, chain, ssz, data) {
   }
 }
 
+// ── Sector chain expansion (Phase 3) ─────────────────────────────────────
+//
+// allocateAndExtendChain grows an existing FAT sector chain by N sectors
+// by appending fresh sectors at the end of the file buffer and threading
+// them onto the tail of the chain via FAT updates.
+//
+// Returns { buf, fat, chain }:
+//   - buf : new Buffer (length grew by N * ssz, plus the new FAT sector
+//           if we needed to allocate one)
+//   - fat : same Int32Array reference, mutated entries written; may be a
+//           new (longer) Int32Array if a new FAT sector was required
+//   - chain : the original chain with the new sector indices appended
+//
+// The original buf/fat are NOT mutated — caller must take the return
+// values. (We can't grow Buffer in place; Int32Array we could mutate but
+// the symmetric API is simpler.)
+//
+// FAT capacity: each FAT sector holds ssz/4 entries (128 for v3). If the
+// chain extension needs sector indices past the current FAT capacity, we
+// allocate a new FAT sector. That itself is a new sector in the file;
+// the DIFAT (header slots 0x4C..0xFF, 109 entries) registers it. Going
+// past 109 FAT sectors requires DIFAT chain extension — we don't
+// implement that yet and throw with a clear message. HWP forms are tiny
+// enough that 109 FAT sectors (= 55MB of streams at ssz=512) is well
+// beyond any real document.
+function writeFatEntry(buf, ssz, fatAddrs, secIdx, value) {
+  const entriesPerSec = ssz >>> 2;
+  const fatSecIdx = Math.floor(secIdx / entriesPerSec);
+  const offsetInSec = secIdx % entriesPerSec;
+  if (fatSecIdx >= fatAddrs.length) {
+    throw new Error(`writeFatEntry: sector ${secIdx} outside current FAT capacity (${fatAddrs.length} FAT sectors); call expandFatCapacity first`);
+  }
+  const fileOff = (fatAddrs[fatSecIdx] + 1) * ssz + offsetInSec * 4;
+  buf.writeInt32LE(value, fileOff);
+}
+
+// Append a fresh empty sector to the end of buf. Returns { buf, newSecIdx }.
+// The new sector's bytes are zero-initialized. FAT entry is NOT touched —
+// caller is responsible for marking it (ENDOFCHAIN for a fresh tail,
+// FATSECT for a new FAT sector, etc).
+function appendBlankSector(buf, ssz) {
+  if (buf.length % ssz !== 0) {
+    throw new Error(`buf length ${buf.length} is not a multiple of sector size ${ssz}`);
+  }
+  const newSecIdx = (buf.length / ssz) - 1; // header sits at -1, first sector at 0
+  const newBuf = Buffer.alloc(buf.length + ssz);
+  buf.copy(newBuf);
+  return { buf: newBuf, newSecIdx };
+}
+
+// Ensure the FAT can address at least `requiredCapacity` sectors. Grows
+// the FAT by allocating additional FAT sectors at the end of the file
+// when needed, registers them in the header's DIFAT slots, and extends
+// the in-memory `fat` Int32Array.
+function expandFatCapacity(buf, ssz, fat, fatAddrs, requiredCapacity) {
+  const entriesPerSec = ssz >>> 2;
+  while (fat.length < requiredCapacity) {
+    if (fatAddrs.length >= 109) {
+      throw new Error('FAT capacity exhausted: DIFAT chain extension beyond 109 slots not yet implemented (file is unusually large for an HWP document)');
+    }
+    // Allocate a new sector that will hold the next FAT page.
+    let result = appendBlankSector(buf, ssz);
+    buf = result.buf;
+    const newFatSecIdx = result.newSecIdx;
+    // Initialize all entries to FREESECT, then mark this sector's own
+    // entry as FATSECT.
+    const newFatSecOff = (newFatSecIdx + 1) * ssz;
+    for (let i = 0; i < entriesPerSec; i++) {
+      buf.writeInt32LE(FREESECT, newFatSecOff + i * 4);
+    }
+    // Extend the in-memory fat. Old fat[0..fat.length] preserved; new
+    // entries FREESECT except newFatSecIdx which is FATSECT (-3).
+    const oldLen = fat.length;
+    const newFat = new Int32Array(oldLen + entriesPerSec);
+    newFat.set(fat);
+    for (let i = oldLen; i < newFat.length; i++) newFat[i] = FREESECT;
+    newFat[newFatSecIdx] = -3; // FATSECT
+    // The on-disk entry for newFatSecIdx (now FATSECT) lives in *this* new
+    // FAT sector; write it accordingly.
+    const idxInNewFat = newFatSecIdx - oldLen;
+    buf.writeInt32LE(-3, newFatSecOff + idxInNewFat * 4);
+    // Register in DIFAT slot (header 0x4C + slot*4 for slots 0..108).
+    buf.writeInt32LE(newFatSecIdx, 0x4C + fatAddrs.length * 4);
+    fatAddrs.push(newFatSecIdx);
+    // Update the FAT-sector count field (header 0x2C, u32 little-endian).
+    buf.writeUInt32LE(fatAddrs.length, 0x2C);
+    fat = newFat;
+  }
+  return { buf, fat };
+}
+
+// Extend `chain` (a sector-index array) by `additionalSectors` new
+// sectors. Returns { buf, fat, chain } as described above.
+function extendFatChain(buf, ssz, fat, fatAddrs, chain, additionalSectors) {
+  if (additionalSectors <= 0) return { buf, fat, chain };
+  let currentBuf = buf;
+  let currentFat = fat;
+  let lastSec = chain[chain.length - 1];
+  const newChain = [...chain];
+  for (let i = 0; i < additionalSectors; i++) {
+    // Make sure FAT can index one more sector beyond what we're about to
+    // allocate. The new sector will sit at idx = (currentBuf.length/ssz)-1
+    // AFTER appendBlankSector, so we need capacity for that idx + 1.
+    const projectedNewSecIdx = currentBuf.length / ssz - 1 + 1; // +1 for the slot we'll fill
+    const exp = expandFatCapacity(currentBuf, ssz, currentFat, fatAddrs, projectedNewSecIdx + 1);
+    currentBuf = exp.buf;
+    currentFat = exp.fat;
+    // Now actually allocate the new sector.
+    const alloc = appendBlankSector(currentBuf, ssz);
+    currentBuf = alloc.buf;
+    const newSecIdx = alloc.newSecIdx;
+    // FAT updates: link the chain tail to the new sector, mark new sector
+    // as ENDOFCHAIN.
+    writeFatEntry(currentBuf, ssz, fatAddrs, lastSec, newSecIdx);
+    writeFatEntry(currentBuf, ssz, fatAddrs, newSecIdx, ENDOFCHAIN);
+    currentFat[lastSec] = newSecIdx;
+    currentFat[newSecIdx] = ENDOFCHAIN;
+    newChain.push(newSecIdx);
+    lastSec = newSecIdx;
+  }
+  return { buf: currentBuf, fat: currentFat, chain: newChain };
+}
+
 // Parse the directory entry chain into a list of records. For each entry
 // we record the *file offset* of its 128-byte slot so we can mutate the
 // size field later without re-emitting anything. Returns:
@@ -537,14 +660,42 @@ function deflateToFit(data, capacity) {
   throw new Error(`deflated payload (${best.length} bytes, best of attempted levels) exceeds sector chain capacity (${capacity} bytes). Patch cannot expand sectors in-place; refusing to overflow.`);
 }
 
+// Phase 3 helper: try deflateToFit; if it overflows, extend the FAT chain
+// (regular FAT only) and retry. Returns { buf, fat, chain, compressed }.
+// For mini-stream chains we don't yet expand — caller must throw or fall
+// back to a different path (mini-FAT promotion lives in Phase 3b).
+function deflateAndFitWithExpansion(raw, capacity, ssz, fat, fatAddrs, chain, buf, inMiniStream) {
+  try {
+    const compressed = deflateToFit(raw, capacity);
+    return { buf, fat, chain, capacity, compressed };
+  } catch (err) {
+    if (!/exceeds sector chain capacity/.test(err.message)) throw err;
+    if (inMiniStream) throw err;
+    // Estimate worst-case deflated size at max level and allocate enough
+    // extra sectors to hold it. deflateRawSync at level 9 is the best
+    // case we can produce; if even that exceeds chain*ssz we know how
+    // many sectors short we are.
+    const minimal = deflateRawSync(raw, { level: 9 });
+    const neededSectors = Math.ceil(minimal.length / ssz);
+    const additionalSectors = neededSectors - chain.length;
+    if (additionalSectors <= 0) throw err;
+    const ext = extendFatChain(buf, ssz, fat, fatAddrs, chain, additionalSectors);
+    const newCapacity = ext.chain.length * ssz;
+    const compressed = deflateToFit(raw, newCapacity);
+    return { buf: ext.buf, fat: ext.fat, chain: ext.chain, capacity: newCapacity, compressed };
+  }
+}
+
 // In-place sector patch. Throws when the patched payload doesn't fit in the
 // existing sector chain (the caller falls back to patchViaSheetjs). The file
 // on disk is only touched at the very end via writeFileSync, so a mid-edit
 // overflow leaves the file untouched and a fallback can start clean.
 function patchInPlaceSectors(filePath, resolved) {
-  const buf = readFileSync(filePath);
+  // buf/fat are `let` because Phase 3's regular-FAT expansion can produce
+  // a longer buffer and a longer FAT array; we need to reassign.
+  let buf = readFileSync(filePath);
   const { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
-  const fat = readFat(buf, fatAddrs, ssz);
+  let fat = readFat(buf, fatAddrs, ssz);
   const { entries } = readDirectory(buf, fat, ssz, dirStart);
   const minifat = readMinifat(buf, fat, ssz, minifatStart);
   // The mini-stream content lives in the root storage entry's regular-FAT
@@ -577,27 +728,20 @@ function patchInPlaceSectors(filePath, resolved) {
     // stream addressed by mini-FAT mini-sector indices". Tiny report
     // templates (h22_work_report-style) hit this; larger forms don't.
     const inMiniStream = dirEntry.size < 4096;
-    let chain, capacity;
-    let readBytes, writeBytes;
+    let chain, capacity, compressed;
     if (inMiniStream) {
       const rc = ensureRootChain();
       chain = walkChain(minifat, dirEntry.start);
       capacity = chain.length * mssz;
-      readBytes = (size) => readMiniChainBytes(buf, chain, rc, ssz, mssz, size);
-      writeBytes = (data) => writeMiniChainBytes(buf, chain, rc, ssz, mssz, data);
+      compressed = readMiniChainBytes(buf, chain, rc, ssz, mssz, dirEntry.size);
     } else {
       chain = walkChain(fat, dirEntry.start);
       capacity = chain.length * ssz;
-      readBytes = (size) => readChainBytes(buf, chain, ssz, size);
-      writeBytes = (data) => writeChainBytes(buf, chain, ssz, data);
+      compressed = readChainBytes(buf, chain, ssz, dirEntry.size);
     }
-
-    const compressed = readBytes(dirEntry.size);
     let raw = Buffer.from(inflateRawSync(compressed));
 
     // Apply edits back-to-front in record order so byte offsets stay valid.
-    // We re-parse records before each apply because record offsets shift
-    // when bytes get inserted/replaced. The walk is cheap (~1ms).
     const editsSorted = [...secEdits].sort((a, b) =>
       (b.para - a.para) || (b.control - a.control) || (b.cellIndex - a.cellIndex)
     );
@@ -610,12 +754,23 @@ function patchInPlaceSectors(filePath, resolved) {
       });
     }
 
-    // deflateToFit throws "exceeds sector chain capacity" when the patched
-    // payload doesn't fit. writeMiniChainBytes also throws with the same
-    // substring when a mini-chain overflows, so the caller's fallback
-    // regex catches both cases.
-    const newCompressed = deflateToFit(raw, capacity);
-    writeBytes(newCompressed);
+    // Deflate + fit. Regular-FAT chains auto-expand if the patched payload
+    // grew past capacity (Phase 3). Mini-stream chains throw with the
+    // same "exceeds sector chain capacity" substring so the outer caller
+    // can fall back to sheetjs (Phase 3b will handle mini-stream
+    // expansion natively).
+    let newCompressed;
+    if (inMiniStream) {
+      newCompressed = deflateToFit(raw, capacity);
+      writeMiniChainBytes(buf, chain, ensureRootChain(), ssz, mssz, newCompressed);
+    } else {
+      const r = deflateAndFitWithExpansion(raw, capacity, ssz, fat, fatAddrs, chain, buf, false);
+      buf = r.buf;
+      fat = r.fat;
+      chain = r.chain;
+      newCompressed = r.compressed;
+      writeChainBytes(buf, chain, ssz, newCompressed);
+    }
 
     // Update the size field in the directory entry. CFB v3 stores u64 but
     // only the low 32 bits are meaningful (file sizes are bounded by u32).
@@ -892,9 +1047,10 @@ export async function replaceTextInPlace(filePath, ops) {
     }
   }
 
-  const buf = readFileSync(filePath);
+  // buf/fat let — Phase 3's regular-FAT expansion can replace them.
+  let buf = readFileSync(filePath);
   const { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
-  const fat = readFat(buf, fatAddrs, ssz);
+  let fat = readFat(buf, fatAddrs, ssz);
   const { entries } = readDirectory(buf, fat, ssz, dirStart);
   const minifat = readMinifat(buf, fat, ssz, minifatStart);
   let rootChain = null;
@@ -923,21 +1079,17 @@ export async function replaceTextInPlace(filePath, ops) {
     }
 
     const inMiniStream = dirEntry.size < 4096;
-    let chain, capacity, readBytes, writeBytes;
+    let chain, capacity, compressed;
     if (inMiniStream) {
       const rc = ensureRootChain();
       chain = walkChain(minifat, dirEntry.start);
       capacity = chain.length * mssz;
-      readBytes = (size) => readMiniChainBytes(buf, chain, rc, ssz, mssz, size);
-      writeBytes = (data) => writeMiniChainBytes(buf, chain, rc, ssz, mssz, data);
+      compressed = readMiniChainBytes(buf, chain, rc, ssz, mssz, dirEntry.size);
     } else {
       chain = walkChain(fat, dirEntry.start);
       capacity = chain.length * ssz;
-      readBytes = (size) => readChainBytes(buf, chain, ssz, size);
-      writeBytes = (data) => writeChainBytes(buf, chain, ssz, data);
+      compressed = readChainBytes(buf, chain, ssz, dirEntry.size);
     }
-
-    const compressed = readBytes(dirEntry.size);
     let raw = Buffer.from(inflateRawSync(compressed));
     let dirty = false;
     const sectionReplacements = [];
@@ -956,13 +1108,21 @@ export async function replaceTextInPlace(filePath, ops) {
     }
     if (!dirty) continue;
 
-    // Equal-length edits don't change body size; different-length edits do.
-    // deflateToFit handles both — it retries at higher compression levels
-    // until the result fits the existing sector chain, then throws
-    // "exceeds sector chain capacity" if it can't (caller falls back to
-    // sheetjs path).
-    const newCompressed = deflateToFit(raw, capacity);
-    writeBytes(newCompressed);
+    // Deflate + fit. Same routing as patchInPlaceSectors: regular-FAT
+    // chains auto-expand, mini-stream chains throw (Phase 3b will add
+    // mini-stream expansion).
+    let newCompressed;
+    if (inMiniStream) {
+      newCompressed = deflateToFit(raw, capacity);
+      writeMiniChainBytes(buf, chain, ensureRootChain(), ssz, mssz, newCompressed);
+    } else {
+      const r = deflateAndFitWithExpansion(raw, capacity, ssz, fat, fatAddrs, chain, buf, false);
+      buf = r.buf;
+      fat = r.fat;
+      chain = r.chain;
+      newCompressed = r.compressed;
+      writeChainBytes(buf, chain, ssz, newCompressed);
+    }
     buf.writeUInt32LE(newCompressed.length, dirEntry.entryFileOffset + 0x78);
     buf.writeUInt32LE(0, dirEntry.entryFileOffset + 0x7C);
 
