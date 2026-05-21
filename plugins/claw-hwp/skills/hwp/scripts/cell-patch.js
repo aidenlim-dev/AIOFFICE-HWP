@@ -1421,6 +1421,160 @@ export async function replaceTextInPlace(filePath, ops) {
   return result;
 }
 
+// ── setup_document raw-patch (Phase 5) ────────────────────────────────────
+//
+// Mutates the PAGE_DEF record (tag 0x49) inside BodyText/Section0.
+// PAGE_DEF body is exactly 40 bytes per HWP 5.0 / rhwp:
+//   offset 0..3   width  (u32, HWPUNIT)
+//   offset 4..7   height (u32, HWPUNIT)
+//   offset 8..11  margin_left
+//   offset 12..15 margin_right
+//   offset 16..19 margin_top
+//   offset 20..23 margin_bottom
+//   offset 24..27 margin_header
+//   offset 28..31 margin_footer
+//   offset 32..35 margin_gutter
+//   offset 36..39 attr (u32) — bit 0 = landscape, bits 1..2 = binding
+//
+// HWPUNIT = 1/7200 inch. 1 mm = 283.46 HWPUNIT.
+
+const TAG_PAGE_DEF = 0x49;
+
+const PAGE_SIZES = {
+  a4: [59528, 84186],
+  a5: [42040, 59528],
+  a3: [84186, 119055],
+  letter: [61560, 79200],
+  legal: [61560, 100800],
+};
+
+const MM_PER_HWPUNIT = 283.46;
+
+export async function setupDocumentInPlace(filePath, op) {
+  let buf = readFileSync(filePath);
+  let { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
+  let fat = readFat(buf, fatAddrs, ssz);
+  const { entries } = readDirectory(buf, fat, ssz, dirStart);
+  let minifat = readMinifat(buf, fat, ssz, minifatStart);
+  let rootChain = null;
+  const ensureRootChain = () => {
+    if (rootChain) return rootChain;
+    if (entries[0].start < 0 || entries[0].start === ENDOFCHAIN) {
+      throw new Error('mini-stream needed but root entry has no chain');
+    }
+    rootChain = walkChain(fat, entries[0].start);
+    return rootChain;
+  };
+
+  const dirEntry = findStreamEntry(entries, ['BodyText', 'Section0']);
+  const inMiniStream = dirEntry.size < 4096;
+  let chain, compressed;
+  if (inMiniStream) {
+    const rc = ensureRootChain();
+    chain = walkChain(minifat, dirEntry.start);
+    compressed = readMiniChainBytes(buf, chain, rc, ssz, mssz, dirEntry.size);
+  } else {
+    chain = walkChain(fat, dirEntry.start);
+    compressed = readChainBytes(buf, chain, ssz, dirEntry.size);
+  }
+  let raw = Buffer.from(inflateRawSync(compressed));
+
+  // Find the PAGE_DEF record (typically 1 per section).
+  const records = parseRecords(raw);
+  let pageDefRec = null;
+  for (const r of records) {
+    if (r.tag === TAG_PAGE_DEF) { pageDefRec = r; break; }
+  }
+  if (!pageDefRec) throw new Error('setup_document: PAGE_DEF record not found in section');
+  if (pageDefRec.size < 40) throw new Error(`setup_document: PAGE_DEF body too short (${pageDefRec.size}, need 40)`);
+
+  // Read current values.
+  let width = raw.readUInt32LE(pageDefRec.dataOff);
+  let height = raw.readUInt32LE(pageDefRec.dataOff + 4);
+  let marginL = raw.readUInt32LE(pageDefRec.dataOff + 8);
+  let marginR = raw.readUInt32LE(pageDefRec.dataOff + 12);
+  let marginT = raw.readUInt32LE(pageDefRec.dataOff + 16);
+  let marginB = raw.readUInt32LE(pageDefRec.dataOff + 20);
+  let attr = raw.readUInt32LE(pageDefRec.dataOff + 36);
+  let landscape = (attr & 0x01) !== 0;
+
+  // Apply op overrides (only fields the caller specified).
+  if (op.orientation) {
+    const wantLandscape = String(op.orientation).toLowerCase() === 'landscape';
+    if (wantLandscape !== landscape) {
+      [width, height] = [height, width];
+      landscape = wantLandscape;
+      attr = wantLandscape ? (attr | 0x01) >>> 0 : (attr & ~0x01) >>> 0;
+    }
+  }
+  if (op.page_size) {
+    const sz = PAGE_SIZES[String(op.page_size).toLowerCase()];
+    if (sz) {
+      let [w, h] = sz;
+      if (landscape) [w, h] = [h, w];
+      width = w;
+      height = h;
+    }
+  }
+  if (op.margin_mm !== undefined) {
+    const m = Math.round(op.margin_mm * MM_PER_HWPUNIT);
+    marginL = m; marginR = m; marginT = m; marginB = m;
+  }
+  if (op.margin_top_mm !== undefined) marginT = Math.round(op.margin_top_mm * MM_PER_HWPUNIT);
+  if (op.margin_bottom_mm !== undefined) marginB = Math.round(op.margin_bottom_mm * MM_PER_HWPUNIT);
+  if (op.margin_left_mm !== undefined) marginL = Math.round(op.margin_left_mm * MM_PER_HWPUNIT);
+  if (op.margin_right_mm !== undefined) marginR = Math.round(op.margin_right_mm * MM_PER_HWPUNIT);
+
+  // Write back into raw.
+  raw.writeUInt32LE(width >>> 0, pageDefRec.dataOff);
+  raw.writeUInt32LE(height >>> 0, pageDefRec.dataOff + 4);
+  raw.writeUInt32LE(marginL >>> 0, pageDefRec.dataOff + 8);
+  raw.writeUInt32LE(marginR >>> 0, pageDefRec.dataOff + 12);
+  raw.writeUInt32LE(marginT >>> 0, pageDefRec.dataOff + 16);
+  raw.writeUInt32LE(marginB >>> 0, pageDefRec.dataOff + 20);
+  raw.writeUInt32LE(attr >>> 0, pageDefRec.dataOff + 36);
+
+  // Deflate + write back. raw length doesn't change so capacity should
+  // be unchanged; expansion paths are wired for defense.
+  let newCompressed;
+  if (inMiniStream) {
+    const rc = ensureRootChain();
+    const ext = deflateMiniChainWithExpansion(
+      { buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain: rc, rootEntry: entries[0] },
+      raw, chain
+    );
+    buf = ext.buf; fat = ext.fat; minifat = ext.minifat; minifatStart = ext.minifatStart;
+    newCompressed = ext.compressed;
+    if (ext.promoted) {
+      chain = ext.newRegularChain;
+      writeChainBytes(buf, chain, ssz, newCompressed);
+      buf.writeInt32LE(chain[0], dirEntry.entryFileOffset + 0x74);
+    } else {
+      rootChain = ext.rootChain;
+      chain = ext.miniChain;
+      writeMiniChainBytes(buf, chain, rootChain, ssz, mssz, newCompressed);
+    }
+  } else {
+    const capacity = chain.length * ssz;
+    const ext = deflateAndFitWithExpansion(raw, capacity, ssz, fat, fatAddrs, chain, buf, false);
+    buf = ext.buf; fat = ext.fat; chain = ext.chain;
+    newCompressed = ext.compressed;
+    writeChainBytes(buf, chain, ssz, newCompressed);
+  }
+  buf.writeUInt32LE(newCompressed.length, dirEntry.entryFileOffset + 0x78);
+  buf.writeUInt32LE(0, dirEntry.entryFileOffset + 0x7C);
+
+  writeFileSync(filePath, buf);
+  return {
+    mode: 'in-place',
+    applied: {
+      width, height, landscape,
+      margin_left: marginL, margin_right: marginR,
+      margin_top: marginT, margin_bottom: marginB,
+    },
+  };
+}
+
 // ── append_table raw-patch (Phase 4-6) ────────────────────────────────────
 //
 // Strategy: find an existing table-container paragraph in the section
