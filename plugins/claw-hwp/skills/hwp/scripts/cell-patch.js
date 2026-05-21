@@ -1438,26 +1438,58 @@ export async function replaceTextInPlace(filePath, ops) {
 // append_heading and friends in later phases we'll let the caller pick
 // a template.
 
-function findLastBodyParagraphCluster(records) {
-  // Walk forward to find the last level-0 PARA_HEADER. Then determine
-  // which records belong to it: every record after it whose level > 0
-  // (or whose level === 0 but isn't a PARA_HEADER — there's no such
-  // thing in normal docs, but stay safe).
-  let lastIdx = -1;
+// A "simple body paragraph" cluster contains only PARA_HEADER + PARA_TEXT
+// + PARA_CHAR_SHAPE (+ optional PARA_LINE_SEG, PARA_RANGE_TAG). No table
+// (CTRL_HEADER / LIST_HEADER / level-2+ records). Cloning a simple
+// paragraph keeps Hancom happy; cloning a table-container paragraph drags
+// the table along and corrupts the section.
+function findClusterBoundaries(records) {
+  // Returns array of { startIdx, endIdx, hasControls } per level-0
+  // paragraph. endIdx points to the first record NOT in the cluster
+  // (i.e. the next level-0 PARA_HEADER or records.length).
+  const clusters = [];
   for (let i = 0; i < records.length; i++) {
-    if (records[i].tag === TAG_PARA_HEADER && records[i].level === 0) lastIdx = i;
-  }
-  if (lastIdx < 0) throw new Error('append_paragraph: no level-0 PARA_HEADER found in section');
-  // Cluster end = first record after lastIdx that is itself a level-0
-  // record (next paragraph) OR end of stream.
-  let clusterEnd = records.length;
-  for (let i = lastIdx + 1; i < records.length; i++) {
-    if (records[i].tag === TAG_PARA_HEADER && records[i].level === 0) {
-      clusterEnd = i;
-      break;
+    if (records[i].tag !== TAG_PARA_HEADER || records[i].level !== 0) continue;
+    let end = records.length;
+    for (let j = i + 1; j < records.length; j++) {
+      if (records[j].tag === TAG_PARA_HEADER && records[j].level === 0) { end = j; break; }
     }
+    let hasControls = false;
+    for (let j = i + 1; j < end; j++) {
+      const r = records[j];
+      // Anything that smells like a table/control/list. Even a single
+      // CTRL_HEADER means this paragraph isn't a simple text-only one.
+      if (r.tag === TAG_CTRL_HEADER || r.tag === TAG_LIST_HEADER || r.level >= 2) {
+        hasControls = true;
+        break;
+      }
+    }
+    clusters.push({ startIdx: i, endIdx: end, hasControls });
   }
-  return { paraHeaderIdx: lastIdx, clusterEndIdx: clusterEnd };
+  return clusters;
+}
+
+function findLastSimpleBodyParagraph(records) {
+  // Walk clusters from the end backwards, return the last one with no
+  // controls. That's the safest template — its trailer is just
+  // PARA_CHAR_SHAPE / line-seg and clones cleanly.
+  const clusters = findClusterBoundaries(records);
+  for (let i = clusters.length - 1; i >= 0; i--) {
+    if (!clusters[i].hasControls) return clusters[i];
+  }
+  throw new Error('append_paragraph: no simple body paragraph found in section to use as a template');
+}
+
+function findLastLevel0Paragraph(records) {
+  // The paragraph that currently carries the "last paragraph" flag —
+  // we need to clear that flag on it before our new paragraph takes
+  // over the role. Returns the cluster of the trailing level-0
+  // PARA_HEADER (which may or may not have controls).
+  const clusters = findClusterBoundaries(records);
+  if (clusters.length === 0) {
+    throw new Error('append_paragraph: no level-0 PARA_HEADER found in section');
+  }
+  return clusters[clusters.length - 1];
 }
 
 // Build a fresh PARA_HEADER record (header + body) by cloning the given
@@ -1561,31 +1593,40 @@ export async function appendParagraphInPlace(filePath, ops) {
   let raw = Buffer.from(inflateRawSync(compressed));
 
   // Append each paragraph onto raw.
+  //
+  // Where exactly does "append" mean? We can't just push to the end of
+  // the stream because the section's last level-0 PARA_HEADER is often
+  // a cover-page paragraph that contains every table as nested
+  // controls; its cluster extends to end-of-stream. Inserting our new
+  // paragraph after that cluster breaks the structure (Hancom rejects
+  // the file).
+  //
+  // Safe choice: insert right after the LAST SIMPLE BODY paragraph
+  // (a paragraph with no controls/tables). For a form like ktx.hwp
+  // the simple body sits before the cover-page paragraph, so the new
+  // text shows up between the running body text and the table block.
+  // The section's last-paragraph flag (high bit on text_count) stays
+  // on the cover-page paragraph, untouched, so Hancom's notion of
+  // "section ends here" is preserved.
   const summary = [];
   for (const op of ops) {
     const records = parseRecords(raw);
-    const { paraHeaderIdx, clusterEndIdx } = findLastBodyParagraphCluster(records);
-    const srcHeader = records[paraHeaderIdx];
-    // The source paragraph carries the "is-last" flag we need to move.
-    const srcText_count_word = raw.readUInt32LE(srcHeader.dataOff);
-    const srcWasLast = (srcText_count_word & 0x80000000) >>> 0 ? true : false;
-    // Strip the flag on the source if it had one (the clone takes over
-    // the last-paragraph role).
-    if (srcWasLast) {
-      const stripped = srcText_count_word & 0x7FFFFFFF;
-      raw.writeUInt32LE(stripped >>> 0, srcHeader.dataOff);
-    }
+    const template = findLastSimpleBodyParagraph(records);
+    const srcHeader = records[template.startIdx];
 
     const newCharCount = op.text.length + 1; // + EOP
-    const newHeader = buildClonedParaHeader(srcHeader, raw, newCharCount, srcWasLast);
+    // Build the new paragraph WITHOUT the last-paragraph flag —
+    // whichever paragraph in the file currently carries it keeps it.
+    const newHeader = buildClonedParaHeader(srcHeader, raw, newCharCount, false);
     const newText = buildBodyParaTextRecord(op.text);
-    const trailer = cloneClusterTrailer(records, raw, paraHeaderIdx, clusterEndIdx);
+    const trailer = cloneClusterTrailer(records, raw, template.startIdx, template.endIdx);
     const newCluster = Buffer.concat([newHeader, newText, trailer]);
 
-    // Insertion point: end of the source cluster (i.e. right before the
-    // next paragraph, or end of stream).
-    const insertAt = clusterEndIdx < records.length
-      ? records[clusterEndIdx].headOff
+    // Insert at the end of the template cluster — i.e. right between
+    // the last simple paragraph and whatever comes next (typically a
+    // cover-page paragraph or stream end).
+    const insertAt = template.endIdx < records.length
+      ? records[template.endIdx].headOff
       : raw.length;
     raw = Buffer.concat([raw.slice(0, insertAt), newCluster, raw.slice(insertAt)]);
     summary.push({ section: 0, text: op.text });
