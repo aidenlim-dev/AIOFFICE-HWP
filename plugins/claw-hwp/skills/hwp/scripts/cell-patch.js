@@ -1492,21 +1492,45 @@ function findLastLevel0Paragraph(records) {
   return clusters[clusters.length - 1];
 }
 
-// Build a fresh PARA_HEADER record (header + body) by cloning the given
-// source paragraph's PARA_HEADER body bytes and overwriting the
-// text_count field with `newCharCount` (paragraph flag bit preserved
-// from the source).
-function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFlag) {
+// PARA_HEADER body layout (per rhwp serializer / HWP 5.0 v5.0+):
+//   0..3:   char_count_raw (u32) — low 31 bits = char count, MSB = last-paragraph flag
+//   4..7:   control_mask (u32)
+//   8..9:   para_shape_id (u16)
+//   10:     style_id (u8)
+//   11:     break_val (u8) — bit flags (0x01 section / 0x02 multicol / 0x04 page / 0x08 col break)
+//   12..13: num_char_shapes (u16)
+//   14..15: range_tags_count (u16)
+//   16..17: line_segs_count (u16)
+//   18..21: instance_id (u32) — must be unique within the document
+//   22..23: trailing 2 bytes (kept as-is from the source)
+//
+// Build a fresh PARA_HEADER body cloning the source paragraph's shape
+// (para_shape_id, style_id, control_mask, break_val) but rewriting:
+//   - char_count to newCharCount + flag
+//   - num_char_shapes to 1 (a single charPos=0 char shape we'll emit)
+//   - line_segs_count to 0 (Hancom recomputes line layout from text)
+//   - range_tags_count to 0
+//   - instance_id to a fresh unique value
+function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFlag, newInstanceId) {
   const bodySize = srcParaHeaderRec.size;
-  if (bodySize < 4) throw new Error(`PARA_HEADER body too short to clone: ${bodySize}`);
+  if (bodySize < 24) throw new Error(`PARA_HEADER body too short to clone properly: ${bodySize} (need >= 24)`);
   const body = Buffer.alloc(bodySize);
   raw.copy(body, 0, srcParaHeaderRec.dataOff, srcParaHeaderRec.dataOff + bodySize);
-  // text_count: low 31 bits = char count (incl EOP), high bit = last-
-  // paragraph flag.
+  // char_count_raw with optional MSB flag.
   const flag = paragraphFlag ? 0x80000000 : 0;
   body.writeUInt32LE(((flag | (newCharCount & 0x7FFFFFFF)) >>> 0), 0);
-  // Header: same level (0), same tag (PARA_HEADER), size field
-  // matches body.
+  // control_mask, para_shape_id, style_id, break_val: keep from source.
+  // num_char_shapes (offset 12) → 1 (we emit a single charPos=0 entry)
+  body.writeUInt16LE(1, 12);
+  // range_tags_count (offset 14) → 0
+  body.writeUInt16LE(0, 14);
+  // line_segs_count (offset 16) → 0 (let Hancom recompute on open)
+  body.writeUInt16LE(0, 16);
+  // instance_id (offset 18..21) → fresh unique value
+  body.writeUInt32LE(newInstanceId >>> 0, 18);
+  // bytes 22..23 stay as cloned from source.
+
+  // Header: level 0, tag PARA_HEADER, size field matches body.
   if (bodySize > 0xFFE) {
     const head = Buffer.alloc(8);
     head.writeUInt32LE(((0xFFF << 20) | (0 << 10) | TAG_PARA_HEADER) >>> 0, 0);
@@ -1518,34 +1542,51 @@ function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFla
   return Buffer.concat([head, body]);
 }
 
+// Find a fresh instance_id by walking every PARA_HEADER in the section
+// and returning max + 1. Hancom doesn't restrict the value beyond
+// "unique within the section" as far as we've observed.
+function pickFreshInstanceId(records, raw) {
+  let max = 0;
+  for (const r of records) {
+    if (r.tag !== TAG_PARA_HEADER) continue;
+    if (r.size < 22) continue;
+    const id = raw.readUInt32LE(r.dataOff + 18);
+    if (id > max) max = id;
+  }
+  return max + 1;
+}
+
 // Build a level-1 PARA_TEXT record for new body text. EOP appended.
 function buildBodyParaTextRecord(text) {
   const body = Buffer.from(text + PARA_TEXT_EOP, 'utf16le');
   return buildParaTextRecord(body, 1);
 }
 
-// Clone all records that belong to the source cluster except the
-// PARA_HEADER itself (we built a fresh one) and the PARA_TEXT (we
-// supply a new one). Returns the raw byte concatenation of the
-// remaining records (PARA_CHAR_SHAPE, PARA_LINE_SEG, controls, etc.)
-// taken from `raw` as-is. PARA_LINE_SEG entries from the source would
-// describe a stale line layout for the cloned text; we drop them so
-// Hancom recomputes on open.
-function cloneClusterTrailer(records, raw, clusterStartIdx, clusterEndIdx) {
-  const TAG_PARA_LINE_SEG = 0x45;
-  const parts = [];
-  // Start at clusterStartIdx + 1 (skip the source PARA_HEADER).
+// Emit a fresh PARA_CHAR_SHAPE record with a single entry (charPos=0,
+// shapeId from the source paragraph's first char_shape entry). This
+// keeps num_char_shapes in PARA_HEADER (which we set to 1) consistent
+// with the actual char-shape record contents — a mismatch is one of
+// the things Hancom Docs's strict validator rejects.
+function buildSingleCharShapeRecord(records, raw, clusterStartIdx, clusterEndIdx, level) {
+  // Find the source PARA_CHAR_SHAPE inside the cluster; read its first
+  // entry's shapeId (bytes 4..7 of the body — the structure is
+  // u32 charPos followed by u32 shapeId, repeated).
+  let firstShapeId = 0;
   for (let i = clusterStartIdx + 1; i < clusterEndIdx; i++) {
     const r = records[i];
-    // Skip the source PARA_TEXT — caller emits a fresh one.
-    if (r.tag === TAG_PARA_TEXT && r.level === 1) continue;
-    // Drop PARA_LINE_SEG; Hancom regenerates from text + paraShape.
-    if (r.tag === TAG_PARA_LINE_SEG) continue;
-    // Copy the full record bytes (header + body).
-    const headLen = r.ext ? 8 : 4;
-    parts.push(raw.slice(r.headOff, r.dataOff + r.size));
+    if (r.tag === TAG_PARA_CHAR_SHAPE && r.level === 1 && r.size >= 8) {
+      firstShapeId = raw.readUInt32LE(r.dataOff + 4);
+      break;
+    }
   }
-  return Buffer.concat(parts);
+  // Body: [u32 charPos=0, u32 shapeId]
+  const body = Buffer.alloc(8);
+  body.writeUInt32LE(0, 0);
+  body.writeUInt32LE(firstShapeId >>> 0, 4);
+  // Header: inline size encoding (body is 8 bytes, well under 0xFFE).
+  const head = Buffer.alloc(4);
+  head.writeUInt32LE(((body.length << 20) | (level << 10) | TAG_PARA_CHAR_SHAPE) >>> 0, 0);
+  return Buffer.concat([head, body]);
 }
 
 export async function appendParagraphInPlace(filePath, ops) {
@@ -1615,12 +1656,17 @@ export async function appendParagraphInPlace(filePath, ops) {
     const srcHeader = records[template.startIdx];
 
     const newCharCount = op.text.length + 1; // + EOP
+    const newInstanceId = pickFreshInstanceId(records, raw);
     // Build the new paragraph WITHOUT the last-paragraph flag —
     // whichever paragraph in the file currently carries it keeps it.
-    const newHeader = buildClonedParaHeader(srcHeader, raw, newCharCount, false);
+    const newHeader = buildClonedParaHeader(srcHeader, raw, newCharCount, false, newInstanceId);
     const newText = buildBodyParaTextRecord(op.text);
-    const trailer = cloneClusterTrailer(records, raw, template.startIdx, template.endIdx);
-    const newCluster = Buffer.concat([newHeader, newText, trailer]);
+    // Emit a single PARA_CHAR_SHAPE record (one entry at charPos=0).
+    // This matches num_char_shapes=1 set in the PARA_HEADER above.
+    // We drop PARA_LINE_SEG / PARA_RANGE_TAG entirely (Hancom recomputes
+    // line layout from the text + paraShape on open).
+    const newCharShape = buildSingleCharShapeRecord(records, raw, template.startIdx, template.endIdx, 1);
+    const newCluster = Buffer.concat([newHeader, newText, newCharShape]);
 
     // Insert at the end of the template cluster — i.e. right between
     // the last simple paragraph and whatever comes next (typically a
