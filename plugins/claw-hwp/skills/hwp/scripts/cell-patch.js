@@ -1479,39 +1479,26 @@ function findTemplateTableCluster(records, raw) {
   return best;
 }
 
-// Copy all cluster bytes from raw[records[startIdx].headOff .. records[endIdx-1] end],
-// then strip every PARA_TEXT record inside it (cells become empty). The
-// paragraph_flag bit on the cloned PARA_HEADER (if any) is also cleared
-// — the new table is not the last paragraph of the section.
+// Copy cluster bytes byte-for-byte and clear only the MSB
+// (last-paragraph flag) on the top-level PARA_HEADER. We do NOT drop
+// PARA_TEXT records: the table-container paragraph's PARA_TEXT carries
+// inline extended-ctrl chars that reference the child CTRL_HEADERs by
+// index; dropping it breaks that linkage. Cell PARA_TEXT records (which
+// hold the cell text the user might want empty) stay too — users can
+// edit them afterward via set_cell_text.
 function cloneTableClusterBytes(records, raw, startIdx, endIdx) {
-  // Build a fresh buffer: walk the cluster records, emit each one
-  // except PARA_TEXT (drop). Adjust PARA_HEADER text_count to 1 (EOP
-  // only) for each paragraph in the cluster, since we just dropped
-  // their text bodies. Strip MSB from the top-level paragraph's text
-  // count too.
-  const parts = [];
-  const topLevelParaHeaderRecIdx = startIdx;
-  for (let i = startIdx; i < endIdx; i++) {
-    const r = records[i];
-    if (r.tag === TAG_PARA_TEXT) continue; // drop
-    const isParaHeader = r.tag === TAG_PARA_HEADER;
-    const headLen = r.ext ? 8 : 4;
-    if (isParaHeader && r.size >= 4) {
-      // emit header + tweaked body (text_count → 1, MSB cleared on top)
-      const head = raw.slice(r.headOff, r.headOff + headLen);
-      const body = Buffer.from(raw.slice(r.dataOff, r.dataOff + r.size));
-      const old = body.readUInt32LE(0);
-      const newCount = (i === topLevelParaHeaderRecIdx)
-        ? 1 // top-level: clear flag, char_count=1 (EOP)
-        : ((old & 0x80000000) >>> 0) | 1; // nested cell paragraphs keep MSB, count=1
-      body.writeUInt32LE(newCount >>> 0, 0);
-      parts.push(head);
-      parts.push(body);
-    } else {
-      parts.push(raw.slice(r.headOff, r.dataOff + r.size));
-    }
-  }
-  return Buffer.concat(parts);
+  const startOff = records[startIdx].headOff;
+  const endOff = endIdx < records.length ? records[endIdx].headOff : raw.length;
+  const out = Buffer.from(raw.slice(startOff, endOff));
+  // Clear the MSB on the top-level PARA_HEADER (the first record in
+  // the cluster). The first 4 bytes of that record's BODY (not header)
+  // are the char_count field with MSB = last-paragraph flag. We need
+  // to offset past the record header (4 or 8 bytes) to reach the body.
+  const topHdr = records[startIdx];
+  const topHdrLen = topHdr.ext ? 8 : 4;
+  const oldWord = out.readUInt32LE(topHdrLen);
+  out.writeUInt32LE((oldWord & 0x7FFFFFFF) >>> 0, topHdrLen);
+  return out;
 }
 
 export async function appendTableInPlace(filePath, ops) {
