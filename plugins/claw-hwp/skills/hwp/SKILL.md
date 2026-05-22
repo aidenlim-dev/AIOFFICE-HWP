@@ -114,9 +114,11 @@ Errors come back as `{"status": "error", "message": "...", "op_index": N}`. Alwa
 | `append_heading` | `level` (1–6), `text` | `align`, `runs` |
 | `append_paragraph` | `text` | `align`, `line_spacing`, `spacing_before`, `spacing_after`, `runs` |
 | `append_table` | `headers`, `rows` | `col_widths_cm`, `merges`, `cell_props` |
-| `append_image` | `path` | `width_cm`, `height_cm`, `alt` |
+| `append_image` ⚠️ | `path` | `width_cm`, `height_cm`, `alt` |
 | `append_bullet_list`, `append_numbered_list` | `items[]` | — |
 | `append_page_break` | — | — |
+
+> ⚠️ **`append_image` on existing `.hwp` files is not Hancom Docs–compatible in v1.** Adding an image needs three coordinated mutations (new `BinData/BIN000N.<ext>` CFB stream, DocInfo `HWPTAG_BIN_DATA` registration, body `gso` control + `SHAPE_COMPONENT_PICTURE` referencing the new `bin_data_id`). Our raw-patch can produce all three, but on small mini-stream Section0 files the cluster expansion truncates and Hancom Docs rejects the result. The `rhwp.exportHwp()` fallback path that handles append_image for fresh `.hwp` creation is *also* rejected by Hancom Docs (it leaves `Sh33tJ5` sheetjs markers). **Workarounds:** (a) pre-design the form template with an image placeholder, then use `replace_text`/`set_cell_text` to fill surrounding fields; (b) use Hancom Office desktop, which accepts the rhwp emit path. Note: `append_image` *does* work end-to-end when creating a fresh `.hwp` from scratch in this same payload (no in-place edit) — the limitation is specifically the in-place add path.
 
 *In-place editing (run on an existing file — omit `setup_document` so create.js loads the path instead of starting blank):*
 

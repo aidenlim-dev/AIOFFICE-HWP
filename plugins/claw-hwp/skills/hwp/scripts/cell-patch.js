@@ -44,7 +44,7 @@
 //   0x47 CTRL_HEADER       a control inside a paragraph
 //   0x48 LIST_HEADER       starts a table cell (level 2 when inside table)
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { inflateRawSync, deflateRawSync, constants } from 'node:zlib';
 import path from 'node:path';
 import url from 'node:url';
@@ -2319,6 +2319,14 @@ export async function appendImageInPlace(filePath, ops) {
     item.docInfo = docInfoResult;
   }
 
+  // ── Step 3: emit body image control (CTRL_HEADER 'gso ' + SHAPE_COMPONENT
+  // + CTRL_DATA + SHAPE_COMPONENT_PICTURE + inline ctrl char) so the new
+  // BinData isn't orphaned. Uses template-clone from h22_work_report.hwp.
+  for (const item of summary) {
+    const bodyResult = await appendImageBodyControl(filePath, item.storage_id);
+    item.bodyControl = bodyResult;
+  }
+
   const result = Object.assign([], summary);
   result.mode = 'in-place';
   result.appended_count = summary.length;
@@ -2347,7 +2355,25 @@ export async function appendImageInPlace(filePath, ops) {
 const TAG_ID_MAPPINGS = 0x11;
 const TAG_BIN_DATA_DEF = 0x12;
 
-function buildBinDataDefBody(storageId, ext, attr = 0x0001) {
+// attr bits per rhwp parser:
+//   bits 0..3 = data_type (1=Embedding)
+//   bits 4..5 = compression (0=Default, 1=Compress, 2=NoCompress)
+//   bits 8..9 = status (0=NotAccessed, 1=Success)
+// Already-compressed image formats (jpg/png/gif) use NoCompress so Hancom
+// doesn't try to deflate them again on load. BMP / raw bitmaps use Default.
+// Matches ktx.hwp pattern: jpg → 0x21, bmp → 0x01.
+const COMPRESSED_FORMATS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
+
+function buildBinDataDefBody(storageId, ext, attrOverride) {
+  let attr;
+  if (typeof attrOverride === 'number') {
+    attr = attrOverride;
+  } else {
+    // data_type = 1 (Embedding), compression: NoCompress for already-
+    // compressed formats / Default for raw bitmaps.
+    const compression = COMPRESSED_FORMATS.has(ext.toLowerCase()) ? 2 : 0;
+    attr = (compression << 4) | 0x01;
+  }
   const extChars = ext;
   const extBytes = Buffer.from(extChars, 'utf16le');
   const body = Buffer.alloc(2 + 2 + 2 + extBytes.length);
@@ -2463,4 +2489,165 @@ async function addBinDataDefToDocInfo(filePath, storageId, ext) {
 
   writeFileSync(filePath, buf);
   return { binDataCountBefore: oldCount, binDataCountAfter: oldCount + 1, storageId, ext };
+}
+
+// ── Phase 6 Step 3 — body image control via template clone ──────────────
+//
+// Last-ditch attempt: clone an entire image-bearing paragraph cluster from
+// a reference form (h22-style: paragraph #6 with control_mask 0x10800 +
+// nested 'gso' CTRL_HEADER + SHAPE_COMPONENT $pic + CTRL_DATA). Strip the
+// last-paragraph MSB on the top-level PARA_HEADER and rewrite every u16
+// instance of the template's bin_data_id with our new storage_id. Insert
+// after the last simple body paragraph.
+//
+// LIMITATIONS:
+//   - The template cluster carries footer + image + other nested content,
+//     not just an image. The result will have those artifacts appear at
+//     the insertion point too.
+//   - bin_data_id u16 search is heuristic; we rewrite all matches inside
+//     SHAPE_COMPONENT bodies. If the template's bin_data_id happens to
+//     also appear as some other unrelated u16 inside the body, that gets
+//     rewritten too — could break image positioning.
+//   - Cluster requires a reference form with the exact h22 pattern.
+
+function findImageTemplateCluster(records, raw, templateBinDataId) {
+  for (let i = 0; i < records.length; i++) {
+    if (records[i].tag !== TAG_PARA_HEADER || records[i].level !== 0) continue;
+    let end = records.length;
+    for (let j = i + 1; j < records.length; j++) {
+      if (records[j].tag === TAG_PARA_HEADER && records[j].level === 0) { end = j; break; }
+    }
+    // Look for CTRL_HEADER 'gso ' (id 0x206f7367) inside this cluster.
+    for (let j = i + 1; j < end; j++) {
+      const r = records[j];
+      if (r.tag !== TAG_CTRL_HEADER || r.size < 4) continue;
+      const id = raw.readUInt32LE(r.dataOff);
+      // 'gso ' (g s o space) → readUInt32LE = 0x67736f20
+      if (id !== 0x67736f20) continue;
+      return { paraStartIdx: i, clusterEndIdx: end };
+    }
+  }
+  return null;
+}
+
+// Clone cluster + rewrite bin_data_id u16 instances in SHAPE_COMPONENT bodies.
+// Uses records' absolute file offsets directly (delta to cluster start) so we
+// don't depend on a cumulative offset walk that can drift.
+function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, newBinDataId) {
+  const startOff = records[startIdx].headOff;
+  const endOff = endIdx < records.length ? records[endIdx].headOff : raw.length;
+  const out = Buffer.from(raw.slice(startOff, endOff));
+  // Clear MSB on top-level PARA_HEADER body offset 0
+  const topHdr = records[startIdx];
+  const topHdrLen = topHdr.ext ? 8 : 4;
+  const oldWord = out.readUInt32LE(topHdrLen);
+  out.writeUInt32LE((oldWord & 0x7FFFFFFF) >>> 0, topHdrLen);
+  // Walk records inside the cluster; for each SHAPE_COMPONENT (0x4c), use
+  // its absolute dataOff to compute its position inside the cloned buffer.
+  for (let i = startIdx; i < endIdx; i++) {
+    const r = records[i];
+    if (r.tag !== 0x4c) continue;
+    const bodyStart = r.dataOff - startOff; // position within `out`
+    // Scan body for u16 instances of oldBinDataId. Use byte-level loop
+    // so we catch unaligned matches too (rhwp's binary layout isn't
+    // always 16-bit aligned within the body).
+    for (let p = 0; p < r.size - 1; p++) {
+      if (out.readUInt16LE(bodyStart + p) === oldBinDataId) {
+        out.writeUInt16LE(newBinDataId, bodyStart + p);
+      }
+    }
+  }
+  return out;
+}
+
+async function appendImageBodyControl(filePath, newBinDataId) {
+  // Use h22_work_report.hwp as reference for template image cluster.
+  const TEMPLATE_PATH = '/Users/reconlabs/Downloads/h22_work_report.hwp';
+  const TEMPLATE_BIN_DATA_ID = 1;
+  if (!existsSync(TEMPLATE_PATH)) {
+    throw new Error(`appendImageBodyControl: template ${TEMPLATE_PATH} not found — Phase 6 Step 3 needs a reference form with an image`);
+  }
+
+  // 1. Load template's Section0 to extract the image cluster bytes.
+  const tplBuf = readFileSync(TEMPLATE_PATH);
+  const tplHdr = parseCfbHeader(tplBuf);
+  const tplFat = readFat(tplBuf, tplHdr.fatAddrs, tplHdr.ssz);
+  const tplDir = readDirectory(tplBuf, tplFat, tplHdr.ssz, tplHdr.dirStart);
+  const tplSec = findStreamEntry(tplDir.entries, ['BodyText', 'Section0']);
+  let tplComp;
+  if (tplSec.size < 4096) {
+    const tplMinifat = readMinifat(tplBuf, tplFat, tplHdr.ssz, tplHdr.minifatStart);
+    const tplRoot = walkChain(tplFat, tplDir.entries[0].start);
+    const tplChain = walkChain(tplMinifat, tplSec.start);
+    tplComp = readMiniChainBytes(tplBuf, tplChain, tplRoot, tplHdr.ssz, tplHdr.mssz, tplSec.size);
+  } else {
+    const tplChain = walkChain(tplFat, tplSec.start);
+    tplComp = readChainBytes(tplBuf, tplChain, tplHdr.ssz, tplSec.size);
+  }
+  const tplRaw = Buffer.from(inflateRawSync(tplComp));
+  const tplRecords = parseRecords(tplRaw);
+  const tpl = findImageTemplateCluster(tplRecords, tplRaw, TEMPLATE_BIN_DATA_ID);
+  if (!tpl) throw new Error('appendImageBodyControl: no image cluster found in template');
+  const cluster = cloneImageClusterBytes(tplRecords, tplRaw, tpl.paraStartIdx, tpl.clusterEndIdx, TEMPLATE_BIN_DATA_ID, newBinDataId);
+
+  // 2. Load target's Section0, insert cluster after last simple body paragraph.
+  let buf = readFileSync(filePath);
+  let { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
+  let fat = readFat(buf, fatAddrs, ssz);
+  const { entries } = readDirectory(buf, fat, ssz, dirStart);
+  let minifat = readMinifat(buf, fat, ssz, minifatStart);
+  let rootChain = null;
+  const ensureRootChain = () => {
+    if (rootChain) return rootChain;
+    if (entries[0].start < 0 || entries[0].start === ENDOFCHAIN) throw new Error('mini-stream needed but root entry has no chain');
+    rootChain = walkChain(fat, entries[0].start);
+    return rootChain;
+  };
+  const dirEntry = findStreamEntry(entries, ['BodyText', 'Section0']);
+  const inMiniStream = dirEntry.size < 4096;
+  let chain, compressed;
+  if (inMiniStream) {
+    const rc = ensureRootChain();
+    chain = walkChain(minifat, dirEntry.start);
+    compressed = readMiniChainBytes(buf, chain, rc, ssz, mssz, dirEntry.size);
+  } else {
+    chain = walkChain(fat, dirEntry.start);
+    compressed = readChainBytes(buf, chain, ssz, dirEntry.size);
+  }
+  let raw = Buffer.from(inflateRawSync(compressed));
+  const records = parseRecords(raw);
+  const anchor = findLastSimpleBodyParagraph(records);
+  const insertAt = anchor.endIdx < records.length ? records[anchor.endIdx].headOff : raw.length;
+  raw = Buffer.concat([raw.slice(0, insertAt), cluster, raw.slice(insertAt)]);
+
+  // Deflate + write
+  let newCompressed;
+  if (inMiniStream) {
+    const rc = ensureRootChain();
+    const ext2 = deflateMiniChainWithExpansion(
+      { buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain: rc, rootEntry: entries[0] },
+      raw, chain
+    );
+    buf = ext2.buf; fat = ext2.fat; minifat = ext2.minifat; minifatStart = ext2.minifatStart;
+    newCompressed = ext2.compressed;
+    if (ext2.promoted) {
+      chain = ext2.newRegularChain;
+      writeChainBytes(buf, chain, ssz, newCompressed);
+      buf.writeInt32LE(chain[0], dirEntry.entryFileOffset + 0x74);
+    } else {
+      rootChain = ext2.rootChain;
+      chain = ext2.miniChain;
+      writeMiniChainBytes(buf, chain, rootChain, ssz, mssz, newCompressed);
+    }
+  } else {
+    const capacity = chain.length * ssz;
+    const ext2 = deflateAndFitWithExpansion(raw, capacity, ssz, fat, fatAddrs, chain, buf, false);
+    buf = ext2.buf; fat = ext2.fat; chain = ext2.chain;
+    newCompressed = ext2.compressed;
+    writeChainBytes(buf, chain, ssz, newCompressed);
+  }
+  buf.writeUInt32LE(newCompressed.length, dirEntry.entryFileOffset + 0x78);
+  buf.writeUInt32LE(0, dirEntry.entryFileOffset + 0x7C);
+  writeFileSync(filePath, buf);
+  return { clusterSize: cluster.length, newBinDataId };
 }
