@@ -2303,12 +2303,164 @@ export async function appendImageInPlace(filePath, ops) {
     writeDirEntry(buf, newEntry, newName, 2, alloc.chain[0], imgBuf.length, 0);
     insertEntryIntoTree(buf, dir.entries, binDataIdx, slotIdx);
 
-    summary.push({ added: `BinData/${newName}`, size: imgBuf.length, slot: slotIdx, miniChain: alloc.chain });
+    // storage_id = the numeric part of "BIN000N" (1-based per CFB convention).
+    const storageId = parseInt(newName.match(/BIN(\d{4})\./)[1], 10);
+    summary.push({ added: `BinData/${newName}`, size: imgBuf.length, slot: slotIdx, storage_id: storageId, ext, miniChain: alloc.chain });
   }
 
+  // Step 1 writes CFB stream — flush before Step 2 re-opens the file.
   writeFileSync(filePath, buf);
+
+  // ── Step 2: register each new stream in DocInfo (HWPTAG_BIN_DATA + bump
+  // ID_MAPPINGS bin_data_count). Re-opens the file fresh so the CFB
+  // mutations from Step 1 are visible.
+  for (const item of summary) {
+    const docInfoResult = await addBinDataDefToDocInfo(filePath, item.storage_id, item.ext);
+    item.docInfo = docInfoResult;
+  }
+
   const result = Object.assign([], summary);
   result.mode = 'in-place';
   result.appended_count = summary.length;
   return result;
+}
+
+// ── Phase 6 Step 2 — DocInfo BinDataDef record ────────────────────────────
+//
+// After Step 1 creates the BinData/BIN000N.<ext> CFB stream, Step 2
+// registers that stream in DocInfo so it has an ID the body section can
+// reference. Two mutations inside DocInfo:
+//
+//   1. ID_MAPPINGS record (tag 0x11, body offset 0..3) — bump bin_data_count
+//      by 1. The body holds u32 counts for each ID-mapped resource type
+//      starting with BinData at offset 0.
+//   2. HWPTAG_BIN_DATA record (tag 0x12) — insert a new one after the last
+//      existing HWPTAG_BIN_DATA. Body: attr u16 + storage_id u16 + extension
+//      hwp_string (u16 char_count + UTF-16LE chars).
+//
+// attr bits per rhwp parser:
+//   bits 0..3 = data_type (0=Link, 1=Embedding, 2=Storage)
+//   bits 4..5 = compression (0=Default, 1=Compress, 2=NoCompress)
+//   bits 8..9 = status (0=NotAccessed, 1=Success, 2=Error, 3=Ignored)
+// We use Embedding + Default + NotAccessed → attr = 0x0001.
+
+const TAG_ID_MAPPINGS = 0x11;
+const TAG_BIN_DATA_DEF = 0x12;
+
+function buildBinDataDefBody(storageId, ext, attr = 0x0001) {
+  const extChars = ext;
+  const extBytes = Buffer.from(extChars, 'utf16le');
+  const body = Buffer.alloc(2 + 2 + 2 + extBytes.length);
+  body.writeUInt16LE(attr, 0);
+  body.writeUInt16LE(storageId, 2);
+  body.writeUInt16LE(extChars.length, 4);
+  extBytes.copy(body, 6);
+  return body;
+}
+
+function buildRecordHeader(tag, level, size) {
+  // Standard 4-byte header: tag(10) + level(10) + size(12)
+  // If size >= 0xFFF, use extended (4-byte header + 4-byte size); for our
+  // 12-byte BinData body we always fit in standard.
+  if (size >= 0xFFF) {
+    const head = Buffer.alloc(8);
+    head.writeUInt32LE(((0xFFF << 20) | (level << 10) | tag) >>> 0, 0);
+    head.writeUInt32LE(size, 4);
+    return head;
+  }
+  const head = Buffer.alloc(4);
+  head.writeUInt32LE(((size << 20) | (level << 10) | tag) >>> 0, 0);
+  return head;
+}
+
+// Walk DocInfo records, return [{tag, level, size, headOff, dataOff, ext}].
+// (Same shape as parseRecords for body sections, just on DocInfo bytes.)
+function parseDocInfoRecords(raw) {
+  return parseRecords(raw); // identical record format
+}
+
+async function addBinDataDefToDocInfo(filePath, storageId, ext) {
+  let buf = readFileSync(filePath);
+  let { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
+  let fat = readFat(buf, fatAddrs, ssz);
+  const { entries } = readDirectory(buf, fat, ssz, dirStart);
+  let minifat = readMinifat(buf, fat, ssz, minifatStart);
+  let rootChain = null;
+  const ensureRootChain = () => {
+    if (rootChain) return rootChain;
+    if (entries[0].start < 0 || entries[0].start === ENDOFCHAIN) {
+      throw new Error('mini-stream needed but root entry has no chain');
+    }
+    rootChain = walkChain(fat, entries[0].start);
+    return rootChain;
+  };
+
+  const dirEntry = findStreamEntry(entries, ['DocInfo']);
+  const inMiniStream = dirEntry.size < 4096;
+  let chain, compressed;
+  if (inMiniStream) {
+    const rc = ensureRootChain();
+    chain = walkChain(minifat, dirEntry.start);
+    compressed = readMiniChainBytes(buf, chain, rc, ssz, mssz, dirEntry.size);
+  } else {
+    chain = walkChain(fat, dirEntry.start);
+    compressed = readChainBytes(buf, chain, ssz, dirEntry.size);
+  }
+  let raw = Buffer.from(inflateRawSync(compressed));
+
+  // Find ID_MAPPINGS record and bump bin_data_count.
+  const records = parseDocInfoRecords(raw);
+  const idMap = records.find((r) => r.tag === TAG_ID_MAPPINGS);
+  if (!idMap) throw new Error('addBinDataDefToDocInfo: HWPTAG_ID_MAPPINGS record not found in DocInfo');
+  if (idMap.size < 4) throw new Error(`addBinDataDefToDocInfo: ID_MAPPINGS body too small (${idMap.size})`);
+  const oldCount = raw.readUInt32LE(idMap.dataOff);
+  raw.writeUInt32LE(oldCount + 1, idMap.dataOff);
+
+  // Build new HWPTAG_BIN_DATA record.
+  const body = buildBinDataDefBody(storageId, ext);
+  const header = buildRecordHeader(TAG_BIN_DATA_DEF, 1, body.length);
+  const newRec = Buffer.concat([header, body]);
+
+  // Insert position: right after the last existing HWPTAG_BIN_DATA record
+  // (so all BinData defs stay grouped). If there are no existing ones,
+  // insert right after ID_MAPPINGS.
+  let insertAfterEnd = idMap.dataOff + idMap.size;
+  for (const r of records) {
+    if (r.tag !== TAG_BIN_DATA_DEF) continue;
+    const end = r.dataOff + r.size;
+    if (end > insertAfterEnd) insertAfterEnd = end;
+  }
+  raw = Buffer.concat([raw.slice(0, insertAfterEnd), newRec, raw.slice(insertAfterEnd)]);
+
+  // Deflate + write back (same pipeline as other in-place edits).
+  let newCompressed;
+  if (inMiniStream) {
+    const rc = ensureRootChain();
+    const ext2 = deflateMiniChainWithExpansion(
+      { buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain: rc, rootEntry: entries[0] },
+      raw, chain
+    );
+    buf = ext2.buf; fat = ext2.fat; minifat = ext2.minifat; minifatStart = ext2.minifatStart;
+    newCompressed = ext2.compressed;
+    if (ext2.promoted) {
+      chain = ext2.newRegularChain;
+      writeChainBytes(buf, chain, ssz, newCompressed);
+      buf.writeInt32LE(chain[0], dirEntry.entryFileOffset + 0x74);
+    } else {
+      rootChain = ext2.rootChain;
+      chain = ext2.miniChain;
+      writeMiniChainBytes(buf, chain, rootChain, ssz, mssz, newCompressed);
+    }
+  } else {
+    const capacity = chain.length * ssz;
+    const ext2 = deflateAndFitWithExpansion(raw, capacity, ssz, fat, fatAddrs, chain, buf, false);
+    buf = ext2.buf; fat = ext2.fat; chain = ext2.chain;
+    newCompressed = ext2.compressed;
+    writeChainBytes(buf, chain, ssz, newCompressed);
+  }
+  buf.writeUInt32LE(newCompressed.length, dirEntry.entryFileOffset + 0x78);
+  buf.writeUInt32LE(0, dirEntry.entryFileOffset + 0x7C);
+
+  writeFileSync(filePath, buf);
+  return { binDataCountBefore: oldCount, binDataCountAfter: oldCount + 1, storageId, ext };
 }
