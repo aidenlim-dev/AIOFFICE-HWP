@@ -2121,3 +2121,194 @@ export async function appendParagraphInPlace(filePath, ops) {
   result.appended_count = summary.length;
   return result;
 }
+
+
+// ── Phase 6: append_image raw-patch ──────────────────────────────────────
+//
+// Step 1: add a new BinData/BIN000N.<ext> CFB stream containing the user's
+// image bytes. No DocInfo or section changes yet — purely add the stream so
+// we can verify Hancom Docs still opens the file with an orphan binary
+// stream present. Steps 2/3 (DocInfo BinDataDef + body image control) will
+// build on top.
+//
+// CFB add-stream flow:
+//   1. Allocate a fresh mini-FAT chain for the image bytes (image < 4096
+//      bytes for v1 — most embedded icons / 1x1 png / small bitmaps fit).
+//      Larger images need regular FAT allocation; deferred.
+//   2. Pick an unused directory slot (type=0). ktx has 3; if none we'd
+//      need to expand the directory chain (deferred).
+//   3. Write the new entry: name = "BIN000<N>.<ext>" UTF-16LE, type=2
+//      (stream), color=0 (red), L/R/C=-1, start=miniChain[0],
+//      size=imageBuffer.length.
+//   4. Insert into BinData parent's child tree via simple BST insert
+//      (no red-black rebalancing — testing whether Hancom tolerates that).
+
+const MSSZ_DEFAULT_IMG = 64;
+
+function pickFreeBinDataName(entries, ext) {
+  const used = new Set();
+  for (const e of entries) {
+    if (e.type !== 2) continue;
+    const m = e.name.match(/^BIN(\d{4})\./i);
+    if (m) used.add(parseInt(m[1], 10));
+  }
+  for (let i = 1; i < 10000; i++) {
+    if (!used.has(i)) return `BIN${String(i).padStart(4, '0')}.${ext}`;
+  }
+  throw new Error('append_image: no free BIN000N slot');
+}
+
+function findUnusedDirSlot(entries) {
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i].type === 0) return i;
+  }
+  return -1;
+}
+
+function cfbNameCompare(a, b) {
+  if (a.length !== b.length) return a.length - b.length;
+  const au = a.toUpperCase();
+  const bu = b.toUpperCase();
+  return au < bu ? -1 : au > bu ? 1 : 0;
+}
+
+function allocMiniChain(ctx, byteCount) {
+  let { buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain, rootEntry } = ctx;
+  const sectorsNeeded = Math.max(1, Math.ceil(byteCount / mssz));
+  const chain = [];
+  for (let n = 0; n < sectorsNeeded; n++) {
+    let slot = -1;
+    for (let m = 0; m < minifat.length; m++) {
+      if (minifat[m] === FREESECT && !chain.includes(m)) { slot = m; break; }
+    }
+    if (slot === -1) slot = minifat.length + n;
+    const mfExp = expandMinifatCapacity(buf, ssz, fat, fatAddrs, minifat, minifatStart, slot + 1);
+    buf = mfExp.buf; fat = mfExp.fat; minifat = mfExp.minifat; minifatStart = mfExp.minifatStart;
+    const rcExp = ensureRootChainForMiniSectors(buf, ssz, mssz, fat, fatAddrs, rootChain, slot + 1);
+    buf = rcExp.buf; fat = rcExp.fat; rootChain = rcExp.rootChain;
+    chain.push(slot);
+  }
+  for (let i = 0; i < chain.length - 1; i++) {
+    writeMinifatEntry(buf, ssz, mssz, fat, minifatStart, chain[i], chain[i + 1]);
+    minifat[chain[i]] = chain[i + 1];
+  }
+  writeMinifatEntry(buf, ssz, mssz, fat, minifatStart, chain[chain.length - 1], ENDOFCHAIN);
+  minifat[chain[chain.length - 1]] = ENDOFCHAIN;
+  const highest = Math.max(...chain);
+  const minRootBytes = (highest + 1) * mssz;
+  const oldRootSize = buf.readUInt32LE(rootEntry.entryFileOffset + 0x78);
+  if (minRootBytes > oldRootSize) {
+    buf.writeUInt32LE(minRootBytes, rootEntry.entryFileOffset + 0x78);
+    buf.writeUInt32LE(0, rootEntry.entryFileOffset + 0x7C);
+  }
+  return { buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain, rootEntry, chain };
+}
+
+function insertEntryIntoTree(buf, entries, parentIdx, newIdx) {
+  const parent = entries[parentIdx];
+  const newName = entries[newIdx].name;
+  if (parent.child < 0) {
+    buf.writeInt32LE(newIdx, parent.entryFileOffset + 0x4C);
+    parent.child = newIdx;
+    return;
+  }
+  let curIdx = parent.child;
+  while (true) {
+    const cur = entries[curIdx];
+    const cmp = cfbNameCompare(newName, cur.name);
+    if (cmp < 0) {
+      if (cur.leftSibling < 0) {
+        buf.writeInt32LE(newIdx, cur.entryFileOffset + 0x44);
+        cur.leftSibling = newIdx;
+        return;
+      }
+      curIdx = cur.leftSibling;
+    } else if (cmp > 0) {
+      if (cur.rightSibling < 0) {
+        buf.writeInt32LE(newIdx, cur.entryFileOffset + 0x48);
+        cur.rightSibling = newIdx;
+        return;
+      }
+      curIdx = cur.rightSibling;
+    } else {
+      throw new Error(`insertEntryIntoTree: duplicate name "${newName}"`);
+    }
+  }
+}
+
+function writeDirEntry(buf, entry, name, type, startSector, byteSize, color = 0) {
+  const off = entry.entryFileOffset;
+  buf.fill(0, off, off + 128);
+  const nameBytes = Buffer.from(name + '\0', 'utf16le');
+  if (nameBytes.length > 64) throw new Error(`writeDirEntry: name too long (${nameBytes.length})`);
+  nameBytes.copy(buf, off);
+  buf.writeUInt16LE(nameBytes.length, off + 0x40);
+  buf.writeUInt8(type, off + 0x42);
+  buf.writeUInt8(color, off + 0x43);
+  buf.writeInt32LE(-1, off + 0x44);
+  buf.writeInt32LE(-1, off + 0x48);
+  buf.writeInt32LE(-1, off + 0x4C);
+  buf.writeInt32LE(startSector, off + 0x74);
+  buf.writeUInt32LE(byteSize >>> 0, off + 0x78);
+  buf.writeUInt32LE(0, off + 0x7C);
+  entry.name = name;
+  entry.type = type;
+  entry.leftSibling = -1;
+  entry.rightSibling = -1;
+  entry.child = -1;
+  entry.start = startSector;
+  entry.size = byteSize;
+}
+
+export async function appendImageInPlace(filePath, ops) {
+  if (!Array.isArray(ops) || ops.length === 0) {
+    return Object.assign([], { mode: 'in-place', appended_count: 0 });
+  }
+  let buf = readFileSync(filePath);
+  let { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
+  if (!mssz) mssz = MSSZ_DEFAULT_IMG;
+  let fat = readFat(buf, fatAddrs, ssz);
+  let dir = readDirectory(buf, fat, ssz, dirStart);
+  let minifat = readMinifat(buf, fat, ssz, minifatStart);
+  let rootChain = walkChain(fat, dir.entries[0].start);
+
+  const binDataIdx = dir.entries.findIndex((e) => e.type === 1 && e.name === 'BinData');
+  if (binDataIdx < 0) {
+    throw new Error('append_image: BinData storage not found — Step 1 needs the form to already have a BinData folder');
+  }
+
+  const summary = [];
+  for (const op of ops) {
+    if (!op.path) throw new Error('append_image: op.path is required');
+    const imgBuf = readFileSync(op.path);
+    const ext = (op.path.split('.').pop() || 'png').toLowerCase();
+    if (imgBuf.length >= 4096) {
+      throw new Error(`append_image: image > 4096 bytes (${imgBuf.length}) — Step 1 supports mini-stream images only`);
+    }
+    dir = readDirectory(buf, fat, ssz, dirStart);
+    rootChain = walkChain(fat, dir.entries[0].start);
+    const newName = pickFreeBinDataName(dir.entries, ext);
+    const slotIdx = findUnusedDirSlot(dir.entries);
+    if (slotIdx < 0) throw new Error('append_image: no unused directory slot');
+
+    const alloc = allocMiniChain({
+      buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain, rootEntry: dir.entries[0]
+    }, imgBuf.length);
+    buf = alloc.buf; fat = alloc.fat; minifat = alloc.minifat; minifatStart = alloc.minifatStart;
+    rootChain = alloc.rootChain;
+    writeMiniChainBytes(buf, alloc.chain, rootChain, ssz, mssz, imgBuf);
+
+    dir = readDirectory(buf, fat, ssz, dirStart);
+    const newEntry = dir.entries[slotIdx];
+    writeDirEntry(buf, newEntry, newName, 2, alloc.chain[0], imgBuf.length, 0);
+    insertEntryIntoTree(buf, dir.entries, binDataIdx, slotIdx);
+
+    summary.push({ added: `BinData/${newName}`, size: imgBuf.length, slot: slotIdx, miniChain: alloc.chain });
+  }
+
+  writeFileSync(filePath, buf);
+  const result = Object.assign([], summary);
+  result.mode = 'in-place';
+  result.appended_count = summary.length;
+  return result;
+}

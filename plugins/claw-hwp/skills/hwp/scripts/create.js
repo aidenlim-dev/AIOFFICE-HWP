@@ -1611,6 +1611,7 @@ async function readStdin() {
   const REPLACE_TEXT_OPS = new Set(['replace_text']);
   const APPEND_TABLE_OPS = new Set(['append_table']);
   const SETUP_DOC_OPS = new Set(['setup_document']);
+  const APPEND_IMAGE_OPS = new Set(['append_image']);
   // All paragraph-shaped append ops route through appendParagraphInPlace.
   // Some carry a break_val (page/column break); the rest just add text.
   //   append_paragraph                    → break_val 0
@@ -1634,7 +1635,7 @@ async function readStdin() {
     'insert_column_break',
     'setup_columns',
   ]);
-  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS, ...APPEND_TABLE_OPS, ...SETUP_DOC_OPS]);
+  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS, ...APPEND_TABLE_OPS, ...SETUP_DOC_OPS, ...APPEND_IMAGE_OPS]);
   const allRawPatch = ops.length > 0 && ops.every((o) => RAW_PATCH_OPS.has(o.type));
   if (ext === '.hwp' && fs.existsSync(outPath) && allRawPatch) {
     try {
@@ -1665,6 +1666,13 @@ async function readStdin() {
         const sSummary = await setupDocumentInPlace(outPath, setupOps[setupOps.length - 1]);
         subModes.push(`setup:${sSummary.mode || 'in-place'}`);
         allEdits.push({ kind: 'setup_document', ...sSummary.applied });
+      }
+      const imageOps = ops.filter((o) => APPEND_IMAGE_OPS.has(o.type));
+      if (imageOps.length > 0) {
+        const { appendImageInPlace } = await import('./cell-patch.js');
+        const iSummary = await appendImageInPlace(outPath, imageOps);
+        subModes.push(`image:${iSummary.mode || 'in-place'}`);
+        for (const e of iSummary) allEdits.push({ kind: 'image', ...e });
       }
       const tableOps = ops.filter((o) => APPEND_TABLE_OPS.has(o.type));
       if (tableOps.length > 0) {
