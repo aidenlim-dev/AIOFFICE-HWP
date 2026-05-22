@@ -24,10 +24,12 @@ Do **not** run `npm install`, create new plugin/skill folders, or fetch dependen
 
 ### Two "preview" terms that collide
 
-- **Claude Code app's Preview side pane** (the side panel in the Code Desktop UI). This is a **host feature** of Claude Code itself. You don't install or configure it — it auto-discovers a process serving on `localhost:3737`.
+- **Claude Code app's Preview side pane** (the side panel in the Code Desktop UI). This is a **host feature** of Claude Code itself. You don't install or configure it — it auto-discovers a process serving on `localhost:3737`. **Only available when the Code workspace is a local folder on this machine; disappears for server/remote folders.**
 - **`scripts/preview-server.js`** — the **claw-hwp local server** that fills that pane. Start it via the launcher described in the `Preview` section. Default port is `3737`, the same port the Code pane auto-discovers.
 
 When the user says "preview", they almost always mean "show me the file" — start the server, hand them the link or fire `preview_start` per the surface decision rule below. Do not interpret it as "install a new preview feature".
+
+> **When `preview_start` / `preview_eval` / `preview_stop` tools are unavailable in this session, fall straight through to the self-host link path** (browser link to `http://localhost:3737/?path=<absolute>`). Don't tell the user "preview is not supported" — that's only true on cowork (remote sandbox). Server/remote folder workspaces in the Desktop app, plus all CLI sessions, simply run the local server and emit a browser link. The cowork drop-in viewer is the third option for sandbox-only setups.
 
 ## Quick reference
 
@@ -239,14 +241,14 @@ The skill ships a tiny Node HTTP server (`scripts/preview-server.js`) that serve
 
 | Surface | Detection | What you do |
 |---|---|---|
-| **Claude Code Desktop** (Code mode in the desktop app) | `preview_start` / `preview_eval` / `preview_stop` tools are present | Use the host-managed inline pane. See "Inline pane path" below. |
-| **Claude Code CLI** (and any other surface where Bash runs on the user's machine but no `preview_*` tools exist) | `uname -s` returns `Darwin` / `Linux` / `MINGW*` *and* no `preview_*` tools | Self-host: bash launches `preview-server.js`, then hand the user a markdown link. See "Self-host link path" below. |
-| **Cowork** (claude.ai web cowork, Claude Desktop's cowork mode) | No `preview_*` tools, and you're inside a remote Linux sandbox (Bash can't reach the user's `localhost`) | Emit the file plus a one-line link to the hosted browser viewer; user downloads the file and drops it onto the viewer page. The OS-launcher block is the offline fallback. See "Cowork drop-in viewer path" below. Do not run `preview-server.js` inside the sandbox — its `localhost` is unreachable from the user's browser. |
-| **Claude API direct** (developer's app embedding the SDK) | Depends on developer's deployment | If their Bash is on the user's machine, treat as CLI. If it's on a remote server, treat as cowork. |
+| **Claude Code Desktop — local folder** (Code mode pointing at a directory on this machine) | `preview_start` / `preview_eval` / `preview_stop` tools are present | Use the host-managed inline pane. See "Inline pane path" below. |
+| **Claude Code Desktop — server / remote folder**, **Claude Code CLI**, and any other surface where Bash runs on the user's machine but no `preview_*` tools exist | No `preview_*` tools, and `curl -fsS http://localhost:3737/__heartbeat` (or trying to start a Node server there) succeeds. The Desktop inline pane **disappears when the workspace is a server/remote folder** — don't insist on `preview_start`, just fall straight through to this row and self-host. | Self-host: bash launches `preview-server.js` on `localhost:3737`, then emit a markdown link the user clicks to open in their browser. See "Self-host link path" below. |
+| **Cowork** (claude.ai web cowork, Claude Desktop's cowork mode) | No `preview_*` tools, and you're inside a remote Linux sandbox — Bash on Anthropic's container, **not on the user's machine**. The sandbox's `localhost:3737` is reachable from the sandbox itself but **not from the user's browser** (the two networks are isolated by design). | Emit the file plus a one-line link to the hosted browser viewer; user downloads the file and drops it onto the viewer page. The OS-launcher block is the offline fallback. See "Cowork drop-in viewer path" below. **Do not run `preview-server.js` inside the sandbox** — the user's browser can't reach it. |
+| **Claude API direct** (developer's app embedding the SDK) | Depends on developer's deployment | If their Bash is on the user's machine, treat as the self-host row above. If it's on a remote server they own, treat as cowork. |
 
-#### Inline pane path (Claude Code Desktop only)
+#### Inline pane path (Claude Code Desktop — local folder only)
 
-This is the only surface that exposes `preview_start` / `preview_eval` / `preview_stop`. Setup once per workspace via `.claude/launch.json`:
+This is the only surface that exposes `preview_start` / `preview_eval` / `preview_stop`. Detection: try invoking `preview_start` (or check the tool inventory). If the tools aren't there, the workspace is a server/remote folder — skip this section and go to "Self-host link path" below. Setup once per workspace via `.claude/launch.json`:
 
 ```json
 {
