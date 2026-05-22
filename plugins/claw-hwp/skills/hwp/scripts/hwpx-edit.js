@@ -448,20 +448,23 @@ function opMergeCells(doc, tableIndex, mode, opts) {
 
 // ── style operations (clone-mutate-retarget in header.xml) ───────────────────
 
-// Point the <hp:run> enclosing the first <hp:t> containing `target` at a new
-// charPrIDRef. Returns the rewritten xml, or null if target not present.
+// Point the <hp:run> that actually CONTAINS the first <hp:t> holding `target`
+// at a new charPrIDRef. Returns the rewritten xml, or null if not found.
+// Uses a balanced run scan (not lastIndexOf) so an empty self-closing
+// <hp:run/> sitting just before the text node isn't mistaken for its parent —
+// the bug that styled an empty run and left the visible text unchanged.
 function retargetRunForText(xml, target, newId) {
   const tRe = new RegExp(`<hp:t(?:\\s[^>]*)?>[^<]*${escapeRegex(target)}`);
-  const m = tRe.exec(xml);
-  if (!m) return null;
-  const runStart = xml.lastIndexOf('<hp:run', m.index);
-  if (runStart === -1) return null;
-  const openEnd = xml.indexOf('>', runStart);
-  const open = xml.slice(runStart, openEnd + 1);
-  const newOpen = /charPrIDRef="\d+"/.test(open)
-    ? open.replace(/charPrIDRef="\d+"/, `charPrIDRef="${newId}"`)
-    : open.replace(/^<hp:run/, `<hp:run charPrIDRef="${newId}"`);
-  return xml.slice(0, runStart) + newOpen + xml.slice(openEnd + 1);
+  for (const r of scanTopLevel(xml, 'hp:run')) {
+    if (r.selfClosing) continue;          // empty run, not a text container
+    if (r.inner.includes('<hp:tbl')) continue; // a table-wrapping run, not a leaf text run
+    if (!tRe.test(r.inner)) continue;
+    const newOpen = /charPrIDRef="\d+"/.test(r.attrs)
+      ? r.attrs.replace(/charPrIDRef="\d+"/, `charPrIDRef="${newId}"`)
+      : ` charPrIDRef="${newId}"${r.attrs}`;
+    return xml.slice(0, r.start) + `<hp:run${newOpen}>` + r.inner + '</hp:run>' + xml.slice(r.end);
+  }
+  return null;
 }
 
 function opApplyTextStyle(doc, target, style) {
@@ -631,29 +634,50 @@ function opInsertImage(doc, sourcePath, ext, width, height) {
       doc.write(hpf, s);
     }
   }
-  const w = width || 28350, h = height || 28350; // ~100mm
   const names = doc.sectionNames();
   const last = names[names.length - 1];
   let xml = doc.read(last);
   const paras = scanTopLevel(xml, 'hp:p');
   const charPrId = paras.length ? (paras[paras.length - 1].inner.match(/charPrIDRef="(\d+)"/) || [, '0'])[1] : '0';
   const attrs = paras.length ? paras[paras.length - 1].attrs.replace(/\s*id="\d+"/, ` id="${freshId()}"`) : ` id="${freshId()}" paraPrIDRef="0" styleIDRef="0"`;
-  const pic =
-    `<hp:pic id="${freshId()}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" href="" groupLevel="0" instid="${freshId()}" reverse="0">` +
-    `<hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/>` +
-    `<hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="0" centerY="0" rotateimage="1"/>` +
-    `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${w}" y="0"/><hc:pt2 x="${w}" y="${h}"/><hc:pt3 x="0" y="${h}"/></hp:imgRect>` +
-    `<hp:imgClip left="0" right="${w}" top="0" bottom="${h}"/><hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
-    `<hp:imgDim dimwidth="${w}" dimheight="${h}"/>` +
-    `<hc:img binaryItemIDRef="${itemId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/>` +
-    `<hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/>` +
-    `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
-    `<hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:caption side="LEFT" fullSz="0" width="0" gap="0" lastWidth="${w}"/>` +
-    `</hp:pic>`;
+  const pic = buildPic(doc, itemId, width, height);
   const para = `<hp:p${attrs}><hp:run charPrIDRef="${charPrId}">${pic}</hp:run></hp:p>`;
   xml = /<\/hs:sec>\s*$/.test(xml) ? xml.replace(/<\/hs:sec>\s*$/, para + '</hs:sec>') : xml + para;
   doc.write(last, xml);
   return { entry, itemId, inserted: true };
+}
+
+// Build an inline <hp:pic> for a freshly-added image. Hancom Docs validates the
+// shape schema strictly (requires hp:renderingInfo, hp:shapeComment; rejects a
+// stray hp:caption), so we CLONE an existing pic from the document when one is
+// present — guaranteed-valid structure — and only repoint its binary ref + ids.
+// Falls back to a schema-complete template when the doc has no images yet.
+function buildPic(doc, itemId, width, height) {
+  for (const name of doc.sectionNames()) {
+    const pics = scanTopLevel(doc.read(name), 'hp:pic');
+    if (pics.length) {
+      const xml = doc.read(name);
+      let pic = xml.slice(pics[0].start, pics[0].end);
+      pic = pic
+        .replace(/binaryItemIDRef="[^"]*"/, `binaryItemIDRef="${itemId}"`)
+        .replace(/\bid="\d+"/, `id="${freshId()}"`)
+        .replace(/\binstid="\d+"/, `instid="${freshId()}"`);
+      return pic;
+    }
+  }
+  const w = width || 28350, h = height || 28350; // ~100mm fallback
+  return `<hp:pic id="${freshId()}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${freshId()}" reverse="0">`
+    + `<hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/>`
+    + `<hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="0" centerY="0" rotateimage="1"/>`
+    + `<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo>`
+    + `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${w}" y="0"/><hc:pt2 x="${w}" y="${h}"/><hc:pt3 x="0" y="${h}"/></hp:imgRect>`
+    + `<hp:imgClip left="0" right="${w}" top="0" bottom="${h}"/><hp:inMargin left="0" right="0" top="0" bottom="0"/>`
+    + `<hp:imgDim dimwidth="${w}" dimheight="${h}"/>`
+    + `<hc:img binaryItemIDRef="${itemId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/>`
+    + `<hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/>`
+    + `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>`
+    + `<hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:shapeComment>inserted image</hp:shapeComment>`
+    + `</hp:pic>`;
 }
 
 // ── field operation ──────────────────────────────────────────────────────────
