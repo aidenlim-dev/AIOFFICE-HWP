@@ -118,7 +118,11 @@ Errors come back as `{"status": "error", "message": "...", "op_index": N}`. Alwa
 | `append_bullet_list`, `append_numbered_list` | `items[]` | — |
 | `append_page_break` | — | — |
 
-> ⚠️ **`append_image` on existing `.hwp` files is not Hancom Docs–compatible in v1.** Adding an image needs three coordinated mutations (new `BinData/BIN000N.<ext>` CFB stream, DocInfo `HWPTAG_BIN_DATA` registration, body `gso` control + `SHAPE_COMPONENT_PICTURE` referencing the new `bin_data_id`). Our raw-patch can produce all three, but on small mini-stream Section0 files the cluster expansion truncates and Hancom Docs rejects the result. The fallback rhwp-emit path is **also** Hancom Docs–rejected — not just because of past sheetjs `CFB.write` markers (which we've now removed) but because **rhwp's `exportHwp()` round-trip itself fails Hancom Docs's strict validator on large forms**. This was confirmed against Hop (the rhwp reference desktop app): Hop opens a big ktx form, modifies a cell, saves → Hancom Docs rejects. The limitation is intrinsic to rhwp's serializer, not something we can route around via the rhwp path. **Workarounds:** (a) pre-design the form template with an image placeholder, then use `replace_text`/`set_cell_text` to fill surrounding fields — those go through raw-patch and stay Hancom-Docs-compatible; (b) create the document from scratch (start with `setup_document`) so the file never round-trips — rhwp emit + image works end-to-end in that case (Hop does this too); (c) use Hancom Office desktop, which accepts the rhwp emit path for round-trip.
+> ⚠️ **`append_image` rules of thumb (Hancom Docs compatibility — verified 2026-05-22):**
+>
+> - **Fresh `.hwp` from scratch (start with `setup_document`) + `append_image`** → Hancom Docs ✓. rhwp emit path produces a valid file; this is the same path Hop uses for new documents.
+> - **`append_image` on an existing `.hwp` (in-place add)** → Hancom Docs ✗ in v1. We have a raw-patch implementation that lands all three required pieces (new `BinData/BIN000N.<ext>` stream, DocInfo `HWPTAG_BIN_DATA` registration, body `gso` + `SHAPE_COMPONENT_PICTURE` referencing the new `bin_data_id`), but on small mini-stream Section0 files the cluster expansion truncates and Hancom rejects. Falling back to rhwp emit doesn't help: rhwp's own `exportHwp()` round-trip is Hancom-Docs-rejected for any non-trivial existing file — Hop hits the same wall when it opens a big form, modifies a cell, and saves.
+> - **Workarounds for the in-place case:** (a) build the document from scratch in a single payload so the file never round-trips (rhwp emit + image works end-to-end), (b) pre-design the template with an image placeholder + use `replace_text` / `set_cell_text` to fill surrounding fields (those go through raw-patch and stay Hancom-compatible), or (c) use Hancom Office desktop which accepts the rhwp emit path for round-trip.
 
 *In-place editing (run on an existing file — omit `setup_document` so create.js loads the path instead of starting blank):*
 
@@ -285,6 +289,12 @@ Don't repeat the link on every preview swap inside the same conversation — onc
 #### Self-host link path (Claude Code CLI, local-bash API setups)
 
 No host-managed pane available, but Bash can reach the user's localhost. Health-check first; if dead, start it yourself — never ask the user to run anything.
+
+> **UX caveat:** the browser preview is a lightweight inspection viewer (zoom, page navigation, text selection) — not a full-fidelity Hangul renderer. **For careful review or editing**, mention these alternatives in the same response as the preview link:
+> - **[Hop desktop app](https://github.com/golbin/hop)** (macOS / Windows / Linux) — open-source Hangul viewer/editor on the same rhwp WASM core, with a real editor UX.
+> - **한컴오피스 한글 / 한컴독스** — original-fidelity rendering if the user has a license or 한컴독스 account.
+> - **PDF export via Hop** — file → PDF 내보내기. Our plugin's `.hwp → .pdf` conversion is on the v2 roadmap (LibreOffice headless / Hop CLI), not in v1.
+> CLI preview is for "quick check while working." Detail review goes elsewhere.
 
 ```bash
 SCRIPT="${CLAUDE_PLUGIN_ROOT:-}/skills/hwp/scripts/preview-server.js"
