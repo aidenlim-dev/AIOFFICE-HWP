@@ -26,8 +26,9 @@ HWP/HWPX 의 한컴독스 호환성 / 동작 spec 은 우리가 자의적으로 
   - 우리 plugin baseline (`baseline_no_strip_skip_cfbwrite.hwp`) → 한컴독스 ✓
 - **rhwp `exportHwp()` round-trip** (load existing big form → modify → exportHwp):
   - **Hop 에서 ktx 큰 폼 open + cell 수정 ("엣지형" → "테스트") + 저장 → 한컴독스 ✗ (2026-05-22 검증)**
+  - **Hop 에서 ktx 큰 폼 open + image 추가 + 저장 → 한컴독스 ✗ (2026-05-22 검증)**
   - 우리 plugin (`ktx_cell_latest_vendor_v2.hwp`, 최신 v0.7.12 vendor + strip 제거) → 한컴독스 ✗ (동일 결과)
-  - 즉 rhwp 자체의 round-trip 한계. Hop 도 같은 한계 가짐.
+  - 즉 rhwp 자체의 round-trip 한계. Hop 도 같은 한계 가짐. **modify 종류 무관 — cell, image, 다른 무엇이든 round-trip 자체가 reject.**
 - **이게 우리 raw-patch (cell-patch.js — 기존 bytes 통째 유지 + 변경 부분만 byte-level patch) 가 in-place edit 의 유일한 한컴독스 호환 path 인 이유.** Hop 도 못 푸는 문제를 우리가 회피해서 풀어둔 것.
 - **sheetjs `CFB.write` (vendor/cfb/cfb.js)**: directory entry [Sh33tJ5] 빈 stream 박음 → 한컴독스 ✗. **써서는 안 됨.** in-place edit 은 우리 raw-patch 인프라 사용.
 
@@ -35,7 +36,7 @@ HWP/HWPX 의 한컴독스 호환성 / 동작 spec 은 우리가 자의적으로 
 
 - `stripParaLineSegRecords` 의 sheetjs CFB.write — **제거 완료** (Hop 도 strip 안 함). PARA_LINESEG placeholder 가 우리 local renderer 에서 layout 약간 잘못 표시하지만 그건 별도 issue (Hop 도 같은 상태).
 - Phase 1-5 raw-patch — **유지** (검증된 한컴독스 호환 유일 path).
-- Phase 6 image in-place add — 우리 raw-patch 시도가 mini-stream truncation 등 한계로 reject. **계속 정밀 디버그** (Hop 도 round-trip ✗ 라서 rhwp emit 으로 회피 불가능. raw-patch 가 유일한 길). 그 전에는 SKILL.md 에 "v1 미지원" 명시.
+- Phase 6 image in-place add — 우리 raw-patch 시도가 mini-stream truncation + template path 한계로 reject. **B 단계 (정밀 디버그) 진행 예정**. Hop 도 in-place image round-trip ✗ 라서 rhwp emit 회피 불가 — raw-patch 가 유일한 길이라는 점은 변함 없음. 그 전에는 SKILL.md 에 "v1 미지원, workaround = from-scratch path" 명시.
 - worktree 분리 — `~/claw-hwp-raw-patch` (hwp 트랙) + `~/claw-hwp-hwpx-edit` (hwpx 트랙, 다른 세션). 메인 폴더는 main checkout.
 
 ## 작업 원칙 재확인
