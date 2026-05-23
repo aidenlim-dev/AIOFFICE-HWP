@@ -2329,9 +2329,15 @@ export async function appendImageInPlace(filePath, ops) {
 
   // ── Step 3: emit body image control (CTRL_HEADER 'gso ' + SHAPE_COMPONENT
   // + CTRL_DATA + SHAPE_COMPONENT_PICTURE + inline ctrl char) so the new
-  // BinData isn't orphaned. Uses template-clone from h22_work_report.hwp.
-  for (const item of summary) {
-    const bodyResult = await appendImageBodyControl(filePath, item.storage_id);
+  // BinData isn't orphaned. Template-clone source comes from item._templateBytes
+  // (caller passes the bytes of a fresh `rhwp exportHwp` of the same image
+  // — clean cluster with no nested footer/table baggage) when present;
+  // otherwise we fall back to cloning from filePath itself (only works
+  // if the user's file already contains an image cluster).
+  for (let i = 0; i < summary.length; i++) {
+    const item = summary[i];
+    const opTemplate = ops[i] && ops[i]._templateBytes;
+    const bodyResult = await appendImageBodyControl(filePath, item.storage_id, opTemplate);
     item.bodyControl = bodyResult;
   }
 
@@ -2541,7 +2547,7 @@ function findImageTemplateCluster(records, raw, templateBinDataId) {
 // Clone cluster + rewrite bin_data_id u16 instances in SHAPE_COMPONENT bodies.
 // Uses records' absolute file offsets directly (delta to cluster start) so we
 // don't depend on a cumulative offset walk that can drift.
-function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, newBinDataId) {
+function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, newBinDataId, anchorParaShape, anchorCharShape) {
   const startOff = records[startIdx].headOff;
   const endOff = endIdx < records.length ? records[endIdx].headOff : raw.length;
   const out = Buffer.from(raw.slice(startOff, endOff));
@@ -2565,6 +2571,30 @@ function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, ne
       // Top-level only: clear footer bit in control_mask
       const oldCm = out.readUInt32LE(bodyStart + 4);
       out.writeUInt32LE((oldCm & ~0x10000) >>> 0, bodyStart + 4);
+      // paraShape / styleId ID rewrite (PARA_HEADER body offset 8..11):
+      //   offset 8..9   paraShape u16
+      //   offset 10     styleId u8
+      //   offset 11     break_val u8
+      // The cluster's paraShape is the fresh-template's #0 which doesn't
+      // exist in the user's ktx DocInfo (different table). Point the
+      // cluster at the anchor paragraph's paraShape so the rendering
+      // engine resolves it correctly.
+      if (typeof anchorParaShape === 'number' && r.size >= 10) {
+        out.writeUInt16LE(anchorParaShape & 0xFFFF, bodyStart + 8);
+      }
+    }
+  }
+  // PARA_CHAR_SHAPE (tag 0x44) — first entry's charShape u32 at body offset 4.
+  // Same reasoning as paraShape: fresh-template's charShape #0 isn't the
+  // same character as ktx's #0 (different DocInfo tables). Point the
+  // top-level paragraph's first char_shape entry at the anchor's charShape.
+  if (typeof anchorCharShape === 'number') {
+    for (let i = startIdx; i < endIdx; i++) {
+      const r = records[i];
+      if (r.tag !== TAG_PARA_CHAR_SHAPE || r.level !== 1 || r.size < 8) continue;
+      const bodyStart = r.dataOff - startOff;
+      out.writeUInt32LE(anchorCharShape >>> 0, bodyStart + 4);
+      break; // top-level paragraph's char_shape only — nested cell char_shapes left alone
     }
   }
   // Walk records inside the cluster; for each SHAPE_COMPONENT (0x4c), use
@@ -2603,22 +2633,25 @@ function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, ne
   return out;
 }
 
-async function appendImageBodyControl(filePath, newBinDataId) {
-  // The image cluster template — we need a paragraph cluster that
-  // already contains a 'gso ' CTRL_HEADER + $pic SHAPE_COMPONENT so we
-  // can clone its shape (border, crop, padding, image attrs) and just
-  // swap the bin_data_id. Two candidate paths:
-  //   1. filePath itself — if the user's target already contains an
-  //      image somewhere, clone its cluster.
-  //   2. Plugin-bundled sample (spike/samples or scripts/templates).
-  // For v1 we just try filePath first; if it has no image, error with
-  // a clear message pointing at the workaround (from-scratch path or
-  // pre-design template with image placeholder).
-  const TEMPLATE_PATH = filePath;
+async function appendImageBodyControl(filePath, newBinDataId, templateOverride) {
+  // The image cluster template comes from one of three places:
+  //   1. templateOverride (Buffer) — caller already generated a fresh
+  //      image-bearing .hwp via rhwp WASM and passes its full bytes.
+  //      This is the preferred runtime path: no fixture file checked
+  //      into the repo, no dependency on the user's input already
+  //      containing an image.
+  //   2. filePath itself — if the user's target already contains an
+  //      image somewhere, clone its cluster. Useful for forms that
+  //      have an image placeholder you want to add a second image to.
+  //   3. Fail. Caller has to provide one of the above.
+  const useOverride = Buffer.isBuffer(templateOverride);
+  const tplBuf = useOverride ? templateOverride : readFileSync(filePath);
+  // For fresh-generated templates the BinData starts at storage_id=1.
+  // For user-file templates we'd need to detect it; for now keep =1
+  // since that's what rhwp insertPicture produces from a blank doc.
   const TEMPLATE_BIN_DATA_ID = 1;
 
   // 1. Load template's Section0 to extract the image cluster bytes.
-  const tplBuf = readFileSync(TEMPLATE_PATH);
   const tplHdr = parseCfbHeader(tplBuf);
   const tplFat = readFat(tplBuf, tplHdr.fatAddrs, tplHdr.ssz);
   const tplDir = readDirectory(tplBuf, tplFat, tplHdr.ssz, tplHdr.dirStart);
@@ -2637,9 +2670,10 @@ async function appendImageBodyControl(filePath, newBinDataId) {
   const tplRecords = parseRecords(tplRaw);
   const tpl = findImageTemplateCluster(tplRecords, tplRaw, TEMPLATE_BIN_DATA_ID);
   if (!tpl) throw new Error('appendImageBodyControl: no image cluster found in template');
-  const cluster = cloneImageClusterBytes(tplRecords, tplRaw, tpl.paraStartIdx, tpl.clusterEndIdx, TEMPLATE_BIN_DATA_ID, newBinDataId);
-
-  // 2. Load target's Section0, insert cluster after last simple body paragraph.
+  // 2. Load target's Section0 first so we can pull the anchor paragraph's
+  //    paraShape / charShape IDs (the cluster will inherit them so its IR
+  //    references resolve in the target's DocInfo instead of the fresh
+  //    template's stale ones).
   let buf = readFileSync(filePath);
   let { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
   let fat = readFat(buf, fatAddrs, ssz);
@@ -2666,6 +2700,34 @@ async function appendImageBodyControl(filePath, newBinDataId) {
   let raw = Buffer.from(inflateRawSync(compressed));
   const records = parseRecords(raw);
   const anchor = findLastSimpleBodyParagraph(records);
+  // Anchor's paraShape / charShape are only useful when the template
+  // came from a different DocInfo (fresh rhwp doc). When we clone from
+  // filePath itself, the template's paraShape is already valid against
+  // the same DocInfo, so we leave anchor IDs undefined and keep the
+  // template's original references intact.
+  let anchorParaShape, anchorCharShape;
+  if (useOverride) {
+    const anchorParaRec = records[anchor.startIdx];
+    if (anchorParaRec && anchorParaRec.size >= 10) {
+      anchorParaShape = raw.readUInt16LE(anchorParaRec.dataOff + 8);
+    }
+    for (let i = anchor.startIdx + 1; i < anchor.endIdx; i++) {
+      const r = records[i];
+      if (r.tag === TAG_PARA_CHAR_SHAPE && r.level === 1 && r.size >= 8) {
+        anchorCharShape = raw.readUInt32LE(r.dataOff + 4);
+        break;
+      }
+    }
+  }
+
+  // 3. Generate cluster bytes (template clone + bin_data_id + para/char
+  //    shape rewrite when template came from a foreign DocInfo).
+  const cluster = cloneImageClusterBytes(
+    tplRecords, tplRaw, tpl.paraStartIdx, tpl.clusterEndIdx,
+    TEMPLATE_BIN_DATA_ID, newBinDataId,
+    anchorParaShape, anchorCharShape,
+  );
+
   const insertAt = anchor.endIdx < records.length ? records[anchor.endIdx].headOff : raw.length;
   raw = Buffer.concat([raw.slice(0, insertAt), cluster, raw.slice(insertAt)]);
 

@@ -1684,10 +1684,14 @@ async function readStdin() {
       }
       const imageOps = ops.filter((o) => APPEND_IMAGE_OPS.has(o.type));
       if (imageOps.length > 0) {
-        const { appendImageInPlace } = await import('./cell-patch.js');
+        // Prefer cloning the user file's own image cluster if it has one
+        // — then every paraShape / charShape / BorderFill reference
+        // resolves against the same DocInfo. Pass no _templateBytes so
+        // appendImageBodyControl falls through to filePath as template.
+        const { appendImageInPlace } = await import("./cell-patch.js");
         const iSummary = await appendImageInPlace(outPath, imageOps);
-        subModes.push(`image:${iSummary.mode || 'in-place'}`);
-        for (const e of iSummary) allEdits.push({ kind: 'image', ...e });
+        subModes.push(`image:${iSummary.mode || "in-place"}`);
+        for (const e of iSummary) allEdits.push({ kind: "image", ...e });
       }
       const tableOps = ops.filter((o) => APPEND_TABLE_OPS.has(o.type));
       if (tableOps.length > 0) {
