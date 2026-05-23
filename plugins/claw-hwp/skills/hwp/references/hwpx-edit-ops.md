@@ -27,7 +27,9 @@ Returns JSON: `{ "ok": true, "output": "...", "results": [ { "type": ..., ...sta
 - **row / col** — 0-based within a table. `set_cell_text` targets by `<hp:cellAddr>` (merge-aware) and falls back to positional.
 
 Discover indices with `node scripts/extract_text.js --inspect file.hwpx` (counts) and
-`--format markdown` (table contents in order).
+`--format markdown` (table contents in order). **Note:** `extract_text.js`'s plain-text
+output skips cell content — to locate a specific cell, use `--format markdown` (renders
+each table) or rely on `--inspect`'s `cellCount` and open the doc to confirm.
 
 ## Operations
 
@@ -62,7 +64,7 @@ Discover indices with `node scripts/extract_text.js --inspect file.hwpx` (counts
 
 | `type` | Args | Notes |
 |--------|------|-------|
-| `apply_text_style` | `target`, + any of `color` (hex "FF0000"), `bold`, `italic`, `underline`, `size` (HWP units, 1000≈10pt) | Clones `charPr[0]`, mutates, retargets the **first run** whose text contains `target`. `retargeted: 0` if `target` not found (header left untouched). Bumps `hh:charProperties@itemCnt`. |
+| `apply_text_style` | `target`, + any of `color` (hex "FF0000"), `bold`, `italic`, `underline`, `size` (HWP units, 1000≈10pt) | Clones `charPr[0]`, mutates, retargets **only the first run** whose text contains `target`. `retargeted: 1` = styled that one run; `retargeted: 0` = `target` not found (header left untouched). **Restyling every occurrence is not supported** — calling twice re-styles the same first run. To restyle a specific later occurrence, use a longer unique substring as `target`. Bumps `hh:charProperties@itemCnt`. |
 | `apply_paragraph_style` | `index`, + any of `align` ("LEFT"/"CENTER"/"RIGHT"/"JUSTIFY"/"DISTRIBUTE"), `indent` (HWP units), `lineSpacing` (percent, e.g. 160) | Clones `paraPr[0]`, mutates, retargets paragraph `index`. Bumps `hh:paraProperties@itemCnt`. |
 
 ### Images

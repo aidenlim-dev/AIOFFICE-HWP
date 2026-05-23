@@ -149,6 +149,15 @@ function secIdx(name) {
   return m ? parseInt(m[1], 10) : 0;
 }
 
+// Strip <hp:linesegarray> blocks. Linesegs are a precomputed line-break cache;
+// after editing text / styles / table structure they're stale and on some
+// strict readers (notably Hancom Docs) the result shows overlapping or
+// mispositioned characters until the cache is recomputed. Dropping the cache
+// forces a full relayout on open — cheap, and the safer default.
+function dropLinesegs(s) {
+  return s.replace(/<hp:linesegarray>[\s\S]*?<\/hp:linesegarray>/g, '');
+}
+
 // ── text operations ──────────────────────────────────────────────────────────
 
 // Replace `find` with `replace` inside <hp:t>…</hp:t> nodes only (never touches
@@ -169,7 +178,7 @@ function opReplaceText(doc, find, replace) {
       changed = true;
       return open + parts.join(xmlEscape(replace)) + close;
     });
-    if (changed) doc.write(name, xml);
+    if (changed) doc.write(name, dropLinesegs(xml));
   }
   return { replaced: total };
 }
@@ -440,7 +449,7 @@ function opMergeCells(doc, tableIndex, mode, opts) {
   } else {
     throw new Error(`merge_cells: unknown mode "${mode}" (use "horizontal" or "vertical")`);
   }
-  const newTbl = `<hp:tbl${el.attrs}>${tbl}</hp:tbl>`;
+  const newTbl = `<hp:tbl${el.attrs}>${dropLinesegs(tbl)}</hp:tbl>`;
   doc.write(section, spliceEl(doc.read(section), el, newTbl));
   return { table: tableIndex, mode, merged: opts.count };
 }
@@ -499,7 +508,7 @@ function opApplyTextStyle(doc, target, style) {
   let h2 = spliceEl(header, base, `<hh:charPr${base.attrs}>${base.inner}</hh:charPr>` + newCharPr);
   h2 = bumpListCount(h2, 'hh:charProperties', +1);
   doc.write(headerName, h2);
-  doc.write(hitSection, hitXml);
+  doc.write(hitSection, dropLinesegs(hitXml));
   return { target, charPrId: newId, retargeted: 1 };
 }
 
@@ -534,7 +543,8 @@ function opApplyParagraphStyle(doc, index, style) {
   if (index < 0 || index >= paras.length) throw new Error(`apply_paragraph_style: index ${index} out of range`);
   const { section, el } = paras[index];
   const newOpen = el.attrs.replace(/paraPrIDRef="\d+"/, `paraPrIDRef="${newId}"`);
-  doc.write(section, spliceEl(doc.read(section), el, `<hp:p${newOpen}>${el.inner}</hp:p>`));
+  const rebuilt = `<hp:p${newOpen}>${dropLinesegs(el.inner)}</hp:p>`;
+  doc.write(section, spliceEl(doc.read(section), el, rebuilt));
   return { index, paraPrId: newId };
 }
 
@@ -597,14 +607,16 @@ function opDeleteImage(doc, target) {
     for (const name of doc.sectionNames()) {
       let xml = doc.read(name);
       const pics = scanTopLevel(xml, 'hp:pic');
+      let touched = false;
       // Splice from the end so earlier ranges stay valid.
       for (let i = pics.length - 1; i >= 0; i--) {
         if (new RegExp(`binaryItemIDRef="${escapeRegex(itemId)}"`).test(pics[i].inner)) {
           xml = spliceEl(xml, pics[i], '');
           picsRemoved++;
+          touched = true;
         }
       }
-      if (picsRemoved) doc.write(name, xml);
+      if (touched) doc.write(name, dropLinesegs(xml));
     }
   }
   delete doc.files[entry];
