@@ -19,14 +19,29 @@ HWP/HWPX 의 한컴독스 호환성 / 동작 spec 은 우리가 자의적으로 
 - 즉 **`doc.exportHwp()` 결과를 그대로 file 에 write**. 별도 post-process / strip 없음.
 - 우리 plugin 도 같은 path. 추가 post-process 가 있으면 그게 한컴독스 reject 원인.
 
-## 알려진 사실
+## 알려진 사실 (Hop 직접 검증)
 
-- **rhwp `exportHwp()` from-scratch** (createBlankDocument → append → exportHwp): 한컴독스 OK.
-- **rhwp `exportHwp()` round-trip** (load existing big form → modify → export): 한컴독스 X (큰 폼에서 record 손상). 이게 raw-patch (cell-patch.js, bytes 통째 유지 + byte-level patch) 가 in-place edit 의 유일한 한컴독스 호환 path 인 이유.
-- **sheetjs `CFB.write` (vendor/cfb/cfb.js)**: directory entry [Sh33tJ5] 빈 stream 박음 → 한컴독스 X. **써서는 안 됨.** in-place edit 은 우리 raw-patch 인프라 사용.
+- **rhwp `exportHwp()` from-scratch** (createBlankDocument → append → exportHwp):
+  - Hop 에서 새 문서 생성 + 저장 → 한컴독스 ✓
+  - 우리 plugin baseline (`baseline_no_strip_skip_cfbwrite.hwp`) → 한컴독스 ✓
+- **rhwp `exportHwp()` round-trip** (load existing big form → modify → exportHwp):
+  - **Hop 에서 ktx 큰 폼 open + cell 수정 ("엣지형" → "테스트") + 저장 → 한컴독스 ✗ (2026-05-22 검증)**
+  - 우리 plugin (`ktx_cell_latest_vendor_v2.hwp`, 최신 v0.7.12 vendor + strip 제거) → 한컴독스 ✗ (동일 결과)
+  - 즉 rhwp 자체의 round-trip 한계. Hop 도 같은 한계 가짐.
+- **이게 우리 raw-patch (cell-patch.js — 기존 bytes 통째 유지 + 변경 부분만 byte-level patch) 가 in-place edit 의 유일한 한컴독스 호환 path 인 이유.** Hop 도 못 푸는 문제를 우리가 회피해서 풀어둔 것.
+- **sheetjs `CFB.write` (vendor/cfb/cfb.js)**: directory entry [Sh33tJ5] 빈 stream 박음 → 한컴독스 ✗. **써서는 안 됨.** in-place edit 은 우리 raw-patch 인프라 사용.
 
 ## 진행 중 / 결정 사항
 
-- `stripParaLineSegRecords` 의 sheetjs CFB.write — **제거** (Hop 은 strip 안 함). PARA_LINESEG placeholder 가 우리 local renderer 에서 layout 약간 잘못 표시하지만 그건 별도 issue (Hop 도 같은 상태).
-- Phase 6 image in-place add — 우리 raw-patch 시도 mini-stream truncation 등 한계. Hop 이 어떻게 처리하는지 (큰 폼에 이미지 추가) 직접 확인 후 결정. 그 전에는 SKILL.md 에 "v1 미지원" 명시.
+- `stripParaLineSegRecords` 의 sheetjs CFB.write — **제거 완료** (Hop 도 strip 안 함). PARA_LINESEG placeholder 가 우리 local renderer 에서 layout 약간 잘못 표시하지만 그건 별도 issue (Hop 도 같은 상태).
+- Phase 1-5 raw-patch — **유지** (검증된 한컴독스 호환 유일 path).
+- Phase 6 image in-place add — 우리 raw-patch 시도가 mini-stream truncation 등 한계로 reject. **계속 정밀 디버그** (Hop 도 round-trip ✗ 라서 rhwp emit 으로 회피 불가능. raw-patch 가 유일한 길). 그 전에는 SKILL.md 에 "v1 미지원" 명시.
 - worktree 분리 — `~/claw-hwp-raw-patch` (hwp 트랙) + `~/claw-hwp-hwpx-edit` (hwpx 트랙, 다른 세션). 메인 폴더는 main checkout.
+
+## 작업 원칙 재확인
+
+이전에 두 차례 잘못된 결론에 빠졌음:
+1. "rhwp emit = 한컴독스 X" → 사실은 sheetjs CFB.write 만 X
+2. "rhwp round-trip = 한컴독스 OK (Hop 검증)" → 사실은 from-scratch 만 OK, round-trip 은 Hop 도 X
+
+두 번째 잘못의 원인: Hop 검증 시 사용자가 "잘 열린다" 한 file 이 from-scratch 였는데 우리가 round-trip 결과로 단정. **검증 결과를 받으면 "정확히 어떤 시나리오"인지 확인하고 추측 금지.**
