@@ -32,6 +32,10 @@
 //   replace_image         { target, source }
 //   delete_image          { target }
 //   set_field_value       { name, value }
+//   set_header            { text, applyPageType? }   // BOTH | EVEN | ODD, default BOTH
+//   set_footer            { text, applyPageType? }
+//   remove_header         { }
+//   remove_footer         { }
 //
 // Output: JSON to stdout — { ok, output, results: [ { type, ...stats } ] }.
 
@@ -691,6 +695,89 @@ function buildPic(doc, itemId, width, height) {
     + `</hp:pic>`;
 }
 
+// ── header / footer operations ───────────────────────────────────────────────
+
+// HWPX models headers and footers as control elements embedded in body XML:
+// <hp:p><hp:run charPrIDRef="..."><hp:ctrl>
+//   <hp:header id="0" applyPageType="BOTH"> | <hp:footer ...>
+//     <hp:subList ...><hp:p ...><hp:run ...><hp:t>대외주의</hp:t></hp:run></hp:p></hp:subList>
+//   </hp:header>
+// </hp:ctrl></hp:run></hp:p>
+//
+// set: update existing one's text + applyPageType, or insert a new wrapper
+//      paragraph right after the section's first <hp:p> (which holds <hp:secPr>).
+// remove: drop the <hp:run> hosting the <hp:ctrl><hp:header/footer>; leave the
+//         enclosing paragraph in place (it may have other content).
+
+const VALID_APPLY = new Set(['BOTH', 'EVEN', 'ODD']);
+
+function opSetHeaderFooter(doc, kind, text, applyPageType) {
+  const tag = `hp:${kind}`;
+  const apply = String(applyPageType || 'BOTH').toUpperCase();
+  if (!VALID_APPLY.has(apply)) throw new Error(`set_${kind}: applyPageType must be one of BOTH/EVEN/ODD`);
+
+  // Update first existing instance anywhere across sections.
+  for (const name of doc.sectionNames()) {
+    const xml = doc.read(name);
+    const els = scanTopLevel(xml, tag);
+    if (!els.length) continue;
+    const el = els[0];
+    const newInner = setCellInner(el.inner, text); // header/footer share subList>p>run>t shape with cells
+    let attrs = el.attrs;
+    attrs = /applyPageType="[^"]*"/.test(attrs)
+      ? attrs.replace(/applyPageType="[^"]*"/, `applyPageType="${apply}"`)
+      : `${attrs} applyPageType="${apply}"`;
+    const replacement = `<${tag}${attrs}>${newInner}</${tag}>`;
+    doc.write(name, dropLinesegs(spliceEl(xml, el, replacement)));
+    return { kind, applyPageType: apply, updated: true };
+  }
+
+  // None present — insert into the first section after its first body paragraph.
+  const firstSec = doc.sectionNames()[0];
+  if (!firstSec) throw new Error(`set_${kind}: no Contents/section*.xml found`);
+  let xml = doc.read(firstSec);
+  const paras = scanTopLevel(xml, 'hp:p');
+  if (!paras.length) throw new Error(`set_${kind}: no <hp:p> in first section to anchor insertion`);
+  const wrapper =
+    `<hp:p id="${freshId()}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
+      `<hp:run charPrIDRef="0">` +
+        `<hp:ctrl>` +
+          `<${tag} id="0" applyPageType="${apply}">` +
+            `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
+              `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
+                `<hp:run charPrIDRef="0"><hp:t>${xmlEscape(text)}</hp:t></hp:run>` +
+              `</hp:p>` +
+            `</hp:subList>` +
+          `</${tag}>` +
+        `</hp:ctrl>` +
+      `</hp:run>` +
+    `</hp:p>`;
+  const insertAt = paras[0].end;
+  doc.write(firstSec, dropLinesegs(xml.slice(0, insertAt) + wrapper + xml.slice(insertAt)));
+  return { kind, applyPageType: apply, inserted: true };
+}
+
+function opRemoveHeaderFooter(doc, kind) {
+  const tag = `hp:${kind}`;
+  let removed = 0;
+  for (const name of doc.sectionNames()) {
+    let xml = doc.read(name);
+    if (!xml.includes(`<${tag}`)) continue;
+    const runs = scanTopLevel(xml, 'hp:run');
+    let changed = false;
+    // Splice from the end so earlier offsets remain valid.
+    for (let i = runs.length - 1; i >= 0; i--) {
+      if (!runs[i].self && runs[i].inner.includes(`<${tag}`)) {
+        xml = spliceEl(xml, runs[i], '');
+        removed++;
+        changed = true;
+      }
+    }
+    if (changed) doc.write(name, dropLinesegs(xml));
+  }
+  return { kind, removed };
+}
+
 // ── field operation ──────────────────────────────────────────────────────────
 
 function opSetFieldValue(doc, name, value) {
@@ -733,6 +820,10 @@ function applyOp(doc, op) {
     case 'replace_image': return opReplaceImage(doc, op.target, op.source);
     case 'delete_image': return opDeleteImage(doc, op.target);
     case 'set_field_value': return opSetFieldValue(doc, op.name, op.value);
+    case 'set_header': return opSetHeaderFooter(doc, 'header', op.text, op.applyPageType);
+    case 'set_footer': return opSetHeaderFooter(doc, 'footer', op.text, op.applyPageType);
+    case 'remove_header': return opRemoveHeaderFooter(doc, 'header');
+    case 'remove_footer': return opRemoveHeaderFooter(doc, 'footer');
     default: throw new Error(`unknown operation type: ${op.type}`);
   }
 }

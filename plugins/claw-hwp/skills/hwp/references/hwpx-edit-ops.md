@@ -67,6 +67,21 @@ each table) or rely on `--inspect`'s `cellCount` and open the doc to confirm.
 | `apply_text_style` | `target`, + any of `color` (hex "FF0000"), `bold`, `italic`, `underline`, `size` (HWP units, 1000≈10pt) | Clones `charPr[0]`, mutates, retargets **only the first run** whose text contains `target`. `retargeted: 1` = styled that one run; `retargeted: 0` = `target` not found (header left untouched). **Restyling every occurrence is not supported** — calling twice re-styles the same first run. To restyle a specific later occurrence, use a longer unique substring as `target`. Bumps `hh:charProperties@itemCnt`. |
 | `apply_paragraph_style` | `index`, + any of `align` ("LEFT"/"CENTER"/"RIGHT"/"JUSTIFY"/"DISTRIBUTE"), `indent` (HWP units), `lineSpacing` (percent, e.g. 160) | Clones `paraPr[0]`, mutates, retargets paragraph `index`. Bumps `hh:paraProperties@itemCnt`. |
 
+### Header / Footer (머리말 / 꼬리말)
+
+In HWPX a header/footer is a `<hp:ctrl>` control element embedded in body XML
+(`<hp:p><hp:run><hp:ctrl><hp:header applyPageType="BOTH">…</hp:header></hp:ctrl>…`),
+not a top-level `<hp:secPr>` reference. `applyPageType` is `BOTH` | `EVEN` | `ODD`.
+
+| `type` | Args | Notes |
+|--------|------|-------|
+| `set_header` | `text`, `applyPageType?` (default `"BOTH"`) | If a header already exists, replaces its text + updates `applyPageType` (returns `updated: true`). If none exists, inserts a new wrapper paragraph right after the first body paragraph of the first section (returns `inserted: true`). |
+| `set_footer` | `text`, `applyPageType?` (default `"BOTH"`) | Same as `set_header` for `<hp:footer>`. |
+| `remove_header` | — | Removes the `<hp:run>` hosting each `<hp:ctrl><hp:header>` (leaves the enclosing paragraph). Returns `removed: N`. |
+| `remove_footer` | — | Same for `<hp:footer>`. |
+
+> First-time insertion uses safe defaults (`paraPrIDRef="0"` / `charPrIDRef="0"`), which exist in every standard `.hwpx`. To use a custom font/color, follow with `apply_text_style` targeting the header text.
+
 ### Images
 
 | `type` | Args | Notes |
