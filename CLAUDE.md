@@ -36,7 +36,17 @@ HWP/HWPX 의 한컴독스 호환성 / 동작 spec 은 우리가 자의적으로 
 
 - `stripParaLineSegRecords` 의 sheetjs CFB.write — **제거 완료** (Hop 도 strip 안 함). PARA_LINESEG placeholder 가 우리 local renderer 에서 layout 약간 잘못 표시하지만 그건 별도 issue (Hop 도 같은 상태).
 - Phase 1-5 raw-patch — **유지** (검증된 한컴독스 호환 유일 path).
-- Phase 6 image in-place add — 우리 raw-patch 시도가 mini-stream truncation + template path 한계로 reject. **B 단계 (정밀 디버그) 진행 예정**. Hop 도 in-place image round-trip ✗ 라서 rhwp emit 회피 불가 — raw-patch 가 유일한 길이라는 점은 변함 없음. 그 전에는 SKILL.md 에 "v1 미지원, workaround = from-scratch path" 명시.
+- Phase 6 image in-place add — 우리 raw-patch 시도 누적 fail.
+  - v1: orphan BinData (Step 1 only) → reject (orphan 자체가 reject)
+  - v2/v3: PARA_TEXT drop/keep variations → reject
+  - v4: fresh-template generator + paraShape/charShape rewrite → 열림은 OK 다만 image 안 보임
+  - v5: ktx 자체 image cluster clone → reject (ktx 의 image 가 page header + table nested 안 → 본문 위치 에 통째 inject 불가)
+  - 진짜 한계 = **DocInfo cross-reference 깊이**. 우리 cluster 의 paraShape/charShape/BorderFill/etc 가 사용자 DocInfo 의 ID 와 매핑 안 됨. ktx 의 모든 image-containing paragraph 가 nested (page header/footer/table) — simple image-only cluster 없음.
+  - Hop 도 in-place image round-trip ✗ (검증 완료). raw-patch 가 유일한 길이지만 우리 sweet spot 벗어남.
+  - **다음 step (새 session 에서):** B 또는 C path 시도
+    - B: fresh template generator + DocInfo records (paraShape/charShape/BorderFill 새 entries 추가) inject — 작업 매우 큼 (~500줄)
+    - C: ktx 의 image cluster 의 lvl 3 nested image 부분 추출 + lvl 변환 + 새 simple paragraph 합성 — 작업 큼 (~300줄)
+  - 현 상태에서 SKILL.md 에 "v1 미지원, workaround = from-scratch path" 명시 + 모든 시도 commit.
 - worktree 분리 — `~/claw-hwp-raw-patch` (hwp 트랙) + `~/claw-hwp-hwpx-edit` (hwpx 트랙, 다른 세션). 메인 폴더는 main checkout.
 
 ## 작업 원칙 재확인
