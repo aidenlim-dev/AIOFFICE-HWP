@@ -1546,8 +1546,12 @@ function stripHwpLayoutCache(filePath) {
     totalDropped += dropped;
   }
   if (totalDropped > 0) {
-    const out = CFB.write(cfb, { type: "buffer" });
-    fs.writeFileSync(filePath, out);
+    // TEMP DISABLED for hypothesis test — CFB.write injects sheetjs Sh33tJ5
+    // marker which Hancom Docs rejects. If skipping strip produces a
+    // Hancom-Docs-compatible file, we replace this branch with a raw-patch
+    // (in-place Section byte modify) instead of full CFB rewrite.
+    // const out = CFB.write(cfb, { type: "buffer" });
+    // fs.writeFileSync(filePath, out);
   }
   return totalDropped;
 }
@@ -1636,7 +1640,11 @@ async function readStdin() {
     'setup_columns',
   ]);
   const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS, ...APPEND_TABLE_OPS, ...SETUP_DOC_OPS, ...APPEND_IMAGE_OPS]);
-  const allRawPatch = ops.length > 0 && ops.every((o) => RAW_PATCH_OPS.has(o.type));
+  // TEMP HYPOTHESIS TEST: force rhwp emit path to check whether sheetjs
+  // CFB.write was the only Hancom-Docs reject cause. If FORCE_RHWP_EMIT=1
+  // is set, bypass raw-patch and run everything through HANDLERS + exportHwp.
+  const forceRhwpEmit = process.env.FORCE_RHWP_EMIT === '1';
+  const allRawPatch = !forceRhwpEmit && ops.length > 0 && ops.every((o) => RAW_PATCH_OPS.has(o.type));
   if (ext === '.hwp' && fs.existsSync(outPath) && allRawPatch) {
     try {
       const cellOps = ops.filter((o) => CELL_OPS.has(o.type));
@@ -1851,20 +1859,13 @@ async function readStdin() {
     }
   }
 
-  // Strip rhwp's stale layout cache regardless of whether images are
-  // present — tables and ordinary paragraphs hit the same wrong-layout
-  // problem when the renderer trusts cached lineseg vertpos values.
-  try {
-    if (ext === ".hwpx") {
-      const n = await stripHwpxLayoutCache(outPath);
-      if (n > 0) log.push(`stripped ${n} <hp:linesegarray> block(s)`);
-    } else if (ext === ".hwp") {
-      const n = stripHwpLayoutCache(outPath);
-      if (n > 0) log.push(`stripped ${n} PARA_LINESEG record(s)`);
-    }
-  } catch (err) {
-    log.push(`layout_cache_strip failed: ${err.message}`);
-  }
+  // Layout-cache strip removed (was Hancom-Docs-incompatible via sheetjs
+  // CFB.write inside stripHwpLayoutCache). Hop's save flow does not strip
+  // either — `tauri-bridge.ts:writeCurrentHwpToPath` writes
+  // `super.exportHwp()` verbatim. The PARA_LINESEG / <hp:linesegarray>
+  // placeholder values rhwp emits still cause our local renderer to
+  // mis-place text occasionally, but that's a renderer concern not a
+  // save-path one. See CLAUDE.md for the principle.
 
   let verify = null;
   try {

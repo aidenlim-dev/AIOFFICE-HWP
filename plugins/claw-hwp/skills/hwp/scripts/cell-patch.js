@@ -2537,11 +2537,28 @@ function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, ne
   const startOff = records[startIdx].headOff;
   const endOff = endIdx < records.length ? records[endIdx].headOff : raw.length;
   const out = Buffer.from(raw.slice(startOff, endOff));
-  // Clear MSB on top-level PARA_HEADER body offset 0
-  const topHdr = records[startIdx];
-  const topHdrLen = topHdr.ext ? 8 : 4;
-  const oldWord = out.readUInt32LE(topHdrLen);
-  out.writeUInt32LE((oldWord & 0x7FFFFFFF) >>> 0, topHdrLen);
+  // Clear paragraph_flag MSB on EVERY PARA_HEADER in the cluster (top-level
+  // and nested cell paragraphs at lvl 2/3). h22's image-bearing paragraph
+  // #6 happens to be the section's last paragraph, so all its PARA_HEADERs
+  // (including cells inside the footer) have MSB=1. Cloning verbatim would
+  // leave multiple "I'm the last paragraph" flags in the section — Hancom
+  // Docs's strict validator rejects that.
+  // Also clear the footer bit (0x10000) on the top-level PARA_HEADER so
+  // the cloned paragraph doesn't claim to be a footer container at the new
+  // body position. Keep the table bit (0x800) for the inline ctrl char →
+  // CTRL_HEADER linkage.
+  for (let i = startIdx; i < endIdx; i++) {
+    const r = records[i];
+    if (r.tag !== TAG_PARA_HEADER || r.size < 4) continue;
+    const bodyStart = r.dataOff - startOff;
+    const oldWord = out.readUInt32LE(bodyStart);
+    out.writeUInt32LE((oldWord & 0x7FFFFFFF) >>> 0, bodyStart);
+    if (i === startIdx && r.size >= 8) {
+      // Top-level only: clear footer bit in control_mask
+      const oldCm = out.readUInt32LE(bodyStart + 4);
+      out.writeUInt32LE((oldCm & ~0x10000) >>> 0, bodyStart + 4);
+    }
+  }
   // Walk records inside the cluster; for each SHAPE_COMPONENT (0x4c), use
   // its absolute dataOff to compute its position inside the cloned buffer.
   for (let i = startIdx; i < endIdx; i++) {
@@ -2556,6 +2573,24 @@ function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, ne
         out.writeUInt16LE(newBinDataId, bodyStart + p);
       }
     }
+  }
+  // Rewrite CTRL_HEADER (tag 0x47) instance_ids so they don't collide with
+  // the template's existing controls. CommonObjAttr layout per rhwp:
+  //   body[0..3]   ctrl_id
+  //   body[4..7]   attr
+  //   body[8..23]  vert/horz/width/height (4 × u32)
+  //   body[24..27] z_order
+  //   body[28..35] margin (4 × i16)
+  //   body[36..39] instance_id  ← rewrite this
+  // We use a timestamp-derived base + per-record bump for uniqueness.
+  const idBase = (Date.now() & 0x7FFFFFFF) >>> 0;
+  let idBump = 0;
+  for (let i = startIdx; i < endIdx; i++) {
+    const r = records[i];
+    if (r.tag !== TAG_CTRL_HEADER || r.size < 40) continue;
+    const bodyStart = r.dataOff - startOff;
+    out.writeUInt32LE((idBase + idBump) >>> 0, bodyStart + 36);
+    idBump++;
   }
   return out;
 }
