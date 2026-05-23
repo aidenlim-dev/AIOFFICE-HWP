@@ -1441,11 +1441,17 @@ export async function replaceTextInPlace(filePath, ops) {
 const TAG_PAGE_DEF = 0x49;
 
 const PAGE_SIZES = {
-  a4: [59528, 84186],
-  a5: [42040, 59528],
-  a3: [84186, 119055],
-  letter: [61560, 79200],
-  legal: [61560, 100800],
+  // HWPUNIT values match rhwp-studio's PAPER_DEFAULTS (which mirrors
+  // Hancom coreEngine.js IDS_PAPER_*). Off-by-one/two integers (e.g. the
+  // old 59528/84186) leave Hancom Docs displaying portrait even with the
+  // landscape attr bit set.
+  a4: [59527, 84188],    // 210 × 297 mm
+  a5: [42040, 59527],    // 148 × 210 mm
+  a3: [84188, 119055],   // 297 × 420 mm
+  b4: [72852, 103180],   // 257 × 364 mm
+  b5: [51591, 72852],    // 182 × 257 mm
+  letter: [61560, 79200], // 8.5 × 11 in
+  legal: [61560, 100800], // 8.5 × 14 in
 };
 
 const MM_PER_HWPUNIT = 283.46;
@@ -1499,21 +1505,23 @@ export async function setupDocumentInPlace(filePath, op) {
   let landscape = (attr & 0x01) !== 0;
 
   // Apply op overrides (only fields the caller specified).
+  //
+  // Convention (rhwp-studio PageSetupDialog): PageDef stores portrait-
+  // oriented width/height regardless of orientation. The landscape flag
+  // (attr bit 0) is the sole rotation signal. Earlier code swapped
+  // width/height on landscape — that produced a page Hancom Docs renders
+  // in portrait orientation even when the bit was set.
   if (op.orientation) {
     const wantLandscape = String(op.orientation).toLowerCase() === 'landscape';
-    if (wantLandscape !== landscape) {
-      [width, height] = [height, width];
-      landscape = wantLandscape;
-      attr = wantLandscape ? (attr | 0x01) >>> 0 : (attr & ~0x01) >>> 0;
-    }
+    landscape = wantLandscape;
+    attr = wantLandscape ? (attr | 0x01) >>> 0 : (attr & ~0x01) >>> 0;
   }
   if (op.page_size) {
     const sz = PAGE_SIZES[String(op.page_size).toLowerCase()];
     if (sz) {
-      let [w, h] = sz;
-      if (landscape) [w, h] = [h, w];
-      width = w;
-      height = h;
+      // Always store portrait dimensions; landscape flag handles rotation.
+      width = sz[0];
+      height = sz[1];
     }
   }
   if (op.margin_mm !== undefined) {

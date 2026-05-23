@@ -396,29 +396,36 @@ const HANDLERS = {
     // Apply page-level overrides via setPageDef. The blank2010 template
     // ships A4 portrait + 30mm margins; we only mutate fields the caller
     // supplied so unspecified options keep template defaults.
+    //
+    // Convention (mirrors rhwp-studio's PageSetupDialog): PageDef.width
+    // and PageDef.height ALWAYS store the portrait-oriented dimensions
+    // (width < height for normal paper sizes). The `landscape` boolean
+    // is the only thing that tells the renderer to rotate. Earlier code
+    // swapped width/height when landscape was selected — that produced
+    // the wrong layout in Hancom Docs (page rendered portrait even with
+    // the landscape bit set).
     const pd = JSON.parse(doc.getPageDef(cursor.sec));
     if (op.orientation) {
-      const wantLandscape = String(op.orientation).toLowerCase() === "landscape";
-      if (wantLandscape !== pd.landscape) {
-        [pd.width, pd.height] = [pd.height, pd.width];
-        pd.landscape = wantLandscape;
-      }
+      pd.landscape = String(op.orientation).toLowerCase() === "landscape";
     }
     if (op.page_size) {
-      // HWPUNIT (1/7200 inch). 1 mm = 283.46. Common sizes:
+      // HWPUNIT (1/7200 inch). Values match rhwp-studio's PAPER_DEFAULTS
+      // (which mirrors Hancom coreEngine.js IDS_PAPER_*) — the exact
+      // integer rhwp's setPageDef expects.
       const SIZES = {
-        a4: [59528, 84186],   // 210 × 297 mm
-        a5: [42040, 59528],   // 148 × 210 mm
-        a3: [84186, 119055],  // 297 × 420 mm
+        a4: [59527, 84188],    // 210 × 297 mm
+        a5: [42040, 59527],    // 148 × 210 mm
+        a3: [84188, 119055],   // 297 × 420 mm
+        b4: [72852, 103180],   // 257 × 364 mm
+        b5: [51591, 72852],    // 182 × 257 mm
         letter: [61560, 79200], // 8.5 × 11 in
         legal: [61560, 100800], // 8.5 × 14 in
       };
       const sz = SIZES[String(op.page_size).toLowerCase()];
       if (sz) {
-        let [w, h] = sz;
-        if (pd.landscape) [w, h] = [h, w];
-        pd.width = w;
-        pd.height = h;
+        // Always store portrait orientation; landscape flag handles rotation.
+        pd.width = sz[0];
+        pd.height = sz[1];
       }
     }
     if (op.margin_mm !== undefined) {
