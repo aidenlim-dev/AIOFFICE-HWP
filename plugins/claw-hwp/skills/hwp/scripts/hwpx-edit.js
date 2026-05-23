@@ -154,22 +154,21 @@ function secIdx(name) {
 // Replace `find` with `replace` inside <hp:t>…</hp:t> nodes only (never touches
 // tag names / attributes). Note: a match must sit within ONE <hp:t> node;
 // targets split across runs are not joined (same as Hancom's text replace).
+// Uses split/join per text node (not a re-scanning loop) so a replacement that
+// itself contains `find` — e.g. '홍길동' → '홍길동(수정)' — can't loop forever.
 function opReplaceText(doc, find, replace) {
   if (!find) throw new Error('replace_text: "find" is required and non-empty');
-  const re = new RegExp(`(<hp:t(?:\\s[^>]*)?>)([^<]*)(${escapeRegex(find)})([^<]*)(</hp:t>)`, 'g');
+  const nodeRe = /(<hp:t(?:\s[^>]*)?>)([^<]*)(<\/hp:t>)/g;
   let total = 0;
   for (const name of doc.sectionNames()) {
-    let xml = doc.read(name);
     let changed = false;
-    // Loop so multiple occurrences inside one <hp:t> are all caught.
-    for (;;) {
-      let hit = false;
-      xml = xml.replace(re, (_m, open, pre, _t, post, close) => {
-        hit = true; total++; changed = true;
-        return open + pre + xmlEscape(replace) + post + close;
-      });
-      if (!hit) break;
-    }
+    const xml = doc.read(name).replace(nodeRe, (m, open, text, close) => {
+      if (!text.includes(find)) return m;
+      const parts = text.split(find);
+      total += parts.length - 1;
+      changed = true;
+      return open + parts.join(xmlEscape(replace)) + close;
+    });
     if (changed) doc.write(name, xml);
   }
   return { replaced: total };
