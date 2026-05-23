@@ -2604,12 +2604,18 @@ function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, ne
 }
 
 async function appendImageBodyControl(filePath, newBinDataId) {
-  // Use h22_work_report.hwp as reference for template image cluster.
-  const TEMPLATE_PATH = '/Users/reconlabs/Downloads/h22_work_report.hwp';
+  // The image cluster template — we need a paragraph cluster that
+  // already contains a 'gso ' CTRL_HEADER + $pic SHAPE_COMPONENT so we
+  // can clone its shape (border, crop, padding, image attrs) and just
+  // swap the bin_data_id. Two candidate paths:
+  //   1. filePath itself — if the user's target already contains an
+  //      image somewhere, clone its cluster.
+  //   2. Plugin-bundled sample (spike/samples or scripts/templates).
+  // For v1 we just try filePath first; if it has no image, error with
+  // a clear message pointing at the workaround (from-scratch path or
+  // pre-design template with image placeholder).
+  const TEMPLATE_PATH = filePath;
   const TEMPLATE_BIN_DATA_ID = 1;
-  if (!existsSync(TEMPLATE_PATH)) {
-    throw new Error(`appendImageBodyControl: template ${TEMPLATE_PATH} not found — Phase 6 Step 3 needs a reference form with an image`);
-  }
 
   // 1. Load template's Section0 to extract the image cluster bytes.
   const tplBuf = readFileSync(TEMPLATE_PATH);
