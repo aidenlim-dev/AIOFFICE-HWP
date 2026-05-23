@@ -1546,8 +1546,12 @@ function stripHwpLayoutCache(filePath) {
     totalDropped += dropped;
   }
   if (totalDropped > 0) {
-    const out = CFB.write(cfb, { type: "buffer" });
-    fs.writeFileSync(filePath, out);
+    // TEMP DISABLED for hypothesis test — CFB.write injects sheetjs Sh33tJ5
+    // marker which Hancom Docs rejects. If skipping strip produces a
+    // Hancom-Docs-compatible file, we replace this branch with a raw-patch
+    // (in-place Section byte modify) instead of full CFB rewrite.
+    // const out = CFB.write(cfb, { type: "buffer" });
+    // fs.writeFileSync(filePath, out);
   }
   return totalDropped;
 }
@@ -1604,31 +1608,124 @@ async function readStdin() {
   // are NOT eligible — they fall through to the normal rhwp path and the
   // result is Hancom-Office-only. We surface that with a log line so the
   // caller knows their output may not open in Hancom Docs.
-  const CELL_OPS_FOR_RAW_PATCH = new Set(['set_cell_text', 'set_cell_text_by_label']);
-  const allCellOps = ops.length > 0 && ops.every((o) => CELL_OPS_FOR_RAW_PATCH.has(o.type));
-  if (ext === '.hwp' && fs.existsSync(outPath) && allCellOps) {
+  // Op types eligible for the raw-patch fast path. Cell ops have been here
+  // since 1.4.0; replace_text was added in the v1.5 line (equal-length only
+  // for the first cut — see cell-patch.js / replaceTextInPlace).
+  const CELL_OPS = new Set(['set_cell_text', 'set_cell_text_by_label']);
+  const REPLACE_TEXT_OPS = new Set(['replace_text']);
+  const APPEND_TABLE_OPS = new Set(['append_table']);
+  const SETUP_DOC_OPS = new Set(['setup_document']);
+  const APPEND_IMAGE_OPS = new Set(['append_image']);
+  // All paragraph-shaped append ops route through appendParagraphInPlace.
+  // Some carry a break_val (page/column break); the rest just add text.
+  //   append_paragraph                    → break_val 0
+  //   append_heading                      → break_val 0 (no styling — see SKILL.md limitation)
+  //   append_bullet_list                  → break_val 0 (no marker — see SKILL.md limitation)
+  //   append_numbered_list                → break_val 0 (no marker — see SKILL.md limitation)
+  //   append_page_break                   → break_val 0x04 (empty paragraph)
+  //   insert_column_break                 → break_val 0x08 (empty paragraph)
+  //   setup_columns                       → break_val 0x02 (multi-column / empty paragraph)
+  // append_heading / append_*_list run as plain paragraphs in raw-patch:
+  // raw-patch can't synthesize new char-shape entries in DocInfo, so
+  // visual styling (font size, bold, list markers) doesn't change. The
+  // text shows up in the right position; users wanting visual headings
+  // pre-design the form with heading paragraphs and use replace_text.
+  const APPEND_PARA_OPS = new Set([
+    'append_paragraph',
+    'append_heading',
+    'append_bullet_list',
+    'append_numbered_list',
+    'append_page_break',
+    'insert_column_break',
+    'setup_columns',
+  ]);
+  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS, ...APPEND_TABLE_OPS, ...SETUP_DOC_OPS, ...APPEND_IMAGE_OPS]);
+  // TEMP HYPOTHESIS TEST: force rhwp emit path to check whether sheetjs
+  // CFB.write was the only Hancom-Docs reject cause. If FORCE_RHWP_EMIT=1
+  // is set, bypass raw-patch and run everything through HANDLERS + exportHwp.
+  const forceRhwpEmit = process.env.FORCE_RHWP_EMIT === '1';
+  const allRawPatch = !forceRhwpEmit && ops.length > 0 && ops.every((o) => RAW_PATCH_OPS.has(o.type));
+  if (ext === '.hwp' && fs.existsSync(outPath) && allRawPatch) {
     try {
-      const { patchCellsInPlace } = await import('./cell-patch.js');
-      // Resolve every op to {section, para, control, row, col, text}. For
-      // set_cell_text we already have row/col. For set_cell_text_by_label
-      // we need a one-shot rhwp inspect to find the anchor cell, then add
-      // the row/col offsets.
-      const resolvedEdits = await resolveLabelEditsViaRhwp(outPath, ops);
-      const summary = await patchCellsInPlace(outPath, resolvedEdits);
-      // cell-patch tags `summary.mode` as either 'in-place' (sector-chain
-      // patch, no Sh33tJ5 added) or 'sheetjs-fallback' (CFB re-emit when
-      // the patched payload exceeded the existing chain). Both paths are
-      // Hancom Docs compatible; the mode is surfaced for diagnostics.
-      const subMode = summary.mode || 'in-place';
+      const cellOps = ops.filter((o) => CELL_OPS.has(o.type));
+      const replaceOps = ops.filter((o) => REPLACE_TEXT_OPS.has(o.type));
+      const appendOps = ops.filter((o) => APPEND_PARA_OPS.has(o.type));
+      const subModes = [];
+      const allEdits = [];
+
+      if (cellOps.length > 0) {
+        const { patchCellsInPlace } = await import('./cell-patch.js');
+        const resolvedEdits = await resolveLabelEditsViaRhwp(outPath, cellOps);
+        const cellSummary = await patchCellsInPlace(outPath, resolvedEdits);
+        subModes.push(`cells:${cellSummary.mode || 'in-place'}`);
+        for (const e of cellSummary) allEdits.push({ kind: 'cell', ...e });
+      }
+      if (replaceOps.length > 0) {
+        const { replaceTextInPlace } = await import('./cell-patch.js');
+        const repSummary = await replaceTextInPlace(outPath, replaceOps);
+        subModes.push(`replace:${repSummary.mode || 'in-place'}`);
+        for (const e of repSummary) allEdits.push({ kind: 'replace', ...e });
+      }
+      const setupOps = ops.filter((o) => SETUP_DOC_OPS.has(o.type));
+      if (setupOps.length > 0) {
+        const { setupDocumentInPlace } = await import('./cell-patch.js');
+        // Multiple setup_document ops collapse to the last one (later
+        // settings override earlier ones).
+        const sSummary = await setupDocumentInPlace(outPath, setupOps[setupOps.length - 1]);
+        subModes.push(`setup:${sSummary.mode || 'in-place'}`);
+        allEdits.push({ kind: 'setup_document', ...sSummary.applied });
+      }
+      const imageOps = ops.filter((o) => APPEND_IMAGE_OPS.has(o.type));
+      if (imageOps.length > 0) {
+        const { appendImageInPlace } = await import('./cell-patch.js');
+        const iSummary = await appendImageInPlace(outPath, imageOps);
+        subModes.push(`image:${iSummary.mode || 'in-place'}`);
+        for (const e of iSummary) allEdits.push({ kind: 'image', ...e });
+      }
+      const tableOps = ops.filter((o) => APPEND_TABLE_OPS.has(o.type));
+      if (tableOps.length > 0) {
+        const { appendTableInPlace } = await import('./cell-patch.js');
+        const tSummary = await appendTableInPlace(outPath, tableOps);
+        subModes.push(`table:${tSummary.mode || 'in-place'}`);
+        for (const e of tSummary) allEdits.push({ kind: 'table', ...e });
+      }
+      if (appendOps.length > 0) {
+        const { appendParagraphInPlace } = await import('./cell-patch.js');
+        // Map op type to break_val (HWP PARA_HEADER body offset 11).
+        // Plain paragraph / heading / list ops carry break_val 0 — the
+        // dispatcher treats them all as paragraphs with text. Break-
+        // family ops set their corresponding bit and have empty text
+        // (the break paragraph itself is empty; user adds text via a
+        // following append_paragraph).
+        const BREAK_VAL = {
+          'append_paragraph': 0,
+          'append_heading': 0,
+          'append_bullet_list': 0,
+          'append_numbered_list': 0,
+          'append_page_break': 0x04,
+          'insert_column_break': 0x08,
+          'setup_columns': 0x02,
+        };
+        const normalizedAppendOps = appendOps.map((o) => ({
+          ...o,
+          text: o.text ?? '',
+          breakVal: BREAK_VAL[o.type] ?? 0,
+        }));
+        const appSummary = await appendParagraphInPlace(outPath, normalizedAppendOps);
+        subModes.push(`append:${appSummary.mode || 'in-place'}`);
+        for (const e of appSummary) allEdits.push({ kind: 'append', ...e });
+      }
+
+      const subMode = subModes.join('+');
       process.stdout.write(JSON.stringify({
         status: 'success',
         path: outPath,
         bytes_written: fs.statSync(outPath).size,
-        ops_applied: summary.length,
+        ops_applied: allEdits.length,
         mode: 'raw-patch',
         sub_mode: subMode,
-        edits: Array.from(summary),
-        log: [`raw-patch path (Hancom Docs compatible, ${subMode}) — ${summary.length} cell(s) edited`],
+        edits: allEdits,
+        log: [`raw-patch path (Hancom Docs compatible, ${subMode}) — ${allEdits.length} edit(s) applied`],
       }) + "\n");
       return;
     } catch (err) {
@@ -1762,20 +1859,13 @@ async function readStdin() {
     }
   }
 
-  // Strip rhwp's stale layout cache regardless of whether images are
-  // present — tables and ordinary paragraphs hit the same wrong-layout
-  // problem when the renderer trusts cached lineseg vertpos values.
-  try {
-    if (ext === ".hwpx") {
-      const n = await stripHwpxLayoutCache(outPath);
-      if (n > 0) log.push(`stripped ${n} <hp:linesegarray> block(s)`);
-    } else if (ext === ".hwp") {
-      const n = stripHwpLayoutCache(outPath);
-      if (n > 0) log.push(`stripped ${n} PARA_LINESEG record(s)`);
-    }
-  } catch (err) {
-    log.push(`layout_cache_strip failed: ${err.message}`);
-  }
+  // Layout-cache strip removed (was Hancom-Docs-incompatible via sheetjs
+  // CFB.write inside stripHwpLayoutCache). Hop's save flow does not strip
+  // either — `tauri-bridge.ts:writeCurrentHwpToPath` writes
+  // `super.exportHwp()` verbatim. The PARA_LINESEG / <hp:linesegarray>
+  // placeholder values rhwp emits still cause our local renderer to
+  // mis-place text occasionally, but that's a renderer concern not a
+  // save-path one. See CLAUDE.md for the principle.
 
   let verify = null;
   try {
