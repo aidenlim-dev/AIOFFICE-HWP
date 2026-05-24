@@ -96,6 +96,12 @@ render time — we only place the control at the end of the target paragraph.
 
 > rhwp's `.hwp → .hwpx` conversion drops actual notes (it only writes the `<hp:footNotePr>` style declaration), so this template is built from the OWPML envelope rather than cloned from a real instance — visually verify in Hancom Docs on first use. To restyle the marker, follow with `apply_text_style` on a unique anchor before the insertion.
 
+### Hyperlink (하이퍼링크)
+
+| `type` | Args | Notes |
+|--------|------|-------|
+| `insert_hyperlink` | `index`, `url`, `text` | Appends a clickable hyperlink to paragraph `index`. Built as a paired Hancom field (`<hp:fieldBegin type="HYPERLINK">` … `<hp:t>text</hp:t>` … `<hp:fieldEnd>`) inside a new run, mirroring the verified structure from a real government doc. `text` is what the reader sees; `url` is the target. |
+
 ### Images
 
 | `type` | Args | Notes |

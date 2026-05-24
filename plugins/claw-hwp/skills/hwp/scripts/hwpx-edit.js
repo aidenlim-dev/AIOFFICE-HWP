@@ -38,6 +38,7 @@
 //   remove_footer         { }
 //   insert_footnote       { index, text }    // appends a footnote at end of paragraph `index`
 //   insert_endnote        { index, text }    // same shape, endnote
+//   insert_hyperlink      { index, url, text } // appends a clickable URL link to paragraph `index`
 //
 // Output: JSON to stdout — { ok, output, results: [ { type, ...stats } ] }.
 
@@ -818,6 +819,53 @@ function opInsertNote(doc, kind, paragraphIndex, text) {
   return { kind: kind === 'footNote' ? 'footnote' : 'endnote', index: paragraphIndex, inserted: true };
 }
 
+// ── hyperlink ────────────────────────────────────────────────────────────────
+
+// HWPX models a hyperlink as a paired Hancom *field* embedded in a run:
+// <hp:run>
+//   <hp:ctrl><hp:fieldBegin id=B type="HYPERLINK" fieldid=F>
+//              <hp:parameters cnt=6>… Path/Command/Category/TargetType/DocOpenType …</hp:parameters>
+//            </hp:fieldBegin></hp:ctrl>
+//   <hp:t>표시 텍스트</hp:t>
+//   <hp:ctrl><hp:fieldEnd beginIDRef=B fieldid=F/></hp:ctrl>
+// </hp:run>
+// Template here mirrors a real government-doc instance verbatim (only the URL,
+// display text, and id pair vary). Hancom renders the run's <hp:t> as a
+// clickable link.
+function opInsertHyperlink(doc, paragraphIndex, url, text) {
+  if (!url) throw new Error('insert_hyperlink: "url" is required');
+  if (!text) throw new Error('insert_hyperlink: "text" (display label) is required');
+  const paras = doc.paragraphs();
+  if (paragraphIndex < 0 || paragraphIndex >= paras.length) {
+    throw new Error(`insert_hyperlink: paragraph index ${paragraphIndex} out of range (0..${paras.length - 1})`);
+  }
+  const { section, el } = paras[paragraphIndex];
+  const charPrId = (el.inner.match(/charPrIDRef="(\d+)"/) || [, '0'])[1];
+  const beginId = freshId();
+  const fieldid = freshId();
+  const u = xmlEscape(url);
+  const run =
+    `<hp:run charPrIDRef="${charPrId}">` +
+      `<hp:ctrl>` +
+        `<hp:fieldBegin id="${beginId}" type="HYPERLINK" name="" editable="0" dirty="1" zorder="-1" fieldid="${fieldid}">` +
+          `<hp:parameters cnt="6" name="">` +
+            `<hp:integerParam name="Prop">0</hp:integerParam>` +
+            `<hp:stringParam name="Command">${u};1;0;0;</hp:stringParam>` +
+            `<hp:stringParam name="Path">${u}</hp:stringParam>` +
+            `<hp:stringParam name="Category">HWPHYPERLINK_TYPE_URL</hp:stringParam>` +
+            `<hp:stringParam name="TargetType">HWPHYPERLINK_TARGET_BOOKMARK</hp:stringParam>` +
+            `<hp:stringParam name="DocOpenType">HWPHYPERLINK_JUMP_CURRENTTAB</hp:stringParam>` +
+          `</hp:parameters>` +
+        `</hp:fieldBegin>` +
+      `</hp:ctrl>` +
+      `<hp:t>${xmlEscape(text)}</hp:t>` +
+      `<hp:ctrl><hp:fieldEnd beginIDRef="${beginId}" fieldid="${fieldid}"/></hp:ctrl>` +
+    `</hp:run>`;
+  const rebuilt = `<hp:p${el.attrs}>${el.inner + run}</hp:p>`;
+  doc.write(section, dropLinesegs(spliceEl(doc.read(section), el, rebuilt)));
+  return { index: paragraphIndex, url, text, beginId, fieldid, inserted: true };
+}
+
 // ── field operation ──────────────────────────────────────────────────────────
 
 function opSetFieldValue(doc, name, value) {
@@ -866,6 +914,7 @@ function applyOp(doc, op) {
     case 'remove_footer': return opRemoveHeaderFooter(doc, 'footer');
     case 'insert_footnote': return opInsertNote(doc, 'footNote', op.index, op.text);
     case 'insert_endnote': return opInsertNote(doc, 'endNote', op.index, op.text);
+    case 'insert_hyperlink': return opInsertHyperlink(doc, op.index, op.url, op.text);
     default: throw new Error(`unknown operation type: ${op.type}`);
   }
 }
