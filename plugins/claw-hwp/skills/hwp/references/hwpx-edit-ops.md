@@ -82,6 +82,20 @@ not a top-level `<hp:secPr>` reference. `applyPageType` is `BOTH` | `EVEN` | `OD
 
 > First-time insertion uses safe defaults (`paraPrIDRef="0"` / `charPrIDRef="0"`), which exist in every standard `.hwpx`. To use a custom font/color, follow with `apply_text_style` targeting the header text.
 
+### Footnote / Endnote (각주 / 미주)
+
+A footnote / endnote is a `<hp:ctrl>` control with the same envelope as
+header/footer (`<hp:run><hp:ctrl><hp:footNote|endNote><hp:subList>…`). The
+reference marker (¹ ²) and page-bottom placement are computed by Hancom at
+render time — we only place the control at the end of the target paragraph.
+
+| `type` | Args | Notes |
+|--------|------|-------|
+| `insert_footnote` | `index`, `text` | Appends a footnote at end of paragraph `index`. The reference marker appears in the body where the control sits; the footnote text shows at the bottom of that page. |
+| `insert_endnote` | `index`, `text` | Same shape as `insert_footnote` for `<hp:endNote>`. Text appears at the end of the document instead of per-page. |
+
+> rhwp's `.hwp → .hwpx` conversion drops actual notes (it only writes the `<hp:footNotePr>` style declaration), so this template is built from the OWPML envelope rather than cloned from a real instance — visually verify in Hancom Docs on first use. To restyle the marker, follow with `apply_text_style` on a unique anchor before the insertion.
+
 ### Images
 
 | `type` | Args | Notes |

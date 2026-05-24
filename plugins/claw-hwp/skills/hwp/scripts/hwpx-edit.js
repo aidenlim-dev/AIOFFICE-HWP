@@ -36,6 +36,8 @@
 //   set_footer            { text, applyPageType? }
 //   remove_header         { }
 //   remove_footer         { }
+//   insert_footnote       { index, text }    // appends a footnote at end of paragraph `index`
+//   insert_endnote        { index, text }    // same shape, endnote
 //
 // Output: JSON to stdout — { ok, output, results: [ { type, ...stats } ] }.
 
@@ -778,6 +780,44 @@ function opRemoveHeaderFooter(doc, kind) {
   return { kind, removed };
 }
 
+// ── footnote / endnote operations ────────────────────────────────────────────
+
+// Footnotes (각주) and endnotes (미주) are ctrl-embedded notes — same envelope
+// shape as headers/footers (<hp:run><hp:ctrl><hp:footNote|endNote ...>subList>
+// p>run>t). The reference marker (¹ ²) and bottom-of-page placement are
+// rendered by Hancom from the control's position; we only place the control
+// at the end of the target body paragraph.
+//
+// Note: rhwp's .hwp→.hwpx conversion drops actual notes (only emits the
+// <hp:footNotePr> style declaration), so we can't clone a known-good real
+// example — the template below follows the OWPML envelope used by the other
+// ctrl elements in this skill and reuses safe default refs (id=0).
+
+function opInsertNote(doc, kind, paragraphIndex, text) {
+  const tag = `hp:${kind}`; // "footNote" or "endNote"
+  const paras = doc.paragraphs();
+  if (paragraphIndex < 0 || paragraphIndex >= paras.length) {
+    throw new Error(`insert_${kind === 'footNote' ? 'footnote' : 'endnote'}: paragraph index ${paragraphIndex} out of range (0..${paras.length - 1})`);
+  }
+  const { section, el } = paras[paragraphIndex];
+  const charPrId = (el.inner.match(/charPrIDRef="(\d+)"/) || [, '0'])[1];
+  const noteRun =
+    `<hp:run charPrIDRef="${charPrId}">` +
+      `<hp:ctrl>` +
+        `<${tag} id="0">` +
+          `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
+            `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
+              `<hp:run charPrIDRef="0"><hp:t>${xmlEscape(text)}</hp:t></hp:run>` +
+            `</hp:p>` +
+          `</hp:subList>` +
+        `</${tag}>` +
+      `</hp:ctrl>` +
+    `</hp:run>`;
+  const rebuilt = `<hp:p${el.attrs}>${el.inner + noteRun}</hp:p>`;
+  doc.write(section, dropLinesegs(spliceEl(doc.read(section), el, rebuilt)));
+  return { kind: kind === 'footNote' ? 'footnote' : 'endnote', index: paragraphIndex, inserted: true };
+}
+
 // ── field operation ──────────────────────────────────────────────────────────
 
 function opSetFieldValue(doc, name, value) {
@@ -824,6 +864,8 @@ function applyOp(doc, op) {
     case 'set_footer': return opSetHeaderFooter(doc, 'footer', op.text, op.applyPageType);
     case 'remove_header': return opRemoveHeaderFooter(doc, 'header');
     case 'remove_footer': return opRemoveHeaderFooter(doc, 'footer');
+    case 'insert_footnote': return opInsertNote(doc, 'footNote', op.index, op.text);
+    case 'insert_endnote': return opInsertNote(doc, 'endNote', op.index, op.text);
     default: throw new Error(`unknown operation type: ${op.type}`);
   }
 }
