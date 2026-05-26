@@ -25,10 +25,14 @@ HWP/HWPX 의 한컴독스 호환성 / 동작 spec 은 우리가 자의적으로 
   - Hop 에서 새 문서 생성 + 저장 → 한컴독스 ✓
   - 우리 plugin baseline (`baseline_no_strip_skip_cfbwrite.hwp`) → 한컴독스 ✓
 - **rhwp `exportHwp()` round-trip** (load existing big form → modify → exportHwp):
-  - **Hop 에서 ktx 큰 폼 open + cell 수정 ("엣지형" → "테스트") + 저장 → 한컴독스 ✗ (2026-05-22 검증)**
-  - **Hop 에서 ktx 큰 폼 open + image 추가 + 저장 → 한컴독스 ✗ (2026-05-22 검증)**
-  - 우리 plugin (`ktx_cell_latest_vendor_v2.hwp`, 최신 v0.7.12 vendor + strip 제거) → 한컴독스 ✗ (동일 결과)
-  - 즉 rhwp 자체의 round-trip 한계. Hop 도 같은 한계 가짐. **modify 종류 무관 — cell, image, 다른 무엇이든 round-trip 자체가 reject.**
+  - **큰 폼 (ktx, 50+ pages)**:
+    - Hop 에서 cell 수정 + 저장 → 한컴독스 ✗ (2026-05-22 검증)
+    - Hop 에서 image 추가 + 저장 → 한컴독스 ✗ (2026-05-22 검증)
+    - 우리 plugin rhwp emit (`ktx_inplace_image_v11_rhwp_emit.hwp`) → 한컴독스 ✗ (동일)
+  - **작은 폼 (fresh_image_100px, mini-stream Section0)**:
+    - Hop 에서 image 추가 + 저장 → 한컴독스 ✅ (2026-05-22 검증, fresh_image_100px_v3.hwp)
+    - 우리 plugin rhwp emit (`small_inplace_image_v7_rhwp_emit.hwp`) → 한컴독스 ✅
+  - 즉 rhwp round-trip 의 한컴독스 호환은 **폼 크기/구조에 따라 다름**. 큰 폼 reject 는 우리/Hop 공통 한계. 작은 폼 OK.
 - **이게 우리 raw-patch (cell-patch.js — 기존 bytes 통째 유지 + 변경 부분만 byte-level patch) 가 in-place edit 의 유일한 한컴독스 호환 path 인 이유.** Hop 도 못 푸는 문제를 우리가 회피해서 풀어둔 것.
 - **sheetjs `CFB.write` (vendor/cfb/cfb.js)**: directory entry [Sh33tJ5] 빈 stream 박음 → 한컴독스 ✗. **써서는 안 됨.** in-place edit 은 우리 raw-patch 인프라 사용.
 

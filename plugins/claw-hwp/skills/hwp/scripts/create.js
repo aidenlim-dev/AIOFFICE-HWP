@@ -258,29 +258,182 @@ function startNewParagraph(doc, cursor) {
   }
 }
 
+// ── Character-format prop translation (user-facing → rhwp internal) ──────
+//
+// Empirically probed (2026-05-26) which JSON keys rhwp's applyCharFormat
+// stores on the CharShape record. The user-facing names below mirror the
+// hwpx-edit-module `apply_text_style` op so cold-start Claude calls the
+// same vocabulary regardless of input format; the dispatcher routes by
+// extension. Key non-obvious mappings:
+//   - HIGHLIGHT (형광펜) is `shadeColor` in rhwp, NOT `highlight` /
+//     `background` / `charBgColor` (those are silently ignored).
+//   - Font family / letter spacing / char ratio are stored as
+//     per-language ARRAYS of 7 entries (one per language script: Hangul,
+//     Latin, Hanja, Japanese, Other, Symbol, User). A scalar form is
+//     silently ignored — must broadcast to all 7.
+//   - fontSize is in HWP units (1pt = 100); callers pass points and we
+//     multiply.
+//
+// IMPORTANT: rhwp's applyCharFormat does a MERGE with the existing
+// CharShape, so any prop we don't include retains the prior run's value.
+// For the "managed" flag set (bold/italic/underline/strikethrough/super/
+// sub/textColor/shadeColor) we ALWAYS emit a value — false / neutral
+// when not requested — so styling from one run never leaks into the
+// next. This matches the original writeRunsAt's bold/italic behavior
+// and extends it to the new prop set.
+const MANAGED_NEUTRAL = {
+  bold: false,
+  italic: false,
+  underline: false,
+  strikethrough: false,
+  superscript: false,
+  subscript: false,
+  textColor: "#000000",
+  shadeColor: "#ffffff",
+};
+
+function buildCharFormatProps(input = {}, defaults = {}) {
+  const props = {};
+
+  // Managed booleans — always emit (default false so leaks are killed)
+  for (const flag of ['bold', 'italic', 'underline', 'strikethrough',
+                       'superscript', 'subscript']) {
+    if (input[flag] !== undefined) props[flag] = !!input[flag];
+    else if (defaults[flag] !== undefined) props[flag] = !!defaults[flag];
+    else props[flag] = MANAGED_NEUTRAL[flag];
+  }
+
+  // Unmanaged boolean extras — only emit when the caller asks. These are
+  // rarely used and don't show up in HEADING_DEFAULTS, so the leak risk
+  // is low.
+  for (const flag of ['emboss', 'engrave', 'kerning']) {
+    if (input[flag] !== undefined) props[flag] = !!input[flag];
+    else if (defaults[flag] !== undefined) props[flag] = !!defaults[flag];
+  }
+
+  // fontSize — input in points, rhwp expects HWP units (×100). Defaults
+  // arrive already in HWP units (HEADING_DEFAULTS path).
+  if (input.fontSize != null) props.fontSize = Math.round(input.fontSize * 100);
+  else if (defaults.fontSize != null) props.fontSize = defaults.fontSize;
+
+  // textColor — managed (always emit). User-facing `color` or `textColor`.
+  const textColor = input.color ?? input.textColor ?? defaults.color ?? defaults.textColor;
+  props.textColor = textColor ? normalizeHexColor(textColor) : MANAGED_NEUTRAL.textColor;
+
+  // highlight — managed (always emit). Input "#RRGGBB" or `true` (=yellow)
+  // or `false` (=clear). rhwp prop is `shadeColor`.
+  const highlight = input.highlight ?? defaults.highlight;
+  if (highlight === undefined || highlight === false) {
+    props.shadeColor = MANAGED_NEUTRAL.shadeColor;
+  } else if (highlight === true) {
+    props.shadeColor = "#ffff00";
+  } else {
+    props.shadeColor = normalizeHexColor(highlight);
+  }
+
+  // Underline detail — color / position / shape. Underline must be true
+  // for these to render.
+  const underlineColor = input.underline_color ?? input.underlineColor;
+  if (underlineColor) props.underlineColor = normalizeHexColor(underlineColor);
+  if (input.underline_type ?? input.underlineType) props.underlineType = input.underline_type ?? input.underlineType;
+  if (input.underline_shape != null) props.underlineShape = input.underline_shape;
+  else if (input.underlineShape != null) props.underlineShape = input.underlineShape;
+
+  // Strikethrough detail — color / shape.
+  const strikeColor = input.strikethrough_color ?? input.strikeColor;
+  if (strikeColor) props.strikeColor = normalizeHexColor(strikeColor);
+  if (input.strike_shape != null) props.strikeShape = input.strike_shape;
+  else if (input.strikeShape != null) props.strikeShape = input.strikeShape;
+
+  // emphasisDot — 강조점 (0 = none, 1+ = various dot styles)
+  if (input.emphasis_dot != null) props.emphasisDot = input.emphasis_dot;
+  else if (input.emphasisDot != null) props.emphasisDot = input.emphasisDot;
+
+  // fontFamily — rhwp's CharShape stores font references as IDs into a
+  // FACE_NAME table in DocInfo (DocInfo HWPTAG_FACE_NAME records).
+  // Passing fontFamilies as NAMES is silently ignored — the lookup
+  // falls back to the default "함초롬바탕" because new names aren't
+  // auto-registered. The correct field is `fontIds` (array of 7 u16
+  // IDs). Caller (writeRunsAt / apply_text_style handler) is responsible
+  // for resolving font_family → fontIds via doc.findOrCreateFontId()
+  // BEFORE calling this builder, and passing `fontIds` directly. The
+  // legacy `fontFamilies` name input is preserved here for back-compat
+  // but won't actually change the font.
+  if (Array.isArray(input.fontIds)) props.fontIds = input.fontIds;
+  if (Array.isArray(input.fontFamilies)) props.fontFamilies = input.fontFamilies;
+
+  // letterSpacing — broadcast scalar to all 7 slots. rhwp prop is
+  // `spacings`. Units: 1/100 em (HWP convention).
+  const letterSpacing = input.letter_spacing ?? input.letterSpacing;
+  if (Array.isArray(input.spacings)) props.spacings = input.spacings;
+  else if (letterSpacing != null) props.spacings = Array(7).fill(letterSpacing);
+
+  // charRatio — broadcast scalar to all 7 slots. rhwp prop is `ratios`.
+  // Percent (100 = default width).
+  const charRatio = input.char_ratio ?? input.charRatio;
+  if (Array.isArray(input.ratios)) props.ratios = input.ratios;
+  else if (charRatio != null) props.ratios = Array(7).fill(charRatio);
+
+  return props;
+}
+
+// Resolve a font_family name → broadcast fontIds[7]. Registers the
+// font in DocInfo's FACE_NAME table if not already there (rhwp's
+// findOrCreateFontId handles dedup). Returns the same input shape but
+// with `fontIds` populated and `font_family` removed so downstream
+// builders don't try the silent-fallback name path.
+function resolveFontFamily(doc, input) {
+  if (!input) return input;
+  const name = input.font_family ?? input.fontFamily;
+  if (!name) return input;
+  const id = doc.findOrCreateFontId(String(name));
+  if (id < 0) return input;
+  const out = { ...input, fontIds: Array(7).fill(id) };
+  delete out.font_family;
+  delete out.fontFamily;
+  return out;
+}
+
+function normalizeHexColor(c) {
+  if (typeof c !== 'string') return c;
+  const s = c.replace(/^#/, '');
+  if (!/^[0-9a-fA-F]{6}$/.test(s)) return c;
+  return `#${s.toLowerCase()}`;
+}
+
 function writeRunsAt(doc, cursor, runs, defaults = {}) {
-  // ALWAYS apply char format to every run, even plain ones. Reason: rhwp's
-  // splitParagraph carries the previous paragraph's last char format onto
-  // the new paragraph's empty cursor, so a heading at 16pt makes the body
-  // paragraph that follows inherit 16pt unless we explicitly reset it.
-  // `defaults` carries per-op intent (e.g. heading wants {fontSize, bold, color});
-  // per-run inline markers (**bold** / *italic*) override defaults.
-  const baseFontSize = defaults.fontSize ?? 1000; // HWP units (1pt = 100)
+  // ALWAYS apply char format to every run via buildCharFormatProps so
+  // every managed flag (bold/italic/underline/strikethrough/super/sub/
+  // textColor/shadeColor) is explicitly reset to its neutral value
+  // when not requested — kills leakage from rhwp's splitParagraph,
+  // which copies the prior paragraph's last CharShape onto the new
+  // empty cursor.
+  //
+  // `defaults` carries per-op intent (e.g. heading wants
+  // {fontSize, bold, color}). Per-run flags override defaults; the
+  // builder handles the merge.
+  //
+  // fontSize convention:
+  //   - per-run input (run.fontSize): POINTS — multiplied ×100 inside
+  //   - defaults (HEADING_DEFAULTS path): already HWP UNITS
+  //   - if neither set: fallback to 1000 HU (=10pt body)
+  const baseFontSize = defaults.fontSize ?? 1000;
   let off = cursor.charOffset;
+  // Resolve any font_family on defaults once — defaults rarely change
+  // across runs, and registering the same font twice is a no-op via
+  // findOrCreateFontId's dedup.
+  const resolvedDefaults = resolveFontFamily(doc, defaults);
   for (const run of runs) {
     if (!run.text) continue;
     unwrap(
       doc.insertText(cursor.sec, cursor.para, off, run.text),
       "insertText",
     );
-    const props = {
-      fontSize: run.fontSize ? Math.round(run.fontSize * 100) : baseFontSize,
-      bold: run.bold || defaults.bold || false,
-      italic: run.italic || defaults.italic || false,
-    };
-    if (run.underline) props.underline = true;
-    const textColor = run.color || defaults.color;
-    if (textColor) props.textColor = textColor;
+    // Resolve per-run font_family (may differ from defaults) before
+    // handing to the prop builder.
+    const resolvedRun = resolveFontFamily(doc, run);
+    const props = buildCharFormatProps(resolvedRun, resolvedDefaults);
+    if (props.fontSize == null) props.fontSize = baseFontSize;
     doc.applyCharFormat(
       cursor.sec,
       cursor.para,
@@ -341,6 +494,20 @@ function applyParaProps(doc, cursor, opts = {}) {
   const props = {
     alignment: alignMap[align] || "justify",
     pageBreakBefore: opts.pageBreakBefore ?? false,
+    // NOTE: do NOT pass fillType / fillColor / border* here. rhwp's
+    // applyParaFormat serializes any fill or border touch as a NEW
+    // BorderFill record in DocInfo, AND its generated BorderFill has
+    // borderTop/Bottom/Left = type:1 (solid) width:0. Hancom Docs
+    // renders type:1 width:0 as a 1px line, so every paragraph that
+    // referenced that BorderFill gets thin horizontal stripes (the
+    // visual issue verified 2026-05-26). Leave default paragraphs
+    // pointing at the original blank-template BorderFill (clean,
+    // no-border, white-fill) by not touching fill/border fields at
+    // all. Side effect: apply_paragraph_style {background_color: ...}
+    // on paragraph N can bleed into a freshly appended N+1 via
+    // splitParagraph's paraShape copy — accept that as a smaller
+    // issue than stripes-on-every-paragraph; the user can always
+    // re-apply default fill on the next paragraph if it matters.
   };
   if (opts.lineSpacing != null) props.lineSpacing = opts.lineSpacing;
   if (opts.spacingBefore != null) props.spacingBefore = opts.spacingBefore;
@@ -992,7 +1159,274 @@ const HANDLERS = {
       `"${truncForLog(text)}"`,
     );
   },
+
+  // ── Styling ops (rhwp emit path) ──────────────────────────────────────
+  //
+  // apply_text_style / apply_paragraph_style mirror hwpx-edit-module's op
+  // names so cold-start Claude calls the same vocabulary regardless of
+  // input format. These run through rhwp's WASM applyCharFormat /
+  // applyParaFormat, which means they're stuck behind rhwp's exportHwp
+  // round-trip:
+  //   - from-scratch documents ✓ 한컴독스 OK
+  //   - small mini-stream Section0 files ✓
+  //   - big forms (50+ pages, ktx-style) ✗ (rhwp round-trip limit —
+  //     Hop hits the same wall; verified 2026-05-22). Big-form support
+  //     lives in cell-patch.js applyTextStyleInPlace (Phase B).
+
+  apply_text_style(doc, op, cursor) {
+    if (typeof op.target !== "string" || op.target.length === 0) {
+      throw new Error("apply_text_style: 'target' is required");
+    }
+    // Build the rhwp CharShape JSON from the op's style props. We treat
+    // the op itself as the input — every styling key (bold, italic,
+    // underline, strikethrough, color, highlight, size, font_family,
+    // ...) is read off it. `size` is points (matches hwpx-edit) and
+    // maps to fontSize internally.
+    const styleInput = { ...op };
+    delete styleInput.type;
+    delete styleInput.target;
+    if (op.size != null && op.fontSize == null) styleInput.fontSize = op.size;
+    // Resolve font_family → fontIds via rhwp's font registry. See
+    // resolveFontFamily and buildCharFormatProps for why this is
+    // necessary (rhwp ignores name-based font lookup in applyCharFormat).
+    const resolvedInput = resolveFontFamily(doc, styleInput);
+    const props = buildCharFormatPropsForApply(resolvedInput);
+    if (Object.keys(props).length === 0) {
+      throw new Error("apply_text_style: at least one style prop is required (bold/italic/underline/strikethrough/color/highlight/size/font_family/...)");
+    }
+
+    // Find the target in top-level body paragraphs (cells excluded —
+    // mirrors hwpx-edit's behavior where apply_text_style searches
+    // <hp:t> nodes outside table subLists in the simple form).
+    const hit = findFirstTextInBody(doc, op.target);
+    if (!hit) {
+      throw new Error(`apply_text_style: target "${truncForLog(op.target)}" not found in body text`);
+    }
+    doc.applyCharFormat(hit.sec, hit.para, hit.start, hit.end, JSON.stringify(props));
+    log.push(
+      `apply_text_style "${truncForLog(op.target)}" @ sec=${hit.sec} para=${hit.para} range=[${hit.start},${hit.end}) ` +
+      `props=${Object.keys(props).join(",")}`
+    );
+  },
+
+  apply_paragraph_style(doc, op, cursor) {
+    if (op.index == null && op.paragraph == null) {
+      throw new Error("apply_paragraph_style: 'index' (paragraph index, 0-based) is required (use \"last\" or -1 to target the most recently appended paragraph)");
+    }
+    const sec = op.section ?? 0;
+    const paraCount = doc.getParagraphCount(sec);
+    let idx = op.index ?? op.paragraph;
+    // "last" / -1 → the most recently appended paragraph in this
+    // section. Lets payloads stop counting headings/intros and just say
+    // "the paragraph I just added".
+    if (idx === "last" || idx === -1) {
+      idx = paraCount - 1;
+    }
+    if (typeof idx !== "number" || idx < 0) {
+      throw new Error(`apply_paragraph_style: 'index' must be a non-negative integer (or "last" / -1); got ${JSON.stringify(op.index)}`);
+    }
+    if (idx >= paraCount) {
+      throw new Error(`apply_paragraph_style: index ${idx} out of range (section ${sec} has ${paraCount} paragraphs)`);
+    }
+    const props = buildParaFormatProps(op);
+    if (Object.keys(props).length === 0) {
+      throw new Error("apply_paragraph_style: at least one style prop is required (align/indent/line_spacing/margin_*/spacing_*/background_color/...)");
+    }
+    doc.applyParaFormat(sec, idx, JSON.stringify(props));
+    log.push(
+      `apply_paragraph_style sec=${sec} para=${idx} props=${Object.keys(props).join(",")}`
+    );
+
+    // Mirror Hancom Office's "문단 모양 + 글자 모양" combo behavior: when
+    // a paragraph background_color is set, Hancom expects the same color
+    // to also live on each character's shadeColor inside that paragraph
+    // (otherwise the page-margin's row grid and other Hancom-internal
+    // visuals can show through the per-character cells). User-verified
+    // 2026-05-26: setting both 문단/글자 모양 to the same gray is the
+    // canonical way to get a "uniform tinted paragraph". We auto-apply
+    // the character shadeColor across the whole paragraph here so callers
+    // don't need a separate apply_text_style call. Opt out by passing
+    // `char_bg: false`.
+    const bg = op.background_color ?? op.backgroundColor ?? op.fillColor;
+    const charBgEnabled = op.char_bg !== false && op.charBg !== false;
+    if (bg && bg !== false && charBgEnabled) {
+      const shadeColor = bg === true ? "#ffff00" : normalizeHexColor(bg);
+      const len = doc.getParagraphLength(sec, idx);
+      if (len > 0) {
+        doc.applyCharFormat(sec, idx, 0, len, JSON.stringify({ shadeColor }));
+        log.push(`apply_paragraph_style → auto char shadeColor=${shadeColor} on para ${idx} (${len} chars)`);
+      }
+    }
+  },
 };
+
+// ── Styling-op helpers ──────────────────────────────────────────────────
+//
+// buildCharFormatPropsForApply is a variant of buildCharFormatProps used by
+// apply_text_style. The difference from writeRunsAt's path: we DON'T emit
+// neutral defaults for unrequested managed flags, because the user is
+// patching an existing CharShape — they want bold ON, not bold OFF (which
+// would clobber the existing italic). Only props the caller explicitly
+// specifies survive.
+function buildCharFormatPropsForApply(input) {
+  const props = {};
+
+  // Booleans — only emit when caller specified (so partial styling
+  // overlays cleanly on existing CharShape).
+  for (const flag of ['bold', 'italic', 'underline', 'strikethrough',
+                       'superscript', 'subscript',
+                       'emboss', 'engrave', 'kerning']) {
+    if (input[flag] !== undefined) props[flag] = !!input[flag];
+  }
+
+  if (input.fontSize != null) props.fontSize = Math.round(input.fontSize * 100);
+
+  const textColor = input.color ?? input.textColor;
+  if (textColor) props.textColor = normalizeHexColor(textColor);
+
+  if (input.highlight !== undefined) {
+    if (input.highlight === false) props.shadeColor = "#ffffff";
+    else if (input.highlight === true) props.shadeColor = "#ffff00";
+    else props.shadeColor = normalizeHexColor(input.highlight);
+  }
+
+  const underlineColor = input.underline_color ?? input.underlineColor;
+  if (underlineColor) props.underlineColor = normalizeHexColor(underlineColor);
+  if (input.underline_type ?? input.underlineType) props.underlineType = input.underline_type ?? input.underlineType;
+  if (input.underline_shape != null) props.underlineShape = input.underline_shape;
+  else if (input.underlineShape != null) props.underlineShape = input.underlineShape;
+
+  const strikeColor = input.strikethrough_color ?? input.strikeColor;
+  if (strikeColor) props.strikeColor = normalizeHexColor(strikeColor);
+  if (input.strike_shape != null) props.strikeShape = input.strike_shape;
+  else if (input.strikeShape != null) props.strikeShape = input.strikeShape;
+
+  if (input.emphasis_dot != null) props.emphasisDot = input.emphasis_dot;
+  else if (input.emphasisDot != null) props.emphasisDot = input.emphasisDot;
+
+  // font_family is resolved to fontIds upstream via resolveFontFamily.
+  // See buildCharFormatProps for the rationale.
+  if (Array.isArray(input.fontIds)) props.fontIds = input.fontIds;
+  if (Array.isArray(input.fontFamilies)) props.fontFamilies = input.fontFamilies;
+
+  const letterSpacing = input.letter_spacing ?? input.letterSpacing;
+  if (Array.isArray(input.spacings)) props.spacings = input.spacings;
+  else if (letterSpacing != null) props.spacings = Array(7).fill(letterSpacing);
+
+  const charRatio = input.char_ratio ?? input.charRatio;
+  if (Array.isArray(input.ratios)) props.ratios = input.ratios;
+  else if (charRatio != null) props.ratios = Array(7).fill(charRatio);
+
+  return props;
+}
+
+function buildParaFormatProps(input) {
+  const props = {};
+  if (input.align != null) {
+    const a = String(input.align).toLowerCase();
+    const map = { left: "left", center: "center", right: "right", justify: "justify", justified: "justify", distribute: "distribute" };
+    if (map[a]) props.alignment = map[a];
+  }
+  if (input.line_spacing != null) {
+    props.lineSpacing = input.line_spacing;
+    props.lineSpacingType = "Percent";
+  } else if (input.lineSpacing != null) {
+    props.lineSpacing = input.lineSpacing;
+    props.lineSpacingType = "Percent";
+  }
+  for (const [opKey, rhwpKey] of [
+    ['indent', 'indent'],
+    ['margin_left', 'marginLeft'], ['marginLeft', 'marginLeft'],
+    ['margin_right', 'marginRight'], ['marginRight', 'marginRight'],
+    ['spacing_before', 'spacingBefore'], ['spacingBefore', 'spacingBefore'],
+    ['spacing_after', 'spacingAfter'], ['spacingAfter', 'spacingAfter'],
+  ]) {
+    if (input[opKey] != null) props[rhwpKey] = input[opKey];
+  }
+  for (const flag of ['pageBreakBefore', 'page_break_before', 'keepWithNext', 'keep_with_next', 'keepLines', 'keep_lines', 'widowOrphan', 'widow_orphan']) {
+    if (input[flag] !== undefined) {
+      const camel = flag.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+      props[camel] = !!input[flag];
+    }
+  }
+
+  // Borders. rhwp's applyParaFormat has a quirk: passing fillType:"solid"
+  // implicitly flips all four borders from type=0 (none) to type=1 (solid,
+  // width=0). Hancom Docs then renders those as thin lines around the
+  // paragraph — the "찌부" / boxed-in look. To kill it, we always emit
+  // explicit ZERO borders when the caller didn't request any. Callers can
+  // override per-side via border_top_pt / border_bottom_pt / etc.
+  const mkBorder = (pt, color) => ({
+    type: 1,
+    width: Math.max(1, Math.round(pt * 8)),
+    color: color || "#000000",
+  });
+  const borderColor = input.border_color;
+  const sides = [
+    ['border_top_pt', 'borderTop'],
+    ['border_bottom_pt', 'borderBottom'],
+    ['border_left_pt', 'borderLeft'],
+    ['border_right_pt', 'borderRight'],
+  ];
+  let anyBorderRequested = false;
+  for (const [opKey, rhwpKey] of sides) {
+    if (input[opKey] !== undefined) {
+      props[rhwpKey] = mkBorder(input[opKey], borderColor);
+      anyBorderRequested = true;
+    }
+  }
+  // Fill — paragraph background. Always emit fillType + fillColor +
+  // patternType:-1 so EVERY apply_paragraph_style call resets the bg
+  // back to neutral; this kills the splitParagraph bleed where Para N
+  // with background_color=#cccccc would leak the gray fill into a
+  // freshly-appended Para N+1 (verified 2026-05-26).
+  //
+  // patternType:-1 is critical. rhwp's applyParaFormat with just
+  // {fillType:"solid", fillColor} resets patternType to 0 (HWP spec:
+  // 0 = horizontal stripes overlay), which Hancom Docs renders as
+  // thin stripes drawn over the solid fill. Forcing patternType:-1
+  // (no pattern) makes the solid fill render alone. patternColor is
+  // irrelevant when patternType=-1, but we mirror rhwp's blank-template
+  // default (#999999) so the BorderFill record matches the pristine
+  // structure.
+  const bg = input.background_color ?? input.backgroundColor ?? input.fillColor;
+  props.fillType = "solid";
+  props.fillColor = (bg && bg !== false) ? normalizeHexColor(bg) : "#ffffff";
+  props.patternType = -1;
+  props.patternColor = "#999999";
+  // Force the un-requested sides to ZERO. Since fill is now ALWAYS
+  // emitted (above), rhwp will create a new BorderFill record on every
+  // applyParaFormat call — and without explicit borders, rhwp's
+  // serializer defaults them to type:1 (solid) width:0, which Hancom
+  // Docs renders as a 1px frame around the paragraph. Explicit zeros
+  // here prevent that.
+  for (const [, rhwpKey] of sides) {
+    if (!(rhwpKey in props)) props[rhwpKey] = { type: 0, width: 0, color: "#000000" };
+  }
+  return props;
+}
+
+// Walk top-level body paragraphs (skips table cells, header/footer,
+// footnotes — those need their own scoping). Returns { sec, para, start,
+// end } for the first paragraph containing `target`. Char offsets are
+// rhwp character units (1 surrogate pair = 1 unit for CJK; matches
+// applyCharFormat's coordinate system).
+function findFirstTextInBody(doc, target) {
+  const secCount = doc.getSectionCount();
+  for (let s = 0; s < secCount; s++) {
+    const paraCount = doc.getParagraphCount(s);
+    for (let p = 0; p < paraCount; p++) {
+      const len = doc.getParagraphLength(s, p);
+      if (len === 0) continue;
+      const text = doc.getTextRange(s, p, 0, len);
+      const idx = text.indexOf(target);
+      if (idx >= 0) {
+        return { sec: s, para: p, start: idx, end: idx + target.length };
+      }
+    }
+  }
+  return null;
+}
 
 // ── Cell-op helpers ─────────────────────────────────────────────────────────
 //
@@ -1646,7 +2080,13 @@ async function readStdin() {
     'insert_column_break',
     'setup_columns',
   ]);
-  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS, ...APPEND_TABLE_OPS, ...SETUP_DOC_OPS, ...APPEND_IMAGE_OPS]);
+  // APPEND_IMAGE_OPS removed from RAW_PATCH_OPS — image add goes through
+  // the standard rhwp emit path (Hop-equivalent: doc.fromBytes →
+  // insertPicture → exportHwp). Our raw-patch image-cluster synthesis
+  // matches Hop's bytes 99% but fails Hancom Docs's render check due to
+  // an as-yet-unidentified cascading DocInfo reference. Going through
+  // rhwp's emit produces the exact bytes Hop produces.
+  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS, ...APPEND_TABLE_OPS, ...SETUP_DOC_OPS]);
   // TEMP HYPOTHESIS TEST: force rhwp emit path to check whether sheetjs
   // CFB.write was the only Hancom-Docs reject cause. If FORCE_RHWP_EMIT=1
   // is set, bypass raw-patch and run everything through HANDLERS + exportHwp.
@@ -1684,12 +2124,72 @@ async function readStdin() {
       }
       const imageOps = ops.filter((o) => APPEND_IMAGE_OPS.has(o.type));
       if (imageOps.length > 0) {
-        // Prefer cloning the user file's own image cluster if it has one
-        // — then every paraShape / charShape / BorderFill reference
-        // resolves against the same DocInfo. Pass no _templateBytes so
-        // appendImageBodyControl falls through to filePath as template.
+        // Generate a fresh image-bearing .hwp via rhwp (createBlankDocument
+        // + insertText 'x' + insertPicture + exportHwp) for each image op.
+        // The synthesized cluster will:
+        //   - take the entire fresh paragraph cluster (clean, correct
+        //     CTRL_HEADER size / SHAPE_COMPONENT body / CTRL_DATA, valid
+        //     PARA_LINE_SEG for the image height)
+        //   - rewrite paraShape / charShape IDs to point at the user
+        //     file's existing image paragraph (ktx-style: paraShape=29
+        //     for the nested image paragraph #11)
+        const rhwp = (await import("./vendor/rhwp/rhwp.js"));
+        if (!globalThis.__rhwp_loaded_for_template) {
+          await rhwp.default({
+            module_or_path: fs.readFileSync(
+              path.resolve(path.dirname(new URL(import.meta.url).pathname), "vendor/rhwp/rhwp_bg.wasm")
+            ),
+          });
+          if (typeof globalThis.measureTextWidth !== "function") {
+            globalThis.measureTextWidth = (font, text) =>
+              text.length * (parseFloat(font) || 10) * 0.55;
+          }
+          globalThis.__rhwp_loaded_for_template = true;
+        }
+        const opsWithTemplate = [];
+        for (const op of imageOps) {
+          const imgPath = path.resolve(op.path);
+          if (!fs.existsSync(imgPath)) throw new Error(`append_image: file not found: ${imgPath}`);
+          const imgBytes = fs.readFileSync(imgPath);
+          const ext = (path.extname(imgPath).slice(1) || "png").toLowerCase();
+          const CM_TO_HWPUNIT = 2835;
+          const widthCm = op.width_cm || 12;
+          const heightCm = op.height_cm || widthCm * 0.66;
+          const widthHwp = Math.round(widthCm * CM_TO_HWPUNIT);
+          const heightHwp = Math.round(heightCm * CM_TO_HWPUNIT);
+          let nativePxW = 0, nativePxH = 0;
+          if (ext === "png" && imgBytes.length >= 24 && imgBytes.readUInt32BE(12) === 0x49484452) {
+            nativePxW = imgBytes.readUInt32BE(16);
+            nativePxH = imgBytes.readUInt32BE(20);
+          }
+          const naturalW = nativePxW || Math.max(1, Math.round(widthHwp / 75));
+          const naturalH = nativePxH || Math.max(1, Math.round(heightHwp / 75));
+          // Use the standard create.js append_image flow (the one the
+          // baseline `fresh_image_100px.hwp` came from — Hancom Docs
+          // verified). startNewParagraph + insertPicture produces the
+          // PARA_LINE_SEG layout cache (vertSize=900, the text-default
+          // height) that Hancom expects; the bare insertText+insertPicture
+          // shortcut sets vertSize=imageHeight which Hancom Docs renders
+          // as an empty frame.
+          const freshDoc = rhwp.HwpDocument.createEmpty();
+          freshDoc.createBlankDocument();
+          freshDoc.beginBatch();
+          // Mirror HANDLERS.append_image: splitParagraph to ensure
+          // dedicated paragraph, then insertPicture at offset 0.
+          // splitParagraph isn't exposed cleanly — emulate by inserting
+          // a real paragraph break (insertText \r) so insertPicture
+          // attaches to a fresh paragraph the same way the real handler
+          // does.
+          freshDoc.insertText(0, 0, 0, "x");
+          freshDoc.splitParagraph?.(0, 0, 1);  // optional — only if exposed
+          freshDoc.insertPicture(0, 1, 0, new Uint8Array(imgBytes), widthHwp, heightHwp, naturalW, naturalH, ext, "");
+          freshDoc.endBatch();
+          const templateBytes = Buffer.from(freshDoc.exportHwp());
+          freshDoc.free();
+          opsWithTemplate.push({ ...op, _templateBytes: templateBytes });
+        }
         const { appendImageInPlace } = await import("./cell-patch.js");
-        const iSummary = await appendImageInPlace(outPath, imageOps);
+        const iSummary = await appendImageInPlace(outPath, opsWithTemplate);
         subModes.push(`image:${iSummary.mode || "in-place"}`);
         for (const e of iSummary) allEdits.push({ kind: "image", ...e });
       }
@@ -1833,6 +2333,23 @@ async function readStdin() {
   }
 
   doc.endBatch();
+
+  // Force PARA_LINE_SEG regeneration before serialization. applyParaFormat
+  // and applyCharFormat update the paraShape / charShape records but
+  // don't invalidate the cached line layout — Hancom Docs renders based
+  // on PARA_LINE_SEG, so without this an apply_paragraph_style
+  // {align:center} on para 8 would update paraShape but the rendered
+  // line in Hancom would still show the old (justify) alignment from
+  // the cached lineseg. reflowLinesegs() walks every paragraph and
+  // regenerates the layout cache against the current shape state.
+  try {
+    const reflowed = doc.reflowLinesegs();
+    if (typeof reflowed === "number" && reflowed > 0) {
+      log.push(`reflowLinesegs: ${reflowed} paragraph(s) recomputed`);
+    }
+  } catch (err) {
+    log.push(`reflowLinesegs: skipped (${err.message})`);
+  }
 
   // Serialize and save based on extension.
   fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
