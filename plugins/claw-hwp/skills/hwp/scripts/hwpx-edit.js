@@ -633,6 +633,25 @@ function applyHighlight(doc, target, highlight) {
   return { highlight: color, retargeted: 0 };
 }
 
+// Build a {id → ref count} map across all sections for the current doc.
+// Used to find an unused "placeholder" charPr — Hancom Docs' native pattern
+// for adding a styled variant is to repurpose one of these unused charPrs
+// in place rather than appending a brand-new charPr to the list. Empirically
+// (verified via round-trip in Hancom Docs), appending a new charPr ends up
+// with its discriminating attrs (strikeout/supscript/fontRef) sanitized away
+// on next open, so the visible effect never lands. In-place placeholder
+// reuse mirrors how Hancom itself stores these edits.
+function buildCharPrRefCounts(doc) {
+  const counts = {};
+  for (const name of doc.sectionNames()) {
+    const xml = doc.read(name);
+    for (const m of xml.matchAll(/charPrIDRef="(\d+)"/g)) {
+      counts[m[1]] = (counts[m[1]] || 0) + 1;
+    }
+  }
+  return counts;
+}
+
 function opApplyTextStyle(doc, target, style) {
   // Highlight is an inline <hp:markpen> marker pair — processed independently
   // of the charPr-based attributes below.
@@ -651,7 +670,6 @@ function opApplyTextStyle(doc, target, style) {
   const header = doc.read(headerName);
   const charPrs = scanTopLevel(header, 'hh:charPr');
   if (!charPrs.length) throw new Error('apply_text_style: no <hh:charPr> in header.xml');
-  const newId = String(Math.max(...charPrs.map((c) => Number(getAttr(c.attrs, 'id') || 0))) + 1);
 
   // Locate the target run — if absent, don't pollute header.xml.
   let hitSection = null, hitRun = null, sourceRef = null;
@@ -661,10 +679,21 @@ function opApplyTextStyle(doc, target, style) {
   }
   if (!hitSection) return highlightOut ? { target, ...highlightOut } : { target, retargeted: 0 };
 
-  // Base = the charPr the run currently uses, NOT charPr[0]. Keeps the new
-  // charPr in the same font/size/borderFill family as the surrounding body.
+  // Base = the charPr the run currently uses (font/size/borderFill family).
   const base = charPrs.find((c) => getAttr(c.attrs, 'id') === sourceRef) || charPrs[0];
-  let attrs = base.attrs.replace(/\s*id="\d+"/, ` id="${newId}"`);
+
+  // Pick a placeholder charPr (reference count 0) to rewrite in place; this
+  // mirrors Hancom's own pattern. Fall back to appending a brand-new charPr
+  // only if every charPr in the doc is already referenced. The placeholder's
+  // attrs/inner are fully replaced with base's content + our style mutations,
+  // so the body text keeps the base font/size family.
+  const refCounts = buildCharPrRefCounts(doc);
+  const placeholder = charPrs.find((c) => (refCounts[getAttr(c.attrs, 'id')] || 0) === 0 && getAttr(c.attrs, 'id') !== sourceRef);
+
+  const useId = placeholder ? getAttr(placeholder.attrs, 'id')
+                            : String(Math.max(...charPrs.map((c) => Number(getAttr(c.attrs, 'id') || 0))) + 1);
+
+  let attrs = base.attrs.replace(/\s*id="\d+"/, ` id="${useId}"`);
   let inner = base.inner;
   if (style.size) attrs = setOrAddAttr(attrs, 'height', String(style.size));
   if (style.color) attrs = setOrAddAttr(attrs, 'textColor', `#${String(style.color).replace(/^#/, '')}`);
@@ -682,12 +711,21 @@ function opApplyTextStyle(doc, target, style) {
       ? inner.replace(/<hh:strikeout\b[^>]*\/>/, so)
       : inner + so;
   }
-  const newCharPr = `<hh:charPr${attrs}>${inner}</hh:charPr>`;
-  let h2 = spliceEl(header, base, `<hh:charPr${base.attrs}>${base.inner}</hh:charPr>` + newCharPr);
-  h2 = bumpListCount(h2, 'hh:charProperties', +1);
+  const updatedCharPr = `<hh:charPr${attrs}>${inner}</hh:charPr>`;
+  let h2;
+  if (placeholder) {
+    h2 = spliceEl(header, placeholder, updatedCharPr); // in-place rewrite, itemCnt unchanged
+  } else {
+    h2 = spliceEl(header, base, `<hh:charPr${base.attrs}>${base.inner}</hh:charPr>` + updatedCharPr);
+    h2 = bumpListCount(h2, 'hh:charProperties', +1);
+  }
   doc.write(headerName, h2);
-  doc.write(hitSection, dropLinesegs(retargetRun(doc.read(hitSection), hitRun, newId)));
-  return { target, charPrId: newId, baseCharPrId: sourceRef, retargeted: 1, ...(highlightOut || {}) };
+  doc.write(hitSection, dropLinesegs(retargetRun(doc.read(hitSection), hitRun, useId)));
+  return {
+    target, charPrId: useId, baseCharPrId: sourceRef,
+    placeholderReused: Boolean(placeholder), retargeted: 1,
+    ...(highlightOut || {}),
+  };
 }
 
 function opApplyParagraphStyle(doc, index, style) {
