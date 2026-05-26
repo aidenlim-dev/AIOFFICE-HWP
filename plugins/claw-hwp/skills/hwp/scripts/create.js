@@ -258,14 +258,143 @@ function startNewParagraph(doc, cursor) {
   }
 }
 
+// ── Character-format prop translation (user-facing → rhwp internal) ──────
+//
+// Empirically probed (2026-05-26) which JSON keys rhwp's applyCharFormat
+// stores on the CharShape record. The user-facing names below mirror the
+// hwpx-edit-module `apply_text_style` op so cold-start Claude calls the
+// same vocabulary regardless of input format; the dispatcher routes by
+// extension. Key non-obvious mappings:
+//   - HIGHLIGHT (형광펜) is `shadeColor` in rhwp, NOT `highlight` /
+//     `background` / `charBgColor` (those are silently ignored).
+//   - Font family / letter spacing / char ratio are stored as
+//     per-language ARRAYS of 7 entries (one per language script: Hangul,
+//     Latin, Hanja, Japanese, Other, Symbol, User). A scalar form is
+//     silently ignored — must broadcast to all 7.
+//   - fontSize is in HWP units (1pt = 100); callers pass points and we
+//     multiply.
+//
+// IMPORTANT: rhwp's applyCharFormat does a MERGE with the existing
+// CharShape, so any prop we don't include retains the prior run's value.
+// For the "managed" flag set (bold/italic/underline/strikethrough/super/
+// sub/textColor/shadeColor) we ALWAYS emit a value — false / neutral
+// when not requested — so styling from one run never leaks into the
+// next. This matches the original writeRunsAt's bold/italic behavior
+// and extends it to the new prop set.
+const MANAGED_NEUTRAL = {
+  bold: false,
+  italic: false,
+  underline: false,
+  strikethrough: false,
+  superscript: false,
+  subscript: false,
+  textColor: "#000000",
+  shadeColor: "#ffffff",
+};
+
+function buildCharFormatProps(input = {}, defaults = {}) {
+  const props = {};
+
+  // Managed booleans — always emit (default false so leaks are killed)
+  for (const flag of ['bold', 'italic', 'underline', 'strikethrough',
+                       'superscript', 'subscript']) {
+    if (input[flag] !== undefined) props[flag] = !!input[flag];
+    else if (defaults[flag] !== undefined) props[flag] = !!defaults[flag];
+    else props[flag] = MANAGED_NEUTRAL[flag];
+  }
+
+  // Unmanaged boolean extras — only emit when the caller asks. These are
+  // rarely used and don't show up in HEADING_DEFAULTS, so the leak risk
+  // is low.
+  for (const flag of ['emboss', 'engrave', 'kerning']) {
+    if (input[flag] !== undefined) props[flag] = !!input[flag];
+    else if (defaults[flag] !== undefined) props[flag] = !!defaults[flag];
+  }
+
+  // fontSize — input in points, rhwp expects HWP units (×100). Defaults
+  // arrive already in HWP units (HEADING_DEFAULTS path).
+  if (input.fontSize != null) props.fontSize = Math.round(input.fontSize * 100);
+  else if (defaults.fontSize != null) props.fontSize = defaults.fontSize;
+
+  // textColor — managed (always emit). User-facing `color` or `textColor`.
+  const textColor = input.color ?? input.textColor ?? defaults.color ?? defaults.textColor;
+  props.textColor = textColor ? normalizeHexColor(textColor) : MANAGED_NEUTRAL.textColor;
+
+  // highlight — managed (always emit). Input "#RRGGBB" or `true` (=yellow)
+  // or `false` (=clear). rhwp prop is `shadeColor`.
+  const highlight = input.highlight ?? defaults.highlight;
+  if (highlight === undefined || highlight === false) {
+    props.shadeColor = MANAGED_NEUTRAL.shadeColor;
+  } else if (highlight === true) {
+    props.shadeColor = "#ffff00";
+  } else {
+    props.shadeColor = normalizeHexColor(highlight);
+  }
+
+  // Underline detail — color / position / shape. Underline must be true
+  // for these to render.
+  const underlineColor = input.underline_color ?? input.underlineColor;
+  if (underlineColor) props.underlineColor = normalizeHexColor(underlineColor);
+  if (input.underline_type ?? input.underlineType) props.underlineType = input.underline_type ?? input.underlineType;
+  if (input.underline_shape != null) props.underlineShape = input.underline_shape;
+  else if (input.underlineShape != null) props.underlineShape = input.underlineShape;
+
+  // Strikethrough detail — color / shape.
+  const strikeColor = input.strikethrough_color ?? input.strikeColor;
+  if (strikeColor) props.strikeColor = normalizeHexColor(strikeColor);
+  if (input.strike_shape != null) props.strikeShape = input.strike_shape;
+  else if (input.strikeShape != null) props.strikeShape = input.strikeShape;
+
+  // emphasisDot — 강조점 (0 = none, 1+ = various dot styles)
+  if (input.emphasis_dot != null) props.emphasisDot = input.emphasis_dot;
+  else if (input.emphasisDot != null) props.emphasisDot = input.emphasisDot;
+
+  // fontFamily — broadcast scalar to all 7 language slots so it applies
+  // uniformly. Caller can pass `fontFamilies: [...]` directly for
+  // language-specific control.
+  const fontFamily = input.font_family ?? input.fontFamily ?? defaults.font_family ?? defaults.fontFamily;
+  if (Array.isArray(input.fontFamilies)) props.fontFamilies = input.fontFamilies;
+  else if (fontFamily) props.fontFamilies = Array(7).fill(String(fontFamily));
+
+  // letterSpacing — broadcast scalar to all 7 slots. rhwp prop is
+  // `spacings`. Units: 1/100 em (HWP convention).
+  const letterSpacing = input.letter_spacing ?? input.letterSpacing;
+  if (Array.isArray(input.spacings)) props.spacings = input.spacings;
+  else if (letterSpacing != null) props.spacings = Array(7).fill(letterSpacing);
+
+  // charRatio — broadcast scalar to all 7 slots. rhwp prop is `ratios`.
+  // Percent (100 = default width).
+  const charRatio = input.char_ratio ?? input.charRatio;
+  if (Array.isArray(input.ratios)) props.ratios = input.ratios;
+  else if (charRatio != null) props.ratios = Array(7).fill(charRatio);
+
+  return props;
+}
+
+function normalizeHexColor(c) {
+  if (typeof c !== 'string') return c;
+  const s = c.replace(/^#/, '');
+  if (!/^[0-9a-fA-F]{6}$/.test(s)) return c;
+  return `#${s.toLowerCase()}`;
+}
+
 function writeRunsAt(doc, cursor, runs, defaults = {}) {
-  // ALWAYS apply char format to every run, even plain ones. Reason: rhwp's
-  // splitParagraph carries the previous paragraph's last char format onto
-  // the new paragraph's empty cursor, so a heading at 16pt makes the body
-  // paragraph that follows inherit 16pt unless we explicitly reset it.
-  // `defaults` carries per-op intent (e.g. heading wants {fontSize, bold, color});
-  // per-run inline markers (**bold** / *italic*) override defaults.
-  const baseFontSize = defaults.fontSize ?? 1000; // HWP units (1pt = 100)
+  // ALWAYS apply char format to every run via buildCharFormatProps so
+  // every managed flag (bold/italic/underline/strikethrough/super/sub/
+  // textColor/shadeColor) is explicitly reset to its neutral value
+  // when not requested — kills leakage from rhwp's splitParagraph,
+  // which copies the prior paragraph's last CharShape onto the new
+  // empty cursor.
+  //
+  // `defaults` carries per-op intent (e.g. heading wants
+  // {fontSize, bold, color}). Per-run flags override defaults; the
+  // builder handles the merge.
+  //
+  // fontSize convention:
+  //   - per-run input (run.fontSize): POINTS — multiplied ×100 inside
+  //   - defaults (HEADING_DEFAULTS path): already HWP UNITS
+  //   - if neither set: fallback to 1000 HU (=10pt body)
+  const baseFontSize = defaults.fontSize ?? 1000;
   let off = cursor.charOffset;
   for (const run of runs) {
     if (!run.text) continue;
@@ -273,14 +402,8 @@ function writeRunsAt(doc, cursor, runs, defaults = {}) {
       doc.insertText(cursor.sec, cursor.para, off, run.text),
       "insertText",
     );
-    const props = {
-      fontSize: run.fontSize ? Math.round(run.fontSize * 100) : baseFontSize,
-      bold: run.bold || defaults.bold || false,
-      italic: run.italic || defaults.italic || false,
-    };
-    if (run.underline) props.underline = true;
-    const textColor = run.color || defaults.color;
-    if (textColor) props.textColor = textColor;
+    const props = buildCharFormatProps(run, defaults);
+    if (props.fontSize == null) props.fontSize = baseFontSize;
     doc.applyCharFormat(
       cursor.sec,
       cursor.para,
@@ -992,7 +1115,193 @@ const HANDLERS = {
       `"${truncForLog(text)}"`,
     );
   },
+
+  // ── Styling ops (rhwp emit path) ──────────────────────────────────────
+  //
+  // apply_text_style / apply_paragraph_style mirror hwpx-edit-module's op
+  // names so cold-start Claude calls the same vocabulary regardless of
+  // input format. These run through rhwp's WASM applyCharFormat /
+  // applyParaFormat, which means they're stuck behind rhwp's exportHwp
+  // round-trip:
+  //   - from-scratch documents ✓ 한컴독스 OK
+  //   - small mini-stream Section0 files ✓
+  //   - big forms (50+ pages, ktx-style) ✗ (rhwp round-trip limit —
+  //     Hop hits the same wall; verified 2026-05-22). Big-form support
+  //     lives in cell-patch.js applyTextStyleInPlace (Phase B).
+
+  apply_text_style(doc, op, cursor) {
+    if (typeof op.target !== "string" || op.target.length === 0) {
+      throw new Error("apply_text_style: 'target' is required");
+    }
+    // Build the rhwp CharShape JSON from the op's style props. We treat
+    // the op itself as the input — every styling key (bold, italic,
+    // underline, strikethrough, color, highlight, size, font_family,
+    // ...) is read off it. `size` is points (matches hwpx-edit) and
+    // maps to fontSize internally.
+    const styleInput = { ...op };
+    delete styleInput.type;
+    delete styleInput.target;
+    if (op.size != null && op.fontSize == null) styleInput.fontSize = op.size;
+    const props = buildCharFormatPropsForApply(styleInput);
+    if (Object.keys(props).length === 0) {
+      throw new Error("apply_text_style: at least one style prop is required (bold/italic/underline/strikethrough/color/highlight/size/font_family/...)");
+    }
+
+    // Find the target in top-level body paragraphs (cells excluded —
+    // mirrors hwpx-edit's behavior where apply_text_style searches
+    // <hp:t> nodes outside table subLists in the simple form).
+    const hit = findFirstTextInBody(doc, op.target);
+    if (!hit) {
+      throw new Error(`apply_text_style: target "${truncForLog(op.target)}" not found in body text`);
+    }
+    doc.applyCharFormat(hit.sec, hit.para, hit.start, hit.end, JSON.stringify(props));
+    log.push(
+      `apply_text_style "${truncForLog(op.target)}" @ sec=${hit.sec} para=${hit.para} range=[${hit.start},${hit.end}) ` +
+      `props=${Object.keys(props).join(",")}`
+    );
+  },
+
+  apply_paragraph_style(doc, op, cursor) {
+    if (op.index == null && op.paragraph == null) {
+      throw new Error("apply_paragraph_style: 'index' (paragraph index, 0-based) is required");
+    }
+    const sec = op.section ?? 0;
+    const idx = op.index ?? op.paragraph;
+    if (typeof idx !== "number" || idx < 0) {
+      throw new Error("apply_paragraph_style: 'index' must be a non-negative integer");
+    }
+    const paraCount = doc.getParagraphCount(sec);
+    if (idx >= paraCount) {
+      throw new Error(`apply_paragraph_style: index ${idx} out of range (section ${sec} has ${paraCount} paragraphs)`);
+    }
+    const props = buildParaFormatProps(op);
+    if (Object.keys(props).length === 0) {
+      throw new Error("apply_paragraph_style: at least one style prop is required (align/indent/line_spacing/margin_*/spacing_*/background_color/...)");
+    }
+    doc.applyParaFormat(sec, idx, JSON.stringify(props));
+    log.push(
+      `apply_paragraph_style sec=${sec} para=${idx} props=${Object.keys(props).join(",")}`
+    );
+  },
 };
+
+// ── Styling-op helpers ──────────────────────────────────────────────────
+//
+// buildCharFormatPropsForApply is a variant of buildCharFormatProps used by
+// apply_text_style. The difference from writeRunsAt's path: we DON'T emit
+// neutral defaults for unrequested managed flags, because the user is
+// patching an existing CharShape — they want bold ON, not bold OFF (which
+// would clobber the existing italic). Only props the caller explicitly
+// specifies survive.
+function buildCharFormatPropsForApply(input) {
+  const props = {};
+
+  // Booleans — only emit when caller specified (so partial styling
+  // overlays cleanly on existing CharShape).
+  for (const flag of ['bold', 'italic', 'underline', 'strikethrough',
+                       'superscript', 'subscript',
+                       'emboss', 'engrave', 'kerning']) {
+    if (input[flag] !== undefined) props[flag] = !!input[flag];
+  }
+
+  if (input.fontSize != null) props.fontSize = Math.round(input.fontSize * 100);
+
+  const textColor = input.color ?? input.textColor;
+  if (textColor) props.textColor = normalizeHexColor(textColor);
+
+  if (input.highlight !== undefined) {
+    if (input.highlight === false) props.shadeColor = "#ffffff";
+    else if (input.highlight === true) props.shadeColor = "#ffff00";
+    else props.shadeColor = normalizeHexColor(input.highlight);
+  }
+
+  const underlineColor = input.underline_color ?? input.underlineColor;
+  if (underlineColor) props.underlineColor = normalizeHexColor(underlineColor);
+  if (input.underline_type ?? input.underlineType) props.underlineType = input.underline_type ?? input.underlineType;
+  if (input.underline_shape != null) props.underlineShape = input.underline_shape;
+  else if (input.underlineShape != null) props.underlineShape = input.underlineShape;
+
+  const strikeColor = input.strikethrough_color ?? input.strikeColor;
+  if (strikeColor) props.strikeColor = normalizeHexColor(strikeColor);
+  if (input.strike_shape != null) props.strikeShape = input.strike_shape;
+  else if (input.strikeShape != null) props.strikeShape = input.strikeShape;
+
+  if (input.emphasis_dot != null) props.emphasisDot = input.emphasis_dot;
+  else if (input.emphasisDot != null) props.emphasisDot = input.emphasisDot;
+
+  const fontFamily = input.font_family ?? input.fontFamily;
+  if (Array.isArray(input.fontFamilies)) props.fontFamilies = input.fontFamilies;
+  else if (fontFamily) props.fontFamilies = Array(7).fill(String(fontFamily));
+
+  const letterSpacing = input.letter_spacing ?? input.letterSpacing;
+  if (Array.isArray(input.spacings)) props.spacings = input.spacings;
+  else if (letterSpacing != null) props.spacings = Array(7).fill(letterSpacing);
+
+  const charRatio = input.char_ratio ?? input.charRatio;
+  if (Array.isArray(input.ratios)) props.ratios = input.ratios;
+  else if (charRatio != null) props.ratios = Array(7).fill(charRatio);
+
+  return props;
+}
+
+function buildParaFormatProps(input) {
+  const props = {};
+  if (input.align != null) {
+    const a = String(input.align).toLowerCase();
+    const map = { left: "left", center: "center", right: "right", justify: "justify", justified: "justify", distribute: "distribute" };
+    if (map[a]) props.alignment = map[a];
+  }
+  if (input.line_spacing != null) {
+    props.lineSpacing = input.line_spacing;
+    props.lineSpacingType = "Percent";
+  } else if (input.lineSpacing != null) {
+    props.lineSpacing = input.lineSpacing;
+    props.lineSpacingType = "Percent";
+  }
+  for (const [opKey, rhwpKey] of [
+    ['indent', 'indent'],
+    ['margin_left', 'marginLeft'], ['marginLeft', 'marginLeft'],
+    ['margin_right', 'marginRight'], ['marginRight', 'marginRight'],
+    ['spacing_before', 'spacingBefore'], ['spacingBefore', 'spacingBefore'],
+    ['spacing_after', 'spacingAfter'], ['spacingAfter', 'spacingAfter'],
+  ]) {
+    if (input[opKey] != null) props[rhwpKey] = input[opKey];
+  }
+  for (const flag of ['pageBreakBefore', 'page_break_before', 'keepWithNext', 'keep_with_next', 'keepLines', 'keep_lines', 'widowOrphan', 'widow_orphan']) {
+    if (input[flag] !== undefined) {
+      const camel = flag.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+      props[camel] = !!input[flag];
+    }
+  }
+  const bg = input.background_color ?? input.backgroundColor ?? input.fillColor;
+  if (bg) {
+    props.fillType = "solid";
+    props.fillColor = normalizeHexColor(bg);
+  }
+  return props;
+}
+
+// Walk top-level body paragraphs (skips table cells, header/footer,
+// footnotes — those need their own scoping). Returns { sec, para, start,
+// end } for the first paragraph containing `target`. Char offsets are
+// rhwp character units (1 surrogate pair = 1 unit for CJK; matches
+// applyCharFormat's coordinate system).
+function findFirstTextInBody(doc, target) {
+  const secCount = doc.getSectionCount();
+  for (let s = 0; s < secCount; s++) {
+    const paraCount = doc.getParagraphCount(s);
+    for (let p = 0; p < paraCount; p++) {
+      const len = doc.getParagraphLength(s, p);
+      if (len === 0) continue;
+      const text = doc.getTextRange(s, p, 0, len);
+      const idx = text.indexOf(target);
+      if (idx >= 0) {
+        return { sec: s, para: p, start: idx, end: idx + target.length };
+      }
+    }
+  }
+  return null;
+}
 
 // ── Cell-op helpers ─────────────────────────────────────────────────────────
 //

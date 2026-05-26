@@ -117,12 +117,22 @@ Errors come back as `{"status": "error", "message": "...", "op_index": N}`. Alwa
 | `append_image` ⚠️ | `path` | `width_cm`, `height_cm`, `alt` |
 | `append_bullet_list`, `append_numbered_list` | `items[]` | — |
 | `append_page_break` | — | — |
+| `apply_text_style` ⚠️ | `target` (string to find) | `color`, `bold`, `italic`, `underline`, `strikethrough`, `size` (pt), `highlight` (`true` / `"#RRGGBB"` / `false`), `font_family`, `superscript`, `subscript`, `underline_color`, `letter_spacing`, `char_ratio`, `emphasis_dot` |
+| `apply_paragraph_style` ⚠️ | `index` (paragraph index, 0-based) | `align`, `indent`, `line_spacing` (% e.g. 130), `margin_left`, `margin_right`, `spacing_before`, `spacing_after`, `background_color`, `page_break_before`, `keep_with_next` |
 
 > ⚠️ **`append_image` rules of thumb (Hancom Docs compatibility — verified 2026-05-22):**
 >
 > - **Fresh `.hwp` from scratch (start with `setup_document`) + `append_image`** → Hancom Docs ✓. rhwp emit path produces a valid file; this is the same path Hop uses for new documents.
 > - **`append_image` on an existing `.hwp` (in-place add)** → Hancom Docs ✗ in v1. We have a raw-patch implementation that lands all three required pieces (new `BinData/BIN000N.<ext>` stream, DocInfo `HWPTAG_BIN_DATA` registration, body `gso` + `SHAPE_COMPONENT_PICTURE` referencing the new `bin_data_id`), but on small mini-stream Section0 files the cluster expansion truncates and Hancom rejects. Falling back to rhwp emit doesn't help: rhwp's own `exportHwp()` round-trip is Hancom-Docs–rejected for any non-trivial existing file — **verified directly: Hop hits the same wall when it opens a big form and either modifies a cell or inserts an image, then saves** (2026-05-22 user-driven tests). The limitation is intrinsic to rhwp's serializer, not solvable by going through Hop's path or any rhwp-emit path.
 > - **Workarounds for the in-place case:** (a) build the document from scratch in a single payload so the file never round-trips (rhwp emit + image works end-to-end), (b) pre-design the template with an image placeholder + use `replace_text` / `set_cell_text` to fill surrounding fields (those go through raw-patch and stay Hancom-compatible), or (c) use Hancom Office desktop which accepts the rhwp emit path for round-trip.
+
+> ⚠️ **`apply_text_style` / `apply_paragraph_style` rules of thumb (Hancom Docs compatibility — Phase A, verified 2026-05-26):**
+>
+> - **From-scratch `.hwp` + styling ops** → Hancom Docs ✓. Path: rhwp emit (same WASM Hop uses). All decorations (highlight = `shadeColor`, strikethrough, underline w/ color, bold, italic, font color/size, font family, letter spacing, super/subscript, emphasis dot) ride through `applyCharFormat`. `apply_paragraph_style` does the same via `applyParaFormat`.
+> - **In-place styling on small `.hwp` (mini-stream Section0)** → Hancom Docs ✓. Same rhwp emit path; the same files that accept in-place image add are the ones that accept in-place styling.
+> - **In-place styling on big `.hwp` (50+ pages, ktx-style)** → Hancom Docs ✗ in v1 (Phase A). The op runs and produces a syntactically valid file, but it exits via `exportHwp()` which big-form Hancom Docs rejects (same root cause as `append_image` in-place — rhwp serializer round-trip limit, Hop hits the same wall). Phase B (raw-patch byte-level CharShape) lifts this restriction.
+> - **Key rhwp prop names** (the op accepts user-friendly aliases — listed → internal): `color` → `textColor`, `size` (pt) → `fontSize` (HWP units), `highlight` → `shadeColor`, `font_family` → `fontFamilies[7]` broadcast across all 7 language scripts, `letter_spacing` → `spacings[7]`, `char_ratio` → `ratios[7]`. Highlight is the **non-obvious one** — it's NOT called `highlight` / `background` / `charBgColor` in rhwp internals. We map for you.
+> - **Targeting**: `apply_text_style` finds the **first body-text occurrence** of `target` (top-level paragraphs only — table cells, headers, footers, footnotes not yet searched). For multiple occurrences, use a longer unique substring or apply once at a time. Cell styling: Phase B work item.
 
 *In-place editing (run on an existing file — omit `setup_document` so create.js loads the path instead of starting blank):*
 
@@ -132,7 +142,7 @@ Errors come back as `{"status": "error", "message": "...", "op_index": N}`. Alwa
 | `set_cell_text` | `section`, `para`, `control`, (`row`+`col`) or `cell`, `text` | `cell_para` | Replaces one cell's text. `row`+`col` is recommended; `cell` is the flat row-major index. |
 | `set_cell_text_by_label` | `label`, `text` | `row_offset`, `col_offset`, `occurrence`, `case_sensitive`, `cell_para`, `section`+`para`+`control` (to scope to one table) | Find a cell whose text contains `label`, then write to the cell at `(label_row + row_offset, label_col + col_offset)`. Doc-wide sweep by default. |
 
-Inline `**bold**` and `*italic*` are parsed automatically inside `text` and table cell strings. `runs:[{text, bold?, italic?, fontSize?, color?}]` overrides the parser when you need finer control.
+Inline `**bold**` and `*italic*` are parsed automatically inside `text` and table cell strings. `runs:[{text, bold?, italic?, underline?, strikethrough?, fontSize?, color?, highlight?, font_family?, superscript?, subscript?, underline_color?, letter_spacing?, char_ratio?, emphasis_dot?}]` overrides the parser when you need finer control over a run. All `apply_text_style` props are available per-run too (same Phase A limits as the standalone op — works on from-scratch + small files, big-form in-place styling is Phase B).
 
 **Known limitations** (rhwp serializer constraints — applies to anything emitted via this skill):
 
