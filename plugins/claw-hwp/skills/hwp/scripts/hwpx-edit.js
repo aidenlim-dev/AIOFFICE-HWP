@@ -27,7 +27,7 @@
 //   delete_table_column   { table, col }
 //   merge_cells           { table, mode: "horizontal"|"vertical", row|col, start, count }
 //   insert_table          { index, rows, cols, cells? }  // appends a new table paragraph after paragraph `index` (use -1 to prepend)
-//   apply_text_style      { target, color?, bold?, italic?, underline?, size?, highlight?, strikethrough? }
+//   apply_text_style      { target, color?, bold?, italic?, underline?, size?, highlight?, strikethrough?, supscript?, subscript?, fontFace? }
 //   apply_paragraph_style { index, align?, indent?, lineSpacing? }
 //   insert_image          { source, ext?, width?, height? }
 //   replace_image         { target, source }
@@ -641,6 +641,22 @@ function applyHighlight(doc, target, highlight) {
 // with its discriminating attrs (strikeout/supscript/fontRef) sanitized away
 // on next open, so the visible effect never lands. In-place placeholder
 // reuse mirrors how Hancom itself stores these edits.
+// Look up a font's id by face name in the HANGUL fontface block. Hancom's own
+// `폰트 변경` writes the same id into every lang slot of <hh:fontRef> when
+// the same face name exists across lang lists (the common case for fonts
+// registered through 한컴독스). Returns null if the face isn't registered —
+// caller raises so we don't silently no-op.
+function findFontIdByFace(doc, face) {
+  const headerName = doc.headerName();
+  if (!headerName) return null;
+  const header = doc.read(headerName);
+  const hf = header.match(/<hh:fontface\s+lang="HANGUL"[\s\S]*?<\/hh:fontface>/);
+  if (!hf) return null;
+  const re = new RegExp(`<hh:font\\s+id="(\\d+)"\\s+face="${escapeRegex(face)}"`);
+  const m = hf[0].match(re);
+  return m ? m[1] : null;
+}
+
 function buildCharPrRefCounts(doc) {
   const counts = {};
   for (const name of doc.sectionNames()) {
@@ -659,7 +675,7 @@ function opApplyTextStyle(doc, target, style) {
   if (style.highlight !== undefined) {
     highlightOut = applyHighlight(doc, target, style.highlight);
   }
-  const charPrKeys = ['color', 'bold', 'italic', 'underline', 'size', 'strikethrough'];
+  const charPrKeys = ['color', 'bold', 'italic', 'underline', 'size', 'strikethrough', 'supscript', 'subscript', 'fontFace'];
   const wantsCharPr = charPrKeys.some((k) => style[k] !== undefined);
   if (!wantsCharPr) {
     return highlightOut ? { target, ...highlightOut } : { target, retargeted: 0 };
@@ -710,6 +726,22 @@ function opApplyTextStyle(doc, target, style) {
     inner = /<hh:strikeout\b[^>]*\/>/.test(inner)
       ? inner.replace(/<hh:strikeout\b[^>]*\/>/, so)
       : inner + so;
+  }
+  // Sup/subscript are mutually exclusive child elements at the end of charPr.
+  if (style.supscript !== undefined || style.subscript !== undefined) {
+    inner = inner.replace(/<hh:supscript\b[^>]*\/>/g, '').replace(/<hh:subscript\b[^>]*\/>/g, '');
+    if (style.supscript) inner = inner + '<hh:supscript/>';
+    else if (style.subscript) inner = inner + '<hh:subscript/>';
+  }
+  // fontFace: rewrite every lang slot of <hh:fontRef> to the font's id, the
+  // way Hancom Docs stores 폰트 변경.
+  if (style.fontFace) {
+    const fid = findFontIdByFace(doc, style.fontFace);
+    if (fid === null) throw new Error(`apply_text_style: font "${style.fontFace}" not registered in <hh:fontfaces> — register it first or pick an existing face`);
+    inner = inner.replace(
+      /<hh:fontRef\s+[^>]*\/>/,
+      `<hh:fontRef hangul="${fid}" latin="${fid}" hanja="${fid}" japanese="${fid}" other="${fid}" symbol="${fid}" user="${fid}"/>`,
+    );
   }
   const updatedCharPr = `<hh:charPr${attrs}>${inner}</hh:charPr>`;
   let h2;
