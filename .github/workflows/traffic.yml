@@ -1,13 +1,58 @@
 name: Refresh traffic data
 
 on:
+  schedule:
+    # Daily at 00:00 UTC (≈ 09:00 KST). GitHub Traffic API retains 14 days
+    # of data, so a daily cron captures the rolling window without gaps.
+    - cron: "0 0 * * *"
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - '.github/workflows/traffic.yml'
+
+permissions:
+  contents: write       # commit refreshed JSON back to the repo
+  # traffic API requires the administration scope on the repo. Without it
+  # `gh api repos/.../traffic/clones` returns HTTP 403 (verified
+  # 2026-05-26 on run 26451176516). Default GITHUB_TOKEN only carries
+  # the scopes listed in `permissions:`, so we have to opt in explicitly.
+  # If GitHub still rejects this scope, fall back to a fine-grained PAT
+  # stored as a repo secret.
+  administration: read
 
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "minimal traffic - testing trigger"
+      - uses: actions/checkout@v4
+
+      - name: Fetch traffic + write shields.io endpoint JSON
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p .github
+          clones=$(gh api "repos/${{ github.repository }}/traffic/clones" --jq '.count')
+          cat > .github/traffic-summary.json <<EOF
+          {
+            "schemaVersion": 1,
+            "label": "Clones (14d)",
+            "message": "${clones}",
+            "color": "blue",
+            "namedLogo": "git"
+          }
+          EOF
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/traffic-summary.json
+          if git diff --cached --quiet; then
+            echo "no traffic changes"
+          else
+            git commit -m "chore: refresh traffic data [skip ci]"
+            git push
+          fi
