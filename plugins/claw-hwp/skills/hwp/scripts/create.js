@@ -1646,7 +1646,13 @@ async function readStdin() {
     'insert_column_break',
     'setup_columns',
   ]);
-  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS, ...APPEND_TABLE_OPS, ...SETUP_DOC_OPS, ...APPEND_IMAGE_OPS]);
+  // APPEND_IMAGE_OPS removed from RAW_PATCH_OPS — image add goes through
+  // the standard rhwp emit path (Hop-equivalent: doc.fromBytes →
+  // insertPicture → exportHwp). Our raw-patch image-cluster synthesis
+  // matches Hop's bytes 99% but fails Hancom Docs's render check due to
+  // an as-yet-unidentified cascading DocInfo reference. Going through
+  // rhwp's emit produces the exact bytes Hop produces.
+  const RAW_PATCH_OPS = new Set([...CELL_OPS, ...REPLACE_TEXT_OPS, ...APPEND_PARA_OPS, ...APPEND_TABLE_OPS, ...SETUP_DOC_OPS]);
   // TEMP HYPOTHESIS TEST: force rhwp emit path to check whether sheetjs
   // CFB.write was the only Hancom-Docs reject cause. If FORCE_RHWP_EMIT=1
   // is set, bypass raw-patch and run everything through HANDLERS + exportHwp.
@@ -1684,12 +1690,72 @@ async function readStdin() {
       }
       const imageOps = ops.filter((o) => APPEND_IMAGE_OPS.has(o.type));
       if (imageOps.length > 0) {
-        // Prefer cloning the user file's own image cluster if it has one
-        // — then every paraShape / charShape / BorderFill reference
-        // resolves against the same DocInfo. Pass no _templateBytes so
-        // appendImageBodyControl falls through to filePath as template.
+        // Generate a fresh image-bearing .hwp via rhwp (createBlankDocument
+        // + insertText 'x' + insertPicture + exportHwp) for each image op.
+        // The synthesized cluster will:
+        //   - take the entire fresh paragraph cluster (clean, correct
+        //     CTRL_HEADER size / SHAPE_COMPONENT body / CTRL_DATA, valid
+        //     PARA_LINE_SEG for the image height)
+        //   - rewrite paraShape / charShape IDs to point at the user
+        //     file's existing image paragraph (ktx-style: paraShape=29
+        //     for the nested image paragraph #11)
+        const rhwp = (await import("./vendor/rhwp/rhwp.js"));
+        if (!globalThis.__rhwp_loaded_for_template) {
+          await rhwp.default({
+            module_or_path: fs.readFileSync(
+              path.resolve(path.dirname(new URL(import.meta.url).pathname), "vendor/rhwp/rhwp_bg.wasm")
+            ),
+          });
+          if (typeof globalThis.measureTextWidth !== "function") {
+            globalThis.measureTextWidth = (font, text) =>
+              text.length * (parseFloat(font) || 10) * 0.55;
+          }
+          globalThis.__rhwp_loaded_for_template = true;
+        }
+        const opsWithTemplate = [];
+        for (const op of imageOps) {
+          const imgPath = path.resolve(op.path);
+          if (!fs.existsSync(imgPath)) throw new Error(`append_image: file not found: ${imgPath}`);
+          const imgBytes = fs.readFileSync(imgPath);
+          const ext = (path.extname(imgPath).slice(1) || "png").toLowerCase();
+          const CM_TO_HWPUNIT = 2835;
+          const widthCm = op.width_cm || 12;
+          const heightCm = op.height_cm || widthCm * 0.66;
+          const widthHwp = Math.round(widthCm * CM_TO_HWPUNIT);
+          const heightHwp = Math.round(heightCm * CM_TO_HWPUNIT);
+          let nativePxW = 0, nativePxH = 0;
+          if (ext === "png" && imgBytes.length >= 24 && imgBytes.readUInt32BE(12) === 0x49484452) {
+            nativePxW = imgBytes.readUInt32BE(16);
+            nativePxH = imgBytes.readUInt32BE(20);
+          }
+          const naturalW = nativePxW || Math.max(1, Math.round(widthHwp / 75));
+          const naturalH = nativePxH || Math.max(1, Math.round(heightHwp / 75));
+          // Use the standard create.js append_image flow (the one the
+          // baseline `fresh_image_100px.hwp` came from — Hancom Docs
+          // verified). startNewParagraph + insertPicture produces the
+          // PARA_LINE_SEG layout cache (vertSize=900, the text-default
+          // height) that Hancom expects; the bare insertText+insertPicture
+          // shortcut sets vertSize=imageHeight which Hancom Docs renders
+          // as an empty frame.
+          const freshDoc = rhwp.HwpDocument.createEmpty();
+          freshDoc.createBlankDocument();
+          freshDoc.beginBatch();
+          // Mirror HANDLERS.append_image: splitParagraph to ensure
+          // dedicated paragraph, then insertPicture at offset 0.
+          // splitParagraph isn't exposed cleanly — emulate by inserting
+          // a real paragraph break (insertText \r) so insertPicture
+          // attaches to a fresh paragraph the same way the real handler
+          // does.
+          freshDoc.insertText(0, 0, 0, "x");
+          freshDoc.splitParagraph?.(0, 0, 1);  // optional — only if exposed
+          freshDoc.insertPicture(0, 1, 0, new Uint8Array(imgBytes), widthHwp, heightHwp, naturalW, naturalH, ext, "");
+          freshDoc.endBatch();
+          const templateBytes = Buffer.from(freshDoc.exportHwp());
+          freshDoc.free();
+          opsWithTemplate.push({ ...op, _templateBytes: templateBytes });
+        }
         const { appendImageInPlace } = await import("./cell-patch.js");
-        const iSummary = await appendImageInPlace(outPath, imageOps);
+        const iSummary = await appendImageInPlace(outPath, opsWithTemplate);
         subModes.push(`image:${iSummary.mode || "in-place"}`);
         for (const e of iSummary) allEdits.push({ kind: "image", ...e });
       }

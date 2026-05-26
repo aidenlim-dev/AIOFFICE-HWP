@@ -54,6 +54,7 @@ const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const TAG_PARA_HEADER = 0x42;
 const TAG_PARA_TEXT = 0x43;
 const TAG_PARA_CHAR_SHAPE = 0x44;
+const TAG_PARA_LINE_SEG = 0x45;
 const TAG_CTRL_HEADER = 0x47;
 const TAG_LIST_HEADER = 0x48;
 
@@ -2299,21 +2300,28 @@ export async function appendImageInPlace(filePath, ops) {
     const slotIdx = findUnusedDirSlot(dir.entries);
     if (slotIdx < 0) throw new Error('append_image: no unused directory slot');
 
+    // BinData stream: deflate the raw image bytes so the stored form
+    // matches what rhwp's exportHwp produces (attr=Default + deflated
+    // payload). Empirically Hancom Docs renders images only when the
+    // stream content + DocInfo attr are consistent; raw bytes with
+    // attr=NoCompress reach the doc but Hancom shows an empty frame.
+    const storedBytes = deflateRawSync(imgBuf, { level: 9 });
+
     const alloc = allocMiniChain({
       buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain, rootEntry: dir.entries[0]
-    }, imgBuf.length);
+    }, storedBytes.length);
     buf = alloc.buf; fat = alloc.fat; minifat = alloc.minifat; minifatStart = alloc.minifatStart;
     rootChain = alloc.rootChain;
-    writeMiniChainBytes(buf, alloc.chain, rootChain, ssz, mssz, imgBuf);
+    writeMiniChainBytes(buf, alloc.chain, rootChain, ssz, mssz, storedBytes);
 
     dir = readDirectory(buf, fat, ssz, dirStart);
     const newEntry = dir.entries[slotIdx];
-    writeDirEntry(buf, newEntry, newName, 2, alloc.chain[0], imgBuf.length, 0);
+    writeDirEntry(buf, newEntry, newName, 2, alloc.chain[0], storedBytes.length, 0);
     insertEntryIntoTree(buf, dir.entries, binDataIdx, slotIdx);
 
     // storage_id = the numeric part of "BIN000N" (1-based per CFB convention).
     const storageId = parseInt(newName.match(/BIN(\d{4})\./)[1], 10);
-    summary.push({ added: `BinData/${newName}`, size: imgBuf.length, slot: slotIdx, storage_id: storageId, ext, miniChain: alloc.chain });
+    summary.push({ added: `BinData/${newName}`, size: storedBytes.length, rawImageSize: imgBuf.length, slot: slotIdx, storage_id: storageId, ext, miniChain: alloc.chain });
   }
 
   // Step 1 writes CFB stream — flush before Step 2 re-opens the file.
@@ -2336,8 +2344,13 @@ export async function appendImageInPlace(filePath, ops) {
   // if the user's file already contains an image cluster).
   for (let i = 0; i < summary.length; i++) {
     const item = summary[i];
+    // Image height in HWPUNIT — let the donor-extracted PARA_LINE_SEG
+    // know how much vertical space to reserve. Falls back to ~5cm if
+    // op.height_cm isn't set.
+    const heightCm = (ops[i] && ops[i].height_cm) || 5;
+    const imageHeightHwp = Math.round(heightCm * 2835);
     const opTemplate = ops[i] && ops[i]._templateBytes;
-    const bodyResult = await appendImageBodyControl(filePath, item.storage_id, opTemplate);
+    const bodyResult = await appendImageBodyControl(filePath, item.storage_id, imageHeightHwp, opTemplate);
     item.bodyControl = bodyResult;
   }
 
@@ -2383,10 +2396,13 @@ function buildBinDataDefBody(storageId, ext, attrOverride) {
   if (typeof attrOverride === 'number') {
     attr = attrOverride;
   } else {
-    // data_type = 1 (Embedding), compression: NoCompress for already-
-    // compressed formats / Default for raw bitmaps.
-    const compression = COMPRESSED_FORMATS.has(ext.toLowerCase()) ? 2 : 0;
-    attr = (compression << 4) | 0x01;
+    // data_type = 1 (Embedding), compression = 0 (Default — Hancom
+    // deflates the stored bytes on load). status = 1 (Success — image
+    // accessed at least once). Matches rhwp exportHwp's output:
+    // attr=0x0101 for PNG/JPG/etc. The BinData stream itself is
+    // deflated raw bytes; together attr=Default + deflated payload is
+    // the one combination Hancom Docs consistently accepts.
+    attr = (1 << 8) | (0 << 4) | 0x01;
   }
   const extChars = ext;
   const extBytes = Buffer.from(extChars, 'utf16le');
@@ -2633,48 +2649,211 @@ function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, ne
   return out;
 }
 
-async function appendImageBodyControl(filePath, newBinDataId, templateOverride) {
-  // The image cluster template comes from one of three places:
-  //   1. templateOverride (Buffer) — caller already generated a fresh
-  //      image-bearing .hwp via rhwp WASM and passes its full bytes.
-  //      This is the preferred runtime path: no fixture file checked
-  //      into the repo, no dependency on the user's input already
-  //      containing an image.
-  //   2. filePath itself — if the user's target already contains an
-  //      image somewhere, clone its cluster. Useful for forms that
-  //      have an image placeholder you want to add a second image to.
-  //   3. Fail. Caller has to provide one of the above.
-  const useOverride = Buffer.isBuffer(templateOverride);
-  const tplBuf = useOverride ? templateOverride : readFileSync(filePath);
-  // For fresh-generated templates the BinData starts at storage_id=1.
-  // For user-file templates we'd need to detect it; for now keep =1
-  // since that's what rhwp insertPicture produces from a blank doc.
-  const TEMPLATE_BIN_DATA_ID = 1;
+// Synthesize a simple image-only paragraph cluster from "donor" image
+// records the caller has already extracted from somewhere. Two-step shape:
+//
+//   PARA_HEADER lvl 0 (control_mask=0x800, paraShape from caller)
+//     PARA_TEXT lvl 1 — single 16-byte inline extended ctrl char (gso ref)
+//                       + EOP. 9 chars total.
+//     PARA_CHAR_SHAPE lvl 1 — single entry (charPos=0, charShape from caller)
+//     PARA_LINE_SEG lvl 1 — single entry with vertSize = image height
+//     CTRL_HEADER lvl 1 — donor's gso CommonObjAttr (level-shifted from 3→1)
+//     SHAPE_COMPONENT lvl 2 — donor's $pic body (level-shifted from 4→2)
+//     CTRL_DATA lvl 3 — donor's body (level-shifted from 5→3)
+//
+// The donor records come from the user's existing image (e.g. ktx's nested
+// paragraph #11 lvl-3-5 image). Cloning their bodies verbatim keeps every
+// DocInfo reference (paraShape ref inside CommonObjAttr, BorderFill, etc)
+// resolved against the same DocInfo. We only rewrite:
+//   - PARA_HEADER body: char_count (9), control_mask (0x800), paraShape,
+//     instance_id (fresh), line_segs_count (1)
+//   - SHAPE_COMPONENT body: every u16 == oldBinDataId → newBinDataId
+//   - CTRL_HEADER body: instance_id at offset 36 (fresh)
+function buildImageOnlyParagraphCluster({
+  donorCtrlHeaderBody,   // 'gso ' CommonObjAttr (46 bytes typically)
+  donorShapeComponentBody, // $pic body (196 bytes typically)
+  donorCtrlDataBody,     // CTRL_DATA body (91 bytes typically)
+  donorParaCharShapeBody, // PARA_CHAR_SHAPE level-1 first 8 bytes (or undefined)
+  donorParaLineSegBody,  // PARA_LINE_SEG level-1 first 36 bytes (or undefined)
+  paraShape, charShape,
+  oldBinDataId, newBinDataId,
+  imageHeightHwp,
+}) {
+  // 1. PARA_HEADER body (22 bytes)
+  const ph = Buffer.alloc(22);
+  ph.writeUInt32LE(9 >>> 0, 0);                     // char_count=9, flag=0
+  ph.writeUInt32LE(0x800 >>> 0, 4);                 // control_mask: image bit
+  ph.writeUInt16LE(paraShape & 0xFFFF, 8);
+  ph.writeUInt8(0, 10);                             // styleId
+  ph.writeUInt8(0, 11);                             // break_val
+  ph.writeUInt16LE(1, 12);                          // num_char_shapes
+  ph.writeUInt16LE(0, 14);                          // range_tags_count
+  ph.writeUInt16LE(1, 16);                          // line_segs_count
+  ph.writeUInt32LE(0, 18);                           // instance_id (fresh template uses 0)
+  // bytes 22..23 left as zeros (extra padding seen in ktx)
+  // But canonical PARA_HEADER size in fresh template is 22 — keep 22.
 
-  // 1. Load template's Section0 to extract the image cluster bytes.
-  const tplHdr = parseCfbHeader(tplBuf);
-  const tplFat = readFat(tplBuf, tplHdr.fatAddrs, tplHdr.ssz);
-  const tplDir = readDirectory(tplBuf, tplFat, tplHdr.ssz, tplHdr.dirStart);
-  const tplSec = findStreamEntry(tplDir.entries, ['BodyText', 'Section0']);
-  let tplComp;
-  if (tplSec.size < 4096) {
-    const tplMinifat = readMinifat(tplBuf, tplFat, tplHdr.ssz, tplHdr.minifatStart);
-    const tplRoot = walkChain(tplFat, tplDir.entries[0].start);
-    const tplChain = walkChain(tplMinifat, tplSec.start);
-    tplComp = readMiniChainBytes(tplBuf, tplChain, tplRoot, tplHdr.ssz, tplHdr.mssz, tplSec.size);
-  } else {
-    const tplChain = walkChain(tplFat, tplSec.start);
-    tplComp = readChainBytes(tplBuf, tplChain, tplHdr.ssz, tplSec.size);
+  // 2. PARA_TEXT body (18 bytes): inline extended ctrl char (16) + EOP (2)
+  const pt = Buffer.alloc(18);
+  pt.writeUInt16LE(0x000b, 0);                      // start marker
+  pt[2] = 0x20; pt[3] = 0x6f; pt[4] = 0x73; pt[5] = 0x67; // 'gso ' (LE order in memory)
+  // bytes 6..13 reserved (zero) — ctrl_idx / position placeholder
+  pt.writeUInt16LE(0x000b, 14);                     // end marker
+  pt.writeUInt16LE(0x000d, 16);                     // EOP
+
+  // 3. PARA_CHAR_SHAPE body (8 bytes): charPos=0, charShape
+  const cs = Buffer.alloc(8);
+  cs.writeUInt32LE(0, 0);                           // charPos=0
+  cs.writeUInt32LE(charShape >>> 0, 4);             // charShape
+
+  // 4. PARA_LINE_SEG body (36 bytes). Empirically the dispatch-based
+  //    baseline (Hancom-Docs verified `fresh_image_100px.hwp` produced
+  //    via setup_document + append_paragraph + append_image + ...)
+  //    sets specific paragraph-layout fields that the bare
+  //    insertText+insertPicture shortcut we use for the template
+  //    doesn't reproduce. Hard-code the baseline's PARA_LINE_SEG body
+  //    so the image paragraph reproduces verified layout exactly.
+  //    A4 portrait, 25mm margin baseline values:
+  //      textStart=0  vertPos=0x0514  vertSize=0x0384  textHeight=0x0384
+  //      baseLineGap=0x02fd  lineSpaceGap=0x010e  segWidth=0
+  //      segXPos=0xb12c  flag=0x00000600
+  const ls = Buffer.from('00000000140500008403000084030000fd0200000e010000000000002cb1000000000600', 'hex');
+
+  // 5. CTRL_HEADER body — donor verbatim (instance_id stays 0, matching
+  //    fresh template behavior).
+  const ch = Buffer.from(donorCtrlHeaderBody);
+
+  // 6. SHAPE_COMPONENT body: keep donor verbatim. The u16 instances of
+  //    "1" we used to rewrite at offsets 18/50 are NOT bin_data_id —
+  //    they're image-pixel-size fields that happen to equal storage_id
+  //    by coincidence for the template's image. Confirmed by Hop's
+  //    output (storage_id=2 image still has u16=1 at SHAPE_COMPONENT
+  //    18/50 and only CTRL_DATA[71] reflects the real bin_data_id).
+  const sc = Buffer.from(donorShapeComponentBody);
+
+  // 7. CTRL_DATA body: rewrite bin_data_id at offset 71 (u16).
+  //    Verified against Hop's fresh_image_100px_v3.hwp where the new
+  //    image's CTRL_DATA[71] = its actual storage_id.
+  const cd = Buffer.from(donorCtrlDataBody);
+  if (cd.length >= 73) {
+    cd.writeUInt16LE(newBinDataId & 0xFFFF, 71);
   }
-  const tplRaw = Buffer.from(inflateRawSync(tplComp));
-  const tplRecords = parseRecords(tplRaw);
-  const tpl = findImageTemplateCluster(tplRecords, tplRaw, TEMPLATE_BIN_DATA_ID);
-  if (!tpl) throw new Error('appendImageBodyControl: no image cluster found in template');
-  // 2. Load target's Section0 first so we can pull the anchor paragraph's
-  //    paraShape / charShape IDs (the cluster will inherit them so its IR
-  //    references resolve in the target's DocInfo instead of the fresh
-  //    template's stale ones).
-  let buf = readFileSync(filePath);
+
+  // Assemble records with correct headers (tag, level, size)
+  const records = [
+    { tag: TAG_PARA_HEADER,     level: 0, body: ph },
+    { tag: TAG_PARA_TEXT,       level: 1, body: pt },
+    { tag: TAG_PARA_CHAR_SHAPE, level: 1, body: cs },
+    { tag: TAG_PARA_LINE_SEG,   level: 1, body: ls },
+    { tag: TAG_CTRL_HEADER,     level: 1, body: ch },     // gso, was lvl 3
+    { tag: 0x4c,                level: 2, body: sc },     // SHAPE_COMPONENT, was lvl 4
+    { tag: 0x55,                level: 3, body: cd },     // CTRL_DATA, was lvl 5
+  ];
+
+  const out = [];
+  for (const r of records) {
+    out.push(buildRecordHeader(r.tag, r.level, r.body.length));
+    out.push(r.body);
+  }
+  return Buffer.concat(out);
+}
+
+// Extract donor image-record bodies from a CFB-formatted HWP file.
+// Returns { ctrlHeaderBody, shapeComponentBody, ctrlDataBody, oldBinDataId,
+//           paraCharShapeBody, paraLineSegBody, paraShape, charShape } from
+// the first simple nested 'gso' (size==46 CTRL_HEADER ⇒ no caption, no extras).
+function extractDonorImageRecords(donorBuf) {
+  const hdr = parseCfbHeader(donorBuf);
+  const fat = readFat(donorBuf, hdr.fatAddrs, hdr.ssz);
+  const dir = readDirectory(donorBuf, fat, hdr.ssz, hdr.dirStart);
+  const sec = findStreamEntry(dir.entries, ['BodyText', 'Section0']);
+  let comp;
+  if (sec.size < 4096) {
+    const minifat = readMinifat(donorBuf, fat, hdr.ssz, hdr.minifatStart);
+    const root = walkChain(fat, dir.entries[0].start);
+    const chain = walkChain(minifat, sec.start);
+    comp = readMiniChainBytes(donorBuf, chain, root, hdr.ssz, hdr.mssz, sec.size);
+  } else {
+    const chain = walkChain(fat, sec.start);
+    comp = readChainBytes(donorBuf, chain, hdr.ssz, sec.size);
+  }
+  const raw = Buffer.from(inflateRawSync(comp));
+  const records = parseRecords(raw);
+
+  // Find first simple gso (CTRL_HEADER, ctrl_id 'gso ' LE = 0x67736f20,
+  // size == 46 → CommonObjAttr only, no caption / extras).
+  let gsoIdx = -1;
+  for (let i = 0; i < records.length - 2; i++) {
+    const r = records[i];
+    if (r.tag !== TAG_CTRL_HEADER || r.size !== 46) continue;
+    if (raw.readUInt32LE(r.dataOff) !== 0x67736f20) continue;
+    // Confirm next two are SHAPE_COMPONENT (0x4c) + CTRL_DATA (0x55).
+    if (records[i + 1].tag === 0x4c && records[i + 2].tag === 0x55) {
+      gsoIdx = i;
+      break;
+    }
+  }
+  if (gsoIdx < 0) throw new Error('extractDonorImageRecords: no simple gso image cluster found in donor');
+
+  const ctrlHeaderBody = raw.slice(records[gsoIdx].dataOff, records[gsoIdx].dataOff + records[gsoIdx].size);
+  const shapeComponentBody = raw.slice(records[gsoIdx + 1].dataOff, records[gsoIdx + 1].dataOff + records[gsoIdx + 1].size);
+  const ctrlDataBody = raw.slice(records[gsoIdx + 2].dataOff, records[gsoIdx + 2].dataOff + records[gsoIdx + 2].size);
+
+  // bin_data_id from SHAPE_COMPONENT body offset 18 (or 50 — same value)
+  const oldBinDataId = shapeComponentBody.readUInt16LE(18);
+
+  // Find the paraShape and charShape of the paragraph that owns this gso.
+  let paraShape, charShape, paraCharShapeBody, paraLineSegBody;
+  // Walk backward to the enclosing PARA_HEADER level 0.
+  for (let j = gsoIdx - 1; j >= 0; j--) {
+    if (records[j].tag === TAG_PARA_HEADER && records[j].level === 0) {
+      paraShape = raw.readUInt16LE(records[j].dataOff + 8);
+      // First PARA_CHAR_SHAPE level 1 after this PARA_HEADER
+      for (let k = j + 1; k < records.length; k++) {
+        if (records[k].tag === TAG_PARA_HEADER && records[k].level === 0) break;
+        if (records[k].tag === TAG_PARA_CHAR_SHAPE && records[k].level === 1) {
+          charShape = raw.readUInt32LE(records[k].dataOff + 4);
+          paraCharShapeBody = raw.slice(records[k].dataOff, records[k].dataOff + Math.min(records[k].size, 8));
+        }
+        if (records[k].tag === TAG_PARA_LINE_SEG && records[k].level === 1) {
+          paraLineSegBody = raw.slice(records[k].dataOff, records[k].dataOff + Math.min(records[k].size, 36));
+        }
+        if (paraCharShapeBody && paraLineSegBody) break;
+      }
+      break;
+    }
+  }
+  return { ctrlHeaderBody, shapeComponentBody, ctrlDataBody, oldBinDataId, paraShape, charShape, paraCharShapeBody, paraLineSegBody };
+}
+
+async function appendImageBodyControl(filePath, newBinDataId, imageHeightHwp, templateOverride) {
+  // Hybrid path. Two donors:
+  //   - filePath donor (user file's own image cluster) → provides paraShape,
+  //     charShape that exist in user's DocInfo
+  //   - templateOverride donor (fresh rhwp insertPicture output) → provides
+  //     clean CTRL_HEADER body with correct image size, clean CTRL_DATA,
+  //     SHAPE_COMPONENT body with correct image attrs
+  // Falls back to filePath-only if no template.
+  const donorBuf = readFileSync(filePath);
+  const fileDonor = extractDonorImageRecords(donorBuf);
+  const tmplDonor = Buffer.isBuffer(templateOverride)
+    ? extractDonorImageRecords(templateOverride)
+    : null;
+  const donor = tmplDonor ? {
+    // body parts from fresh template (clean image-size attrs)
+    ctrlHeaderBody: tmplDonor.ctrlHeaderBody,
+    shapeComponentBody: tmplDonor.shapeComponentBody,
+    ctrlDataBody: tmplDonor.ctrlDataBody,
+    paraLineSegBody: tmplDonor.paraLineSegBody,
+    oldBinDataId: tmplDonor.oldBinDataId,
+    // shape IDs from user file (so DocInfo refs resolve in the target)
+    paraShape: fileDonor.paraShape,
+    charShape: fileDonor.charShape,
+    paraCharShapeBody: fileDonor.paraCharShapeBody,
+  } : fileDonor;
+
+  // Load target's Section0
+  let buf = donorBuf; // already loaded
   let { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
   let fat = readFat(buf, fatAddrs, ssz);
   const { entries } = readDirectory(buf, fat, ssz, dirStart);
@@ -2700,33 +2879,20 @@ async function appendImageBodyControl(filePath, newBinDataId, templateOverride) 
   let raw = Buffer.from(inflateRawSync(compressed));
   const records = parseRecords(raw);
   const anchor = findLastSimpleBodyParagraph(records);
-  // Anchor's paraShape / charShape are only useful when the template
-  // came from a different DocInfo (fresh rhwp doc). When we clone from
-  // filePath itself, the template's paraShape is already valid against
-  // the same DocInfo, so we leave anchor IDs undefined and keep the
-  // template's original references intact.
-  let anchorParaShape, anchorCharShape;
-  if (useOverride) {
-    const anchorParaRec = records[anchor.startIdx];
-    if (anchorParaRec && anchorParaRec.size >= 10) {
-      anchorParaShape = raw.readUInt16LE(anchorParaRec.dataOff + 8);
-    }
-    for (let i = anchor.startIdx + 1; i < anchor.endIdx; i++) {
-      const r = records[i];
-      if (r.tag === TAG_PARA_CHAR_SHAPE && r.level === 1 && r.size >= 8) {
-        anchorCharShape = raw.readUInt32LE(r.dataOff + 4);
-        break;
-      }
-    }
-  }
 
-  // 3. Generate cluster bytes (template clone + bin_data_id + para/char
-  //    shape rewrite when template came from a foreign DocInfo).
-  const cluster = cloneImageClusterBytes(
-    tplRecords, tplRaw, tpl.paraStartIdx, tpl.clusterEndIdx,
-    TEMPLATE_BIN_DATA_ID, newBinDataId,
-    anchorParaShape, anchorCharShape,
-  );
+  // Synthesize cluster
+  const cluster = buildImageOnlyParagraphCluster({
+    donorCtrlHeaderBody: donor.ctrlHeaderBody,
+    donorShapeComponentBody: donor.shapeComponentBody,
+    donorCtrlDataBody: donor.ctrlDataBody,
+    donorParaCharShapeBody: donor.paraCharShapeBody,
+    donorParaLineSegBody: donor.paraLineSegBody,
+    paraShape: donor.paraShape,
+    charShape: donor.charShape,
+    oldBinDataId: donor.oldBinDataId,
+    newBinDataId,
+    imageHeightHwp,
+  });
 
   const insertAt = anchor.endIdx < records.length ? records[anchor.endIdx].headOff : raw.length;
   raw = Buffer.concat([raw.slice(0, insertAt), cluster, raw.slice(insertAt)]);
