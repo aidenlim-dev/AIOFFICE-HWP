@@ -40,7 +40,7 @@ When the user says "preview", they almost always mean "show me the file" — sta
 | Inspect structure (pages, sections, tables) | `node scripts/extract_text.js --inspect <file>` |
 | Create new document from scratch | `echo '{"path":"out.hwp","operations":[...]}' \| node scripts/create.js` |
 | Edit existing `.hwpx` | `echo '{"path":"f.hwpx","operations":[...]}' \| node scripts/hwpx-edit.js` (op vocab in `references/hwpx-edit-ops.md`) |
-| Edit existing `.hwp` (HWP 5.0 binary) | convert to `.hwpx` via `convert.js` first, then `hwpx-edit.js` |
+| Edit existing `.hwp` | `echo '{"path":"f.hwp","operations":[...]}' \| node scripts/create.js` (raw-patch via `cell-patch.js` — byte-level in-place, preserves tables, Hancom-Docs compatible) |
 | Convert `.hwp` ↔ `.hwpx` | `node scripts/convert.js <input> <output>` |
 | Validate output | `python scripts/validate.py <file.hwpx>` |
 | Preview file (Desktop = inline pane, CLI = browser link, cowork = drop-in viewer URL) | See Preview section for the surface decision rule |
@@ -50,7 +50,7 @@ When the user says "preview", they almost always mean "show me the file" — sta
 ## Format primer
 
 - **`.hwpx`** — ZIP container holding XML. Same archetype as `.docx`. Use the unpack/edit/pack workflow. Internal layout includes `Contents/section0.xml` (body), `Contents/header.xml` (styles, fonts), `Contents/content.hpf` (manifest). See `references/hwpx-format.md`.
-- **`.hwp`** — HWP 5.0 binary (CFB/OLE container). NOT a ZIP. Direct XML editing is impossible. For edits, convert to `.hwpx` via `convert.js`. For read-only operations, `extract_text.js` handles binary `.hwp` transparently via the rhwp WASM library.
+- **`.hwp`** — HWP 5.0 binary (CFB/OLE container). NOT a ZIP. Direct XML editing is impossible, but **byte-level in-place editing via `cell-patch.js`** lets you do text replace, cell content changes, paragraph/table append, page setup, and Phase A styling (text & paragraph) while keeping the original bytes intact (Hancom-Docs compatible). `extract_text.js` handles binary `.hwp` transparently for read.
 
 When in doubt about format, read the first two bytes — `PK` indicates ZIP (treat as HWPX even if extension is `.hwp`).
 
@@ -152,25 +152,27 @@ Inline `**bold**` and `*italic*` are parsed automatically inside `text` and tabl
 
 **Known limitations** (rhwp serializer constraints — applies to anything emitted via this skill):
 
-- **HWPX tables are dropped by rhwp's `exportHwpx()`**. If a doc has tables, write `.hwp` and (if HWPX is required) round-trip through Hancom Office or 한컴독스 to re-emit the table XML. `convert.js` won't help — it goes through the same rhwp serializer.
-- **HWP→HWPX downconversion is lossy** (tables, images, complex shapes). Default to `.hwp` for tables; default to `.hwpx` only when the document is text-heavy.
+- **`.hwpx` from-scratch drops tables**: rhwp's `exportHwpx()` strips tables when `create.js` writes a fresh `.hwpx` or `convert.js` runs `.hwp → .hwpx`. For a new `.hwpx` with tables, write `.hwp` instead — or start from an existing `.hwpx` with tables and add/edit via `hwpx-edit.js` (`insert_table`, cell ops). **Editing an existing `.hwpx` preserves its tables in place.**
+- **`.hwp ↔ .hwpx` conversion via `convert.js` is lossy** (tables, images, complex shapes can break). Editing in the original format (`.hwp` raw-patch / `.hwpx` XML edit) keeps everything intact — only run `convert.js` when the user explicitly asks for a format change.
 - **`replace_text` doesn't see table cells** (see op table above). For table-cell edits on an existing file, the `set_cell_text*` ops are the only path.
+- **Big-form (50+ page) in-place `apply_text_style` / `apply_paragraph_style`** is not yet supported. The styling ops route through rhwp emit, which works for new documents and small files but fails Hancom-Docs validation on large existing forms — covered by a planned raw-patch CharShape extension.
 
 ### "Edit this document" / "Replace X with Y" / "Add a new paragraph"
 
-There are **two editing paths** with different capabilities. Pick by checking the input file extension AND whether the edit touches a table.
+**Edit in the input's original format.** `.hwp` stays `.hwp`, `.hwpx` stays `.hwpx` — both paths preserve tables, both are Hancom-Docs compatible, no conversion needed.
 
 #### Decision rule
 
-| Input | Edit touches a table cell? | Use |
-|-------|----------------------------|-----|
-| `.hwpx` | yes or no | **Path A** — `hwpx-edit.js` ops (fallback: unpack/edit/pack) |
-| `.hwp` | no (body text / paragraph only) | **Path A** — convert to `.hwpx` first, then `hwpx-edit.js`. Save back to `.hwp` only if required. |
-| `.hwp` | **yes** | **Path B** — wasm op vocab on the original `.hwp`. Do NOT convert: rhwp's hwp→hwpx step drops tables. |
+| Input | Use | What's available |
+|-------|-----|------------------|
+| `.hwpx` | **`hwpx-edit.js`** | text · paragraph · table (`insert_table`, cell content/background/border/diagonal/align/size, row/column, merge) · image (insert/replace/delete) · char & paragraph styling · header/footer · page break · bullet/number lists (style: korean/decimal, custom bullet glyph) · footnote/endnote · hyperlink |
+| `.hwp` | **`create.js`** (raw-patch via `cell-patch.js`) | set_cell_text · replace_text · append_paragraph/heading/table/list/break · setup_document · apply_text_style · apply_paragraph_style |
 
 Detect format by reading the first two bytes — `PK` = HWPX (treat as `.hwpx` regardless of extension).
 
-#### Path A — `.hwpx` editing via `hwpx-edit.js` (preferred)
+Conversion between formats (`.hwp ↔ .hwpx`) is a **separate** tool — only use when the user explicitly requests a format change. It goes through rhwp's serializer which drops tables.
+
+#### `.hwpx` editing — `hwpx-edit.js`
 
 `scripts/hwpx-edit.js` applies deterministic, named operations to a `.hwpx` directly on its OWPML XML — no hand-editing. Pipe a JSON payload to stdin: one ZIP load, N ops applied in order, one save. It mirrors `create.js`'s stdin-JSON shape.
 
@@ -188,10 +190,10 @@ echo '{
 
 Returns JSON `{ ok, output, results: [...] }`. The whole batch is **atomic** — if any op errors, nothing is saved and the error names the failing op index. `output` defaults to `<input>_edited.hwpx`; pass `"output": "<same path>"` to overwrite in place.
 
-The full operation vocabulary (text, paragraph, table row/column/merge, char & paragraph styling, image insert/replace/delete, field) is documented in **`references/hwpx-edit-ops.md`** — read it before composing a payload. Table/paragraph indices are **document-order, 0-based**; discover them with `extract_text.js --inspect` and `--format markdown`.
+The full operation vocabulary (text · paragraph · table including `insert_table` + cell content/background/border/diagonal/align/size + row/column + merge · char/paragraph styling · image insert/replace/delete · header/footer · page break · bullet/number lists · footnote/endnote · hyperlink · field) is documented in **`references/hwpx-edit-ops.md`** — read it before composing a payload. Table/paragraph indices are **document-order, 0-based**; discover them with `extract_text.js --inspect` and `--format markdown`.
 
 Notes:
-- `hwpx-edit.js` is **`.hwpx` only** — it rejects `.hwp` with a clear error. Use Path B (or convert first) for `.hwp`.
+- `hwpx-edit.js` is **`.hwpx` only** — it rejects `.hwp` with a clear error. Use the `.hwp` path (next section) for `.hwp` input.
 - It strips the stale `<hp:linesegarray>` cache on paragraphs/rows it rebuilds, so Hancom relayouts correctly on open (no manual lineseg surgery needed).
 - It keeps `mimetype` stored-uncompressed and bumps `itemCnt` on `hh:charProperties` / `hh:paraProperties` when adding styles, so output stays Hancom-strict-valid.
 
@@ -203,16 +205,9 @@ Notes:
 3. Repack: `python scripts/pack.py /tmp/unpacked/ output.hwpx --original path/to/file.hwpx`
 4. Validate: `python scripts/validate.py output.hwpx`
 
-**When the input is `.hwp` but the edit doesn't touch tables**: convert first, then run `hwpx-edit.js` on the result.
-```bash
-node scripts/convert.js input.hwp /tmp/converted.hwpx
-# edit /tmp/converted.hwpx with hwpx-edit.js, then if .hwp output is required:
-node scripts/convert.js out.hwpx final.hwp
-```
+#### `.hwp` editing — `create.js` (raw-patch via `cell-patch.js`)
 
-#### Path B — `.hwp` wasm ops (only path for in-place table-cell edits)
-
-When the input is `.hwp` and a table cell needs to change, the hwpx round-trip drops the whole table — wasm op vocab is the only safe route. The flow is the same as create.js's normal flow, just on an existing file:
+For `.hwp` input, route through `create.js`. When the path already exists and the first op is NOT `setup_document`, `create.js` loads the file and dispatches `RAW_PATCH_OPS` (set_cell_text · replace_text · append_paragraph/heading/table/list/break · setup_document · apply_text_style · apply_paragraph_style) through `cell-patch.js` for **byte-level in-place editing** — the original bytes stay intact, only the modified records are patched, and the output is Hancom-Docs compatible (verified). No `.hwp → .hwpx` conversion involved, so tables are preserved end-to-end.
 
 1. Write a JSON op script and pipe it into `create.js`. Because the path already exists and the first op is NOT `setup_document`, create.js loads the existing file:
    ```bash
@@ -233,7 +228,7 @@ When the input is `.hwp` and a table cell needs to change, the hwpx round-trip d
 
 4. **Auto-preview after writes.** Per the trigger guidance below, fire `preview_start` / `preview_eval` immediately after the write so the user sees the edit, instead of asking them to verify.
 
-**Output format default**: save edits as `.hwpx`. The HWPX format is the modern Hangul Office standard and avoids the lossy round-trip back to HWP 5.0 binary. Only convert back to `.hwp` if the user explicitly requires HWP 5.0 output (use `node scripts/convert.js output.hwpx final.hwp` and warn that some formatting may be lost).
+**Output format default**: **keep the input's original format**. `.hwp` in → `.hwp` out (raw-patch via `cell-patch.js`, tables preserved). `.hwpx` in → `.hwpx` out (XML edit via `hwpx-edit.js`, tables preserved). Use `convert.js` only when the user explicitly requests a `.hwp ↔ .hwpx` format change — it routes through rhwp's serializer which drops tables.
 
 ### "Show me what this looks like" / "Preview this HWP file"
 
