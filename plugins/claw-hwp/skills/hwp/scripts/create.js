@@ -1319,21 +1319,20 @@ function buildParaFormatProps(input) {
       anyBorderRequested = true;
     }
   }
-  // Fill — paragraph background. Always emit fillType + fillColor so a
-  // freshly-appended paragraph's apply_paragraph_style call clears any
-  // bg leaked from the previous paragraph via splitParagraph (e.g.,
-  // para N has background_color:#f5f5f5, para N+1 inherits it). Default
-  // = solid white = rhwp's "no visible fill". Explicit `background_color:
-  // false` also resets to white.
+  // Fill — paragraph background.
   const bg = input.background_color ?? input.backgroundColor ?? input.fillColor;
-  props.fillType = "solid";
-  props.fillColor = (bg && bg !== false) ? normalizeHexColor(bg) : "#ffffff";
-  // Since fillType is always set, ALWAYS force zero borders on
-  // un-specified sides — rhwp's applyParaFormat auto-enables type:1
-  // (solid) width:0 borders whenever a fill is set, which Hancom Docs
-  // renders as thin stripes. Explicit zero borders kill that.
-  for (const [, rhwpKey] of sides) {
-    if (!(rhwpKey in props)) props[rhwpKey] = { type: 0, width: 0, color: "#000000" };
+  if (bg) {
+    props.fillType = "solid";
+    props.fillColor = normalizeHexColor(bg);
+  }
+  // If fill is set OR any border was explicitly requested, force the
+  // un-requested sides to ZERO so rhwp's auto-border-on-fill quirk and
+  // any cross-side bleed (the same "force all four sides" comment in
+  // applyParaBorders) are neutralized.
+  if (bg || anyBorderRequested) {
+    for (const [, rhwpKey] of sides) {
+      if (!(rhwpKey in props)) props[rhwpKey] = { type: 0, width: 0, color: "#000000" };
+    }
   }
   return props;
 }
