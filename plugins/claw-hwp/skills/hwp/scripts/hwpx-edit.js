@@ -33,8 +33,8 @@
 //   set_cell_align        { table, row, col, horizontal?, vertical? }      // horiz = LEFT/CENTER/RIGHT/JUSTIFY/DISTRIBUTE, vert = TOP/CENTER/BOTTOM
 //   set_cell_size         { table, row, col, width?, height? }             // HWP units
 //   set_page_break        { index, on? }                                   // sets <hp:p pageBreak="1"> before paragraph index
-//   set_bullet_list       { index, level? }                                // makes paragraph a bullet (•) list item
-//   set_number_list       { index, level? }                                // makes paragraph a numbered (1.) list item
+//   set_bullet_list       { index, char?, level? }                        // bullet (• default; char="▶"|"◯"|"□"|"★" etc. registers a new bullet entry)
+//   set_number_list       { index, level? }                                // numbered list — level 0..3 cycles 1./가./1)/가) formats automatically
 //   clear_list            { index }                                        // removes list formatting
 //   apply_text_style      { target, color?, bold?, italic?, underline?, size?, highlight?, strikethrough?, supscript?, subscript?, fontFace? }
 //   apply_paragraph_style { index, align?, indent?, lineSpacing? }
@@ -771,14 +771,56 @@ function opSetPageBreak(doc, index, on) {
   return { index, pageBreak: want === '1' };
 }
 
+// Look up a <hh:bullet> by its `char` attribute, or append a new one to
+// <hh:bullets> and return its id. char="▶" / "◯" / "□" / "★" all work —
+// Hancom Docs reads the char and renders it. When `char` is empty/missing,
+// returns "1" (the default idRef every standard doc carries).
+function ensureBullet(doc, char) {
+  if (!char) return '1';
+  const headerName = doc.headerName();
+  if (!headerName) throw new Error('ensureBullet: Contents/header.xml missing');
+  let header = doc.read(headerName);
+  const headBody = `<hh:paraHead level="0" align="LEFT" useInstWidth="0" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="DIGIT" charPrIDRef="4294967295" checkable="0"/>`;
+  const list = scanTopLevel(header, 'hh:bullets')[0];
+  if (!list) {
+    // Doc has no <hh:bullets> at all — create one (positioned right after
+    // <hh:numberings>, the way Hancom Docs lays out its standard headers).
+    // id=1 always exists in Hancom's stock bullets; we mirror that with the
+    // first explicit-char entry getting id=2.
+    const defaultBullet = `<hh:bullet id="1" char="" useImage="0">${headBody}</hh:bullet>`;
+    const newId = '2';
+    const newBullet = `<hh:bullet id="${newId}" char="${char}" useImage="0">${headBody}</hh:bullet>`;
+    const block = `<hh:bullets itemCnt="2">${defaultBullet}${newBullet}</hh:bullets>`;
+    let newHeader;
+    if (/<\/hh:numberings>/.test(header)) {
+      newHeader = header.replace(/(<\/hh:numberings>)/, `$1${block}`);
+    } else {
+      // Last-resort: drop right before </hh:head>.
+      newHeader = header.replace(/(<\/hh:head>)/, `${block}$1`);
+    }
+    doc.write(headerName, newHeader);
+    return newId;
+  }
+  for (const b of scanTopLevel(list.inner, 'hh:bullet')) {
+    if (getAttr(b.attrs, 'char') === char) return getAttr(b.attrs, 'id');
+  }
+  const ids = scanTopLevel(list.inner, 'hh:bullet').map((b) => Number(getAttr(b.attrs, 'id') || 0));
+  const newId = String(Math.max(0, ...ids) + 1);
+  const newBullet = `<hh:bullet id="${newId}" char="${char}" useImage="0">${headBody}</hh:bullet>`;
+  let newHeader = spliceEl(header, list, `<hh:bullets${list.attrs}>${list.inner + newBullet}</hh:bullets>`);
+  newHeader = bumpListCount(newHeader, 'hh:bullets', +1);
+  doc.write(headerName, newHeader);
+  return newId;
+}
+
 // Bullet / numbered list — Hancom's mechanism is a paraPr with
 //   <hh:heading type="BULLET|NUMBER" idRef="N" level="L"/>
-// retargeting the paragraph's paraPrIDRef. The bullet character / number
-// format itself lives in <hh:bullets>/<hh:numberings> (idRef=1 is the
-// standard default already present in every standard doc — we don't create
-// new ones). type="NONE" clears the list by removing the heading element
-// from a new paraPr clone (or pointing at one without a heading).
-function opSetParagraphList(doc, index, type, level) {
+// retargeting the paragraph's paraPrIDRef. For NUMBER, level=0/1/2/3 cycles
+// through Hancom's default numbering formats (1./가./1)/가)). For BULLET,
+// idRef points into <hh:bullets>; we keep the default id=1 unless `char` is
+// supplied, in which case we register (or reuse) a bullet entry for that
+// glyph. type="NONE" clears the list by stripping the heading element.
+function opSetParagraphList(doc, index, type, level, options) {
   const t = String(type || '').toUpperCase();
   if (!['BULLET', 'NUMBER', 'NONE'].includes(t)) throw new Error('set_paragraph_list: type must be BULLET / NUMBER / NONE');
   const lvl = Number(level || 0);
@@ -788,6 +830,13 @@ function opSetParagraphList(doc, index, type, level) {
 
   const headerName = doc.headerName();
   if (!headerName) throw new Error('set_paragraph_list: Contents/header.xml missing');
+
+  // ensureBullet may mutate header.xml — call it FIRST so subsequent header
+  // reads (for paraPrs) see the new bullets list. Doing it after caching
+  // `header` made the trailing doc.write blow away the bullets change.
+  const bulletChar = options && options.char ? String(options.char) : '';
+  const bulletId = t === 'BULLET' ? ensureBullet(doc, bulletChar) : '1';
+
   let header = doc.read(headerName);
   const paraPrs = scanTopLevel(header, 'hh:paraPr');
 
@@ -801,7 +850,7 @@ function opSetParagraphList(doc, index, type, level) {
   if (t === 'NONE') {
     wantInner = base.inner.replace(/<hh:heading\b[^/]*\/>/g, '');
   } else {
-    const heading = `<hh:heading type="${t}" idRef="1" level="${lvl}"/>`;
+    const heading = `<hh:heading type="${t}" idRef="${bulletId}" level="${lvl}"/>`;
     if (/<hh:heading\b[^/]*\/>/.test(base.inner)) {
       wantInner = base.inner.replace(/<hh:heading\b[^/]*\/>/, heading);
     } else {
@@ -1482,7 +1531,7 @@ function applyOp(doc, op) {
     case 'set_cell_align': return opSetCellAlign(doc, op.table, op.row, op.col, op.horizontal, op.vertical);
     case 'set_cell_size': return opSetCellSize(doc, op.table, op.row, op.col, op.width, op.height);
     case 'set_page_break': return opSetPageBreak(doc, op.index, op.on);
-    case 'set_bullet_list': return opSetParagraphList(doc, op.index, 'BULLET', op.level);
+    case 'set_bullet_list': return opSetParagraphList(doc, op.index, 'BULLET', op.level, { char: op.char });
     case 'set_number_list': return opSetParagraphList(doc, op.index, 'NUMBER', op.level);
     case 'clear_list': return opSetParagraphList(doc, op.index, 'NONE', 0);
     case 'apply_text_style': return opApplyTextStyle(doc, op.target, op);
