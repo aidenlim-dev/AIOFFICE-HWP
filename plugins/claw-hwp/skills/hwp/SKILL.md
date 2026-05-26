@@ -135,6 +135,8 @@ Errors come back as `{"status": "error", "message": "...", "op_index": N}`. Alwa
 > - **Targeting**: `apply_text_style` finds the **first body-text occurrence** of `target` (top-level paragraphs only — table cells, headers, footers, footnotes not yet searched). For multiple occurrences, use a longer unique substring or apply once at a time. Cell styling: Phase B work item.
 > - **`font_family`** works for any installed font (e.g., "맑은 고딕", "함초롬돋움", "굴림", "바탕", "Arial"). Internally the op calls `rhwp.findOrCreateFontId(name)` to register the font in DocInfo's FACE_NAME table (all 7 language scripts at once), then writes `fontIds: [id × 7]` on the CharShape. If the name resolves to a valid ID, Hancom Docs renders with that font; if not (negative ID return), it silently falls back to the default `함초롬바탕`. There is no built-in shape-check — the font must exist on the reader's system for the glyphs to render correctly, but the file's CharShape will carry the requested name either way.
 > - **`apply_paragraph_style` index aliases**: pass `index: "last"` (or `-1`) to target the most recently appended paragraph. Useful when intermediate `append_heading` / `append_paragraph` ops would otherwise force you to count: just append + style + repeat.
+> - **Hancom Docs renderer limits (writes ride through but the web viewer ignores them):**
+>   - **`emphasis_dot`** (강조점) — written into CharShape; Hancom Office Desktop renders it, but **한컴독스 (web/cloud) silently drops it**. Use sparingly if 한컴독스 is the primary reader.
 
 *In-place editing (run on an existing file — omit `setup_document` so create.js loads the path instead of starting blank):*
 
