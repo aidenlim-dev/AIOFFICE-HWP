@@ -27,6 +27,11 @@
 //   delete_table_column   { table, col }
 //   merge_cells           { table, mode: "horizontal"|"vertical", row|col, start, count }
 //   insert_table          { index, rows, cols, cells? }  // appends a new table paragraph after paragraph `index` (use -1 to prepend)
+//   set_cell_background   { table, row, col, color }
+//   set_cell_border       { table, row, col, color, width?, sides? }
+//   set_cell_diagonal     { table, row, col, direction, color?, width? }   // direction = BACKSLASH | SLASH
+//   set_cell_align        { table, row, col, horizontal?, vertical? }      // horiz = LEFT/CENTER/RIGHT/JUSTIFY/DISTRIBUTE, vert = TOP/CENTER/BOTTOM
+//   set_cell_size         { table, row, col, width?, height? }             // HWP units
 //   apply_text_style      { target, color?, bold?, italic?, underline?, size?, highlight?, strikethrough?, supscript?, subscript?, fontFace? }
 //   apply_paragraph_style { index, align?, indent?, lineSpacing? }
 //   insert_image          { source, ext?, width?, height? }
@@ -566,6 +571,201 @@ function opInsertTable(doc, index, rows, cols, cells) {
     doc.write(target.section, xml.slice(0, target.el.end) + newPara + xml.slice(target.el.end));
   }
   return { inserted: true, rows, cols, afterIndex: index };
+}
+
+// ── cell-level styling ──────────────────────────────────────────────────────
+//
+// Hancom Docs stores per-cell background / border / diagonal NOT on the
+// <hp:tc> itself but as <hp:cellzone> entries inside an <hp:cellzoneList>
+// child of <hp:tbl> (sitting between the table's meta and its <hp:tr> rows).
+// Each cellzone maps a (startRow, startCol)–(endRow, endCol) area to a
+// borderFillIDRef. The referenced <hh:borderFill> in header.xml carries the
+// fill brush, side borders, and slash/backSlash diagonals. We mirror that
+// pattern: build/find the right borderFill in header.xml, then append one
+// cellzone to the table.
+//
+// Vertical align lives on the cell's <hp:subList vertAlign=>, horizontal
+// align on the cell's first <hp:p> paraPrIDRef (rewritten through a
+// paraPr clone-mutate in header.xml), and sizing on <hp:cellSz>. None of
+// these touch cellzoneList.
+
+const PLAIN_SIDES = `<hh:leftBorder type="SOLID" width="0.12 mm" color="#000000"/><hh:rightBorder type="SOLID" width="0.12 mm" color="#000000"/><hh:topBorder type="SOLID" width="0.12 mm" color="#000000"/><hh:bottomBorder type="SOLID" width="0.12 mm" color="#000000"/>`;
+const NONE_SIDES = `<hh:leftBorder type="NONE" width="0.12 mm" color="#000000"/><hh:rightBorder type="NONE" width="0.12 mm" color="#000000"/><hh:topBorder type="NONE" width="0.12 mm" color="#000000"/><hh:bottomBorder type="NONE" width="0.12 mm" color="#000000"/>`;
+const DEFAULT_DIAG = `<hh:diagonal type="SOLID" width="0.1 mm" color="#000000"/>`;
+const STD_SLASH_NONE = `<hh:slash type="NONE" Crooked="0" isCounter="0"/><hh:backSlash type="NONE" Crooked="0" isCounter="0"/>`;
+const BF_ATTRS = ' threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0"';
+
+function normHex(c) { return `#${String(c).replace(/^#/, '').toUpperCase()}`; }
+
+// Find an existing borderFill whose serialized inner matches `wantInner`,
+// or append a new one and return its id. Bumps <hh:borderFills@itemCnt>.
+function ensureBorderFill(doc, wantInner) {
+  const headerName = doc.headerName();
+  if (!headerName) throw new Error('cell style: Contents/header.xml missing');
+  let header = doc.read(headerName);
+  const list = scanTopLevel(header, 'hh:borderFills')[0];
+  if (!list) throw new Error('cell style: <hh:borderFills> missing in header.xml');
+  const existing = scanTopLevel(list.inner, 'hh:borderFill');
+  for (const bf of existing) {
+    if (bf.inner === wantInner) return getAttr(bf.attrs, 'id');
+  }
+  const newId = String(Math.max(0, ...existing.map((b) => Number(getAttr(b.attrs, 'id') || 0))) + 1);
+  const newBf = `<hh:borderFill id="${newId}"${BF_ATTRS}>${wantInner}</hh:borderFill>`;
+  let newHeader = spliceEl(header, list, `<hh:borderFills${list.attrs}>${list.inner + newBf}</hh:borderFills>`);
+  newHeader = bumpListCount(newHeader, 'hh:borderFills', +1);
+  doc.write(headerName, newHeader);
+  return newId;
+}
+
+function addCellzone(doc, tableIndex, row, col, borderFillId) {
+  const { section, el } = getTable(doc, tableIndex);
+  const inner = el.inner;
+  const zone = `<hp:cellzone startRowAddr="${row}" startColAddr="${col}" endRowAddr="${row}" endColAddr="${col}" borderFillIDRef="${borderFillId}"/>`;
+  const lists = scanTopLevel(inner, 'hp:cellzoneList');
+  let newInner;
+  if (lists.length) {
+    const cz = lists[0];
+    newInner = spliceEl(inner, cz, `<hp:cellzoneList>${cz.inner + zone}</hp:cellzoneList>`);
+  } else {
+    // cellzoneList sits between the table's meta children and the first <hp:tr>.
+    const firstTr = inner.indexOf('<hp:tr');
+    if (firstTr < 0) throw new Error('cell style: table has no rows');
+    newInner = inner.slice(0, firstTr) + `<hp:cellzoneList>${zone}</hp:cellzoneList>` + inner.slice(firstTr);
+  }
+  const newTbl = `<hp:tbl${el.attrs}>${newInner}</hp:tbl>`;
+  doc.write(section, spliceEl(doc.read(section), el, newTbl));
+}
+
+function opSetCellBackground(doc, tableIndex, row, col, color) {
+  const c = normHex(color);
+  const brush = `<hh:fillBrush><hc:winBrush faceColor="${c}" hatchColor="#999999" alpha="0"/></hh:fillBrush>`;
+  const bfId = ensureBorderFill(doc, STD_SLASH_NONE + PLAIN_SIDES + brush);
+  addCellzone(doc, tableIndex, row, col, bfId);
+  return { table: tableIndex, row, col, color: c, borderFillId: bfId };
+}
+
+function opSetCellBorder(doc, tableIndex, row, col, color, width, sides) {
+  const c = normHex(color);
+  const w = width || '0.3 mm';
+  const want = (sides && sides.length) ? new Set(sides.map((s) => s.toUpperCase())) : new Set(['LEFT', 'RIGHT', 'TOP', 'BOTTOM']);
+  const side = (name) => want.has(name.toUpperCase())
+    ? `<hh:${name.toLowerCase()}Border type="SOLID" width="${w}" color="${c}"/>`
+    : `<hh:${name.toLowerCase()}Border type="SOLID" width="0.12 mm" color="#000000"/>`;
+  const sidesXml = side('left') + side('right') + side('top') + side('bottom');
+  const inner = STD_SLASH_NONE + sidesXml + DEFAULT_DIAG;
+  const bfId = ensureBorderFill(doc, inner);
+  addCellzone(doc, tableIndex, row, col, bfId);
+  return { table: tableIndex, row, col, color: c, width: w, sides: [...want], borderFillId: bfId };
+}
+
+function opSetCellDiagonal(doc, tableIndex, row, col, direction, color, width) {
+  const dir = String(direction || 'BACKSLASH').toUpperCase();
+  if (dir !== 'BACKSLASH' && dir !== 'SLASH') throw new Error('set_cell_diagonal: direction must be "BACKSLASH" or "SLASH"');
+  const c = normHex(color || '#000000');
+  const w = width || '0.3 mm';
+  const slashes = dir === 'BACKSLASH'
+    ? `<hh:slash type="NONE" Crooked="0" isCounter="0"/><hh:backSlash type="CENTER" Crooked="0" isCounter="0"/>`
+    : `<hh:slash type="CENTER" Crooked="0" isCounter="0"/><hh:backSlash type="NONE" Crooked="0" isCounter="0"/>`;
+  const diagonal = `<hh:diagonal type="SOLID" width="${w}" color="${c}"/>`;
+  const inner = slashes + NONE_SIDES + diagonal;
+  const bfId = ensureBorderFill(doc, inner);
+  addCellzone(doc, tableIndex, row, col, bfId);
+  return { table: tableIndex, row, col, direction: dir, color: c, borderFillId: bfId };
+}
+
+function opSetCellAlign(doc, tableIndex, row, col, horizontal, vertical) {
+  const { section, el } = getTable(doc, tableIndex);
+  const rows = scanTopLevel(el.inner, 'hp:tr');
+  if (row < 0 || row >= rows.length) throw new Error(`set_cell_align: row ${row} out of range`);
+  const tcs = scanTopLevel(rows[row].inner, 'hp:tc');
+  if (col < 0 || col >= tcs.length) throw new Error(`set_cell_align: col ${col} out of range`);
+  const tc = tcs[col];
+  let tcInner = tc.inner;
+
+  // Vertical → <hp:subList vertAlign="TOP|CENTER|BOTTOM">
+  if (vertical) {
+    const v = String(vertical).toUpperCase();
+    if (!['TOP', 'CENTER', 'BOTTOM'].includes(v)) throw new Error('set_cell_align: vertical must be TOP/CENTER/BOTTOM');
+    tcInner = tcInner.replace(/(<hp:subList\b[^>]*?\svertAlign=")[^"]+(")/, `$1${v}$2`);
+  }
+
+  // Horizontal → rewrite first <hp:p>'s paraPrIDRef to a paraPr with the
+  // requested align. Uses the same clone-and-bump pattern as
+  // apply_paragraph_style. Falls through quietly if no horizontal arg.
+  let paraInfo = null;
+  if (horizontal) {
+    const align = String(horizontal).toUpperCase();
+    if (!['LEFT', 'CENTER', 'RIGHT', 'JUSTIFY', 'DISTRIBUTE'].includes(align)) {
+      throw new Error('set_cell_align: horizontal must be LEFT/CENTER/RIGHT/JUSTIFY/DISTRIBUTE');
+    }
+    const headerName = doc.headerName();
+    if (!headerName) throw new Error('set_cell_align: Contents/header.xml missing');
+    let header = doc.read(headerName);
+    const paraPrs = scanTopLevel(header, 'hh:paraPr');
+    if (!paraPrs.length) throw new Error('set_cell_align: no <hh:paraPr> in header.xml');
+    const subs = scanTopLevel(tcInner, 'hp:subList');
+    if (!subs.length) throw new Error('set_cell_align: cell has no <hp:subList>');
+    const ps = scanTopLevel(subs[0].inner, 'hp:p');
+    if (!ps.length) throw new Error('set_cell_align: cell has no <hp:p>');
+    const p = ps[0];
+    const srcParaRef = (p.attrs.match(/paraPrIDRef="(\d+)"/) || [, '0'])[1];
+    const base = paraPrs.find((pr) => getAttr(pr.attrs, 'id') === srcParaRef) || paraPrs[0];
+    // placeholder reuse — same Hancom-native trick as charPr ops.
+    const refCounts = {};
+    for (const name of doc.sectionNames()) {
+      for (const m of doc.read(name).matchAll(/paraPrIDRef="(\d+)"/g)) {
+        refCounts[m[1]] = (refCounts[m[1]] || 0) + 1;
+      }
+    }
+    const placeholder = paraPrs.find((pr) => (refCounts[getAttr(pr.attrs, 'id')] || 0) === 0 && getAttr(pr.attrs, 'id') !== srcParaRef);
+    const useId = placeholder ? getAttr(placeholder.attrs, 'id')
+                              : String(Math.max(...paraPrs.map((pr) => Number(getAttr(pr.attrs, 'id') || 0))) + 1);
+    let mutAttrs = base.attrs.replace(/\s*id="\d+"/, ` id="${useId}"`);
+    let mutInner = base.inner;
+    const alignXml = `<hh:align horizontal="${align}" vertical="BASELINE"/>`;
+    mutInner = /<hh:align [^>]*\/>/.test(mutInner) ? mutInner.replace(/<hh:align [^>]*\/>/, alignXml) : alignXml + mutInner;
+    const updated = `<hh:paraPr${mutAttrs}>${mutInner}</hh:paraPr>`;
+    header = placeholder
+      ? spliceEl(header, placeholder, updated)
+      : bumpListCount(spliceEl(header, base, `<hh:paraPr${base.attrs}>${base.inner}</hh:paraPr>` + updated), 'hh:paraProperties', +1);
+    doc.write(headerName, header);
+    // Retarget the cell paragraph's paraPrIDRef in tcInner
+    const newPOpen = p.attrs.replace(/paraPrIDRef="\d+"/, `paraPrIDRef="${useId}"`);
+    const newP = `<hp:p${newPOpen}>${p.inner}</hp:p>`;
+    const newSubInner = spliceEl(subs[0].inner, p, newP);
+    const newSub = `<hp:subList${subs[0].attrs}>${newSubInner}</hp:subList>`;
+    tcInner = spliceEl(tcInner, subs[0], newSub);
+    paraInfo = { paraPrId: useId, basedOn: srcParaRef, placeholderReused: Boolean(placeholder) };
+  }
+
+  const newTc = `<hp:tc${tc.attrs}>${tcInner}</hp:tc>`;
+  const newRowInner = spliceEl(rows[row].inner, tc, newTc);
+  const newRow = `<hp:tr${rows[row].attrs}>${newRowInner}</hp:tr>`;
+  const newTblInner = spliceEl(el.inner, rows[row], newRow);
+  const newTbl = `<hp:tbl${el.attrs}>${newTblInner}</hp:tbl>`;
+  doc.write(section, spliceEl(doc.read(section), el, newTbl));
+  return { table: tableIndex, row, col, horizontal: horizontal || null, vertical: vertical || null, ...(paraInfo || {}) };
+}
+
+function opSetCellSize(doc, tableIndex, row, col, width, height) {
+  const { section, el } = getTable(doc, tableIndex);
+  const rows = scanTopLevel(el.inner, 'hp:tr');
+  if (row < 0 || row >= rows.length) throw new Error(`set_cell_size: row ${row} out of range`);
+  const tcs = scanTopLevel(rows[row].inner, 'hp:tc');
+  if (col < 0 || col >= tcs.length) throw new Error(`set_cell_size: col ${col} out of range`);
+  const tc = tcs[col];
+  const csMatch = tc.inner.match(/<hp:cellSz width="(\d+)" height="(\d+)"\/>/);
+  if (!csMatch) throw new Error('set_cell_size: cell has no <hp:cellSz>');
+  const w = width !== undefined ? width : Number(csMatch[1]);
+  const h = height !== undefined ? height : Number(csMatch[2]);
+  const newInner = tc.inner.replace(/<hp:cellSz width="\d+" height="\d+"\/>/, `<hp:cellSz width="${w}" height="${h}"/>`);
+  const newTc = `<hp:tc${tc.attrs}>${newInner}</hp:tc>`;
+  const newRowInner = spliceEl(rows[row].inner, tc, newTc);
+  const newRow = `<hp:tr${rows[row].attrs}>${newRowInner}</hp:tr>`;
+  const newTblInner = spliceEl(el.inner, rows[row], newRow);
+  const newTbl = `<hp:tbl${el.attrs}>${newTblInner}</hp:tbl>`;
+  doc.write(section, spliceEl(doc.read(section), el, newTbl));
+  return { table: tableIndex, row, col, width: w, height: h };
 }
 
 // ── style operations (clone-mutate-retarget in header.xml) ───────────────────
@@ -1177,6 +1377,11 @@ function applyOp(doc, op) {
     case 'delete_table_column': return opDeleteTableColumn(doc, op.table, op.col);
     case 'merge_cells': return opMergeCells(doc, op.table, op.mode, op);
     case 'insert_table': return opInsertTable(doc, op.index, op.rows, op.cols, op.cells);
+    case 'set_cell_background': return opSetCellBackground(doc, op.table, op.row, op.col, op.color);
+    case 'set_cell_border': return opSetCellBorder(doc, op.table, op.row, op.col, op.color, op.width, op.sides);
+    case 'set_cell_diagonal': return opSetCellDiagonal(doc, op.table, op.row, op.col, op.direction, op.color, op.width);
+    case 'set_cell_align': return opSetCellAlign(doc, op.table, op.row, op.col, op.horizontal, op.vertical);
+    case 'set_cell_size': return opSetCellSize(doc, op.table, op.row, op.col, op.width, op.height);
     case 'apply_text_style': return opApplyTextStyle(doc, op.target, op);
     case 'apply_paragraph_style': return opApplyParagraphStyle(doc, op.index, op);
     case 'insert_image': return opInsertImage(doc, op.source, op.ext, op.width, op.height);
