@@ -1273,10 +1273,46 @@ function buildParaFormatProps(input) {
       props[camel] = !!input[flag];
     }
   }
+
+  // Borders. rhwp's applyParaFormat has a quirk: passing fillType:"solid"
+  // implicitly flips all four borders from type=0 (none) to type=1 (solid,
+  // width=0). Hancom Docs then renders those as thin lines around the
+  // paragraph — the "찌부" / boxed-in look. To kill it, we always emit
+  // explicit ZERO borders when the caller didn't request any. Callers can
+  // override per-side via border_top_pt / border_bottom_pt / etc.
+  const mkBorder = (pt, color) => ({
+    type: 1,
+    width: Math.max(1, Math.round(pt * 8)),
+    color: color || "#000000",
+  });
+  const borderColor = input.border_color;
+  const sides = [
+    ['border_top_pt', 'borderTop'],
+    ['border_bottom_pt', 'borderBottom'],
+    ['border_left_pt', 'borderLeft'],
+    ['border_right_pt', 'borderRight'],
+  ];
+  let anyBorderRequested = false;
+  for (const [opKey, rhwpKey] of sides) {
+    if (input[opKey] !== undefined) {
+      props[rhwpKey] = mkBorder(input[opKey], borderColor);
+      anyBorderRequested = true;
+    }
+  }
+  // Fill — paragraph background.
   const bg = input.background_color ?? input.backgroundColor ?? input.fillColor;
   if (bg) {
     props.fillType = "solid";
     props.fillColor = normalizeHexColor(bg);
+  }
+  // If fill is set OR any border was explicitly requested, force the
+  // un-requested sides to ZERO so rhwp's auto-border-on-fill quirk and
+  // any cross-side bleed (the same "force all four sides" comment in
+  // applyParaBorders) are neutralized.
+  if (bg || anyBorderRequested) {
+    for (const [, rhwpKey] of sides) {
+      if (!(rhwpKey in props)) props[rhwpKey] = { type: 0, width: 0, color: "#000000" };
+    }
   }
   return props;
 }
