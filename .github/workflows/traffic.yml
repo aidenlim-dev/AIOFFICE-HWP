@@ -6,6 +6,15 @@ on:
     # of data, so a daily cron captures the rolling window without gaps.
     - cron: "0 0 * * *"
   workflow_dispatch:
+  # Force a one-time run when this workflow file itself changes — newly
+  # merged workflows aren't fully indexed by GitHub until they execute
+  # at least once, so without this trigger `workflow_dispatch` and the
+  # initial `schedule` event get rejected with HTTP 500. Path filter is
+  # tight (only this file) so the workflow's own commits don't loop.
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/traffic.yml'
 
 permissions:
   contents: write
