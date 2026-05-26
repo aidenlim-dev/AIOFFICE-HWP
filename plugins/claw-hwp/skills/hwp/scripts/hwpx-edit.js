@@ -570,26 +570,82 @@ function opInsertTable(doc, index, rows, cols, cells) {
 
 // ── style operations (clone-mutate-retarget in header.xml) ───────────────────
 
-// Point the <hp:run> that actually CONTAINS the first <hp:t> holding `target`
-// at a new charPrIDRef. Returns the rewritten xml, or null if not found.
-// Uses a balanced run scan (not lastIndexOf) so an empty self-closing
-// <hp:run/> sitting just before the text node isn't mistaken for its parent —
-// the bug that styled an empty run and left the visible text unchanged.
-function retargetRunForText(xml, target, newId) {
+// Find the <hp:run> that actually CONTAINS the first <hp:t> holding `target`,
+// and return both the run element and its current charPrIDRef. The current
+// ref matters because apply_text_style now clones THAT charPr as the base
+// (instead of always charPr[0]) — keeping font / size / borderFill consistent
+// with the body context. A new charPr cloned from a mismatched base (e.g.
+// header style 0 cloned for body text using style 26) gets reinterpreted by
+// Hancom Docs on open and our additive attributes (shadeColor, strikeout)
+// are dropped along with it.
+//
+// Uses a balanced run scan so an empty self-closing <hp:run/> sitting just
+// before the text node isn't mistaken for its parent.
+function findRunForText(xml, target) {
   const tRe = new RegExp(`<hp:t(?:\\s[^>]*)?>[^<]*${escapeRegex(target)}`);
   for (const r of scanTopLevel(xml, 'hp:run')) {
-    if (r.selfClosing) continue;          // empty run, not a text container
-    if (r.inner.includes('<hp:tbl')) continue; // a table-wrapping run, not a leaf text run
+    if (r.selfClosing) continue;
+    if (r.inner.includes('<hp:tbl')) continue;
     if (!tRe.test(r.inner)) continue;
-    const newOpen = /charPrIDRef="\d+"/.test(r.attrs)
-      ? r.attrs.replace(/charPrIDRef="\d+"/, `charPrIDRef="${newId}"`)
-      : ` charPrIDRef="${newId}"${r.attrs}`;
-    return xml.slice(0, r.start) + `<hp:run${newOpen}>` + r.inner + '</hp:run>' + xml.slice(r.end);
+    const m = r.attrs.match(/charPrIDRef="(\d+)"/);
+    return { run: r, sourceRef: m ? m[1] : '0' };
   }
   return null;
 }
 
+function retargetRun(xml, run, newId) {
+  const newOpen = /charPrIDRef="\d+"/.test(run.attrs)
+    ? run.attrs.replace(/charPrIDRef="\d+"/, `charPrIDRef="${newId}"`)
+    : ` charPrIDRef="${newId}"${run.attrs}`;
+  return xml.slice(0, run.start) + `<hp:run${newOpen}>` + run.inner + '</hp:run>' + xml.slice(run.end);
+}
+
+// Highlight (마커펜 / 형광펜) in OWPML is an INLINE marker pair, not a
+// charPr attribute. Hancom Docs stores it as
+//   <hp:t>...<hp:markpenBegin color="#FFFF00"/>대상<hp:markpenEnd/>...</hp:t>
+// inside the existing <hp:t> node. We mirror that exactly: find the first
+// <hp:t> containing `target`, splice the marker tags around the target
+// substring. shadeColor on charPr is unrelated and Hancom ignores it for
+// highlighting purposes.
+function applyHighlight(doc, target, highlight) {
+  if (highlight === false || highlight === null) {
+    let stripped = 0;
+    for (const name of doc.sectionNames()) {
+      const xml = doc.read(name);
+      const next = xml.replace(/<hp:markpenBegin\b[^>]*\/>/g, '').replace(/<hp:markpenEnd\b[^>]*\/>/g, '');
+      if (next !== xml) { doc.write(name, dropLinesegs(next)); stripped += 1; }
+    }
+    return { highlight: false, sectionsStripped: stripped };
+  }
+  const color = highlight === true ? '#FFFF00' : `#${String(highlight).replace(/^#/, '')}`;
+  const begin = `<hp:markpenBegin color="${color}"/>`;
+  const end = `<hp:markpenEnd/>`;
+  const tRe = new RegExp(`(<hp:t(?:\\s[^>]*)?>)([^<]*?)(${escapeRegex(target)})([^<]*?)(</hp:t>)`);
+  for (const name of doc.sectionNames()) {
+    const xml = doc.read(name);
+    const m = xml.match(tRe);
+    if (!m) continue;
+    const at = m.index;
+    const newXml = xml.slice(0, at) + m[1] + m[2] + begin + m[3] + end + m[4] + m[5] + xml.slice(at + m[0].length);
+    doc.write(name, dropLinesegs(newXml));
+    return { highlight: color, retargeted: 1 };
+  }
+  return { highlight: color, retargeted: 0 };
+}
+
 function opApplyTextStyle(doc, target, style) {
+  // Highlight is an inline <hp:markpen> marker pair — processed independently
+  // of the charPr-based attributes below.
+  let highlightOut = null;
+  if (style.highlight !== undefined) {
+    highlightOut = applyHighlight(doc, target, style.highlight);
+  }
+  const charPrKeys = ['color', 'bold', 'italic', 'underline', 'size', 'strikethrough'];
+  const wantsCharPr = charPrKeys.some((k) => style[k] !== undefined);
+  if (!wantsCharPr) {
+    return highlightOut ? { target, ...highlightOut } : { target, retargeted: 0 };
+  }
+
   const headerName = doc.headerName();
   if (!headerName) throw new Error('apply_text_style: Contents/header.xml missing');
   const header = doc.read(headerName);
@@ -597,16 +653,17 @@ function opApplyTextStyle(doc, target, style) {
   if (!charPrs.length) throw new Error('apply_text_style: no <hh:charPr> in header.xml');
   const newId = String(Math.max(...charPrs.map((c) => Number(getAttr(c.attrs, 'id') || 0))) + 1);
 
-  // Retarget first — if the text isn't present, don't pollute header.xml.
-  let hitSection = null, hitXml = null;
+  // Locate the target run — if absent, don't pollute header.xml.
+  let hitSection = null, hitRun = null, sourceRef = null;
   for (const name of doc.sectionNames()) {
-    const next = retargetRunForText(doc.read(name), target, newId);
-    if (next) { hitSection = name; hitXml = next; break; }
+    const found = findRunForText(doc.read(name), target);
+    if (found) { hitSection = name; hitRun = found.run; sourceRef = found.sourceRef; break; }
   }
-  if (!hitSection) return { target, retargeted: 0 };
+  if (!hitSection) return highlightOut ? { target, ...highlightOut } : { target, retargeted: 0 };
 
-  // Clone charPr[0] → mutate → append to header.
-  const base = charPrs[0];
+  // Base = the charPr the run currently uses, NOT charPr[0]. Keeps the new
+  // charPr in the same font/size/borderFill family as the surrounding body.
+  const base = charPrs.find((c) => getAttr(c.attrs, 'id') === sourceRef) || charPrs[0];
   let attrs = base.attrs.replace(/\s*id="\d+"/, ` id="${newId}"`);
   let inner = base.inner;
   if (style.size) attrs = setOrAddAttr(attrs, 'height', String(style.size));
@@ -617,13 +674,6 @@ function opApplyTextStyle(doc, target, style) {
     inner = style.underline
       ? ensureChild(inner, '<hh:underline type="BOTTOM" shape="SOLID" color="#000000"/>', 'hh:underline')
       : inner.replace(/<hh:underline[^>]*\/>/g, '');
-  }
-  if (style.highlight !== undefined) {
-    // true → yellow (#FFFF00); false / null → 'none'; hex string → that color.
-    const c = style.highlight === true ? '#FFFF00'
-            : (style.highlight === false || style.highlight === null) ? 'none'
-            : `#${String(style.highlight).replace(/^#/, '')}`;
-    attrs = setOrAddAttr(attrs, 'shadeColor', c);
   }
   if (style.strikethrough !== undefined) {
     const shape = style.strikethrough ? 'SOLID' : 'NONE';
@@ -636,8 +686,8 @@ function opApplyTextStyle(doc, target, style) {
   let h2 = spliceEl(header, base, `<hh:charPr${base.attrs}>${base.inner}</hh:charPr>` + newCharPr);
   h2 = bumpListCount(h2, 'hh:charProperties', +1);
   doc.write(headerName, h2);
-  doc.write(hitSection, dropLinesegs(hitXml));
-  return { target, charPrId: newId, retargeted: 1 };
+  doc.write(hitSection, dropLinesegs(retargetRun(doc.read(hitSection), hitRun, newId)));
+  return { target, charPrId: newId, baseCharPrId: sourceRef, retargeted: 1, ...(highlightOut || {}) };
 }
 
 function opApplyParagraphStyle(doc, index, style) {
