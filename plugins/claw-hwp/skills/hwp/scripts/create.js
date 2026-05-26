@@ -349,12 +349,18 @@ function buildCharFormatProps(input = {}, defaults = {}) {
   if (input.emphasis_dot != null) props.emphasisDot = input.emphasis_dot;
   else if (input.emphasisDot != null) props.emphasisDot = input.emphasisDot;
 
-  // fontFamily — broadcast scalar to all 7 language slots so it applies
-  // uniformly. Caller can pass `fontFamilies: [...]` directly for
-  // language-specific control.
-  const fontFamily = input.font_family ?? input.fontFamily ?? defaults.font_family ?? defaults.fontFamily;
+  // fontFamily — rhwp's CharShape stores font references as IDs into a
+  // FACE_NAME table in DocInfo (DocInfo HWPTAG_FACE_NAME records).
+  // Passing fontFamilies as NAMES is silently ignored — the lookup
+  // falls back to the default "함초롬바탕" because new names aren't
+  // auto-registered. The correct field is `fontIds` (array of 7 u16
+  // IDs). Caller (writeRunsAt / apply_text_style handler) is responsible
+  // for resolving font_family → fontIds via doc.findOrCreateFontId()
+  // BEFORE calling this builder, and passing `fontIds` directly. The
+  // legacy `fontFamilies` name input is preserved here for back-compat
+  // but won't actually change the font.
+  if (Array.isArray(input.fontIds)) props.fontIds = input.fontIds;
   if (Array.isArray(input.fontFamilies)) props.fontFamilies = input.fontFamilies;
-  else if (fontFamily) props.fontFamilies = Array(7).fill(String(fontFamily));
 
   // letterSpacing — broadcast scalar to all 7 slots. rhwp prop is
   // `spacings`. Units: 1/100 em (HWP convention).
@@ -369,6 +375,23 @@ function buildCharFormatProps(input = {}, defaults = {}) {
   else if (charRatio != null) props.ratios = Array(7).fill(charRatio);
 
   return props;
+}
+
+// Resolve a font_family name → broadcast fontIds[7]. Registers the
+// font in DocInfo's FACE_NAME table if not already there (rhwp's
+// findOrCreateFontId handles dedup). Returns the same input shape but
+// with `fontIds` populated and `font_family` removed so downstream
+// builders don't try the silent-fallback name path.
+function resolveFontFamily(doc, input) {
+  if (!input) return input;
+  const name = input.font_family ?? input.fontFamily;
+  if (!name) return input;
+  const id = doc.findOrCreateFontId(String(name));
+  if (id < 0) return input;
+  const out = { ...input, fontIds: Array(7).fill(id) };
+  delete out.font_family;
+  delete out.fontFamily;
+  return out;
 }
 
 function normalizeHexColor(c) {
@@ -396,13 +419,20 @@ function writeRunsAt(doc, cursor, runs, defaults = {}) {
   //   - if neither set: fallback to 1000 HU (=10pt body)
   const baseFontSize = defaults.fontSize ?? 1000;
   let off = cursor.charOffset;
+  // Resolve any font_family on defaults once — defaults rarely change
+  // across runs, and registering the same font twice is a no-op via
+  // findOrCreateFontId's dedup.
+  const resolvedDefaults = resolveFontFamily(doc, defaults);
   for (const run of runs) {
     if (!run.text) continue;
     unwrap(
       doc.insertText(cursor.sec, cursor.para, off, run.text),
       "insertText",
     );
-    const props = buildCharFormatProps(run, defaults);
+    // Resolve per-run font_family (may differ from defaults) before
+    // handing to the prop builder.
+    const resolvedRun = resolveFontFamily(doc, run);
+    const props = buildCharFormatProps(resolvedRun, resolvedDefaults);
     if (props.fontSize == null) props.fontSize = baseFontSize;
     doc.applyCharFormat(
       cursor.sec,
@@ -1156,7 +1186,11 @@ const HANDLERS = {
     delete styleInput.type;
     delete styleInput.target;
     if (op.size != null && op.fontSize == null) styleInput.fontSize = op.size;
-    const props = buildCharFormatPropsForApply(styleInput);
+    // Resolve font_family → fontIds via rhwp's font registry. See
+    // resolveFontFamily and buildCharFormatProps for why this is
+    // necessary (rhwp ignores name-based font lookup in applyCharFormat).
+    const resolvedInput = resolveFontFamily(doc, styleInput);
+    const props = buildCharFormatPropsForApply(resolvedInput);
     if (Object.keys(props).length === 0) {
       throw new Error("apply_text_style: at least one style prop is required (bold/italic/underline/strikethrough/color/highlight/size/font_family/...)");
     }
@@ -1249,9 +1283,10 @@ function buildCharFormatPropsForApply(input) {
   if (input.emphasis_dot != null) props.emphasisDot = input.emphasis_dot;
   else if (input.emphasisDot != null) props.emphasisDot = input.emphasisDot;
 
-  const fontFamily = input.font_family ?? input.fontFamily;
+  // font_family is resolved to fontIds upstream via resolveFontFamily.
+  // See buildCharFormatProps for the rationale.
+  if (Array.isArray(input.fontIds)) props.fontIds = input.fontIds;
   if (Array.isArray(input.fontFamilies)) props.fontFamilies = input.fontFamilies;
-  else if (fontFamily) props.fontFamilies = Array(7).fill(String(fontFamily));
 
   const letterSpacing = input.letter_spacing ?? input.letterSpacing;
   if (Array.isArray(input.spacings)) props.spacings = input.spacings;
