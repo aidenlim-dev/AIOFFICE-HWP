@@ -464,20 +464,20 @@ function applyParaProps(doc, cursor, opts = {}) {
   const props = {
     alignment: alignMap[align] || "justify",
     pageBreakBefore: opts.pageBreakBefore ?? false,
-    // Reset fill back to neutral white. splitParagraph copies the prior
-    // paragraph's paraShape including fillType/fillColor — without this
-    // an apply_paragraph_style {background_color: ...} on para N bleeds
-    // into N+1, N+2, ... created by subsequent append_paragraph ops.
-    // White solid = rhwp's "no visible fill" default; the explicit
-    // borderTop/Bottom/Left/Right ZERO neutralizes the auto-border-on-
-    // fill quirk the same way buildParaFormatProps does for the apply
-    // path.
-    fillType: "solid",
-    fillColor: "#ffffff",
-    borderTop: { type: 0, width: 0, color: "#000000" },
-    borderBottom: { type: 0, width: 0, color: "#000000" },
-    borderLeft: { type: 0, width: 0, color: "#000000" },
-    borderRight: { type: 0, width: 0, color: "#000000" },
+    // NOTE: do NOT pass fillType / fillColor / border* here. rhwp's
+    // applyParaFormat serializes any fill or border touch as a NEW
+    // BorderFill record in DocInfo, AND its generated BorderFill has
+    // borderTop/Bottom/Left = type:1 (solid) width:0. Hancom Docs
+    // renders type:1 width:0 as a 1px line, so every paragraph that
+    // referenced that BorderFill gets thin horizontal stripes (the
+    // visual issue verified 2026-05-26). Leave default paragraphs
+    // pointing at the original blank-template BorderFill (clean,
+    // no-border, white-fill) by not touching fill/border fields at
+    // all. Side effect: apply_paragraph_style {background_color: ...}
+    // on paragraph N can bleed into a freshly appended N+1 via
+    // splitParagraph's paraShape copy — accept that as a smaller
+    // issue than stripes-on-every-paragraph; the user can always
+    // re-apply default fill on the next paragraph if it matters.
   };
   if (opts.lineSpacing != null) props.lineSpacing = opts.lineSpacing;
   if (opts.spacingBefore != null) props.spacingBefore = opts.spacingBefore;
