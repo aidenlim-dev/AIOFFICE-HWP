@@ -12,14 +12,7 @@ on:
       - '.github/workflows/traffic.yml'
 
 permissions:
-  contents: write       # commit refreshed JSON back to the repo
-  # traffic API requires the administration scope on the repo. Without it
-  # `gh api repos/.../traffic/clones` returns HTTP 403 (verified
-  # 2026-05-26 on run 26451176516). Default GITHUB_TOKEN only carries
-  # the scopes listed in `permissions:`, so we have to opt in explicitly.
-  # If GitHub still rejects this scope, fall back to a fine-grained PAT
-  # stored as a repo secret.
-  administration: read
+  contents: write   # commit refreshed JSON back to the repo
 
 jobs:
   update:
@@ -29,7 +22,14 @@ jobs:
 
       - name: Fetch traffic + write shields.io endpoint JSON
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Traffic API requires the repo `Administration: Read` scope,
+          # which the default GITHUB_TOKEN can NOT carry (it's admin-only).
+          # Set a fine-grained PAT as a repo secret named TRAFFIC_PAT —
+          # scoped to only this repo with `Administration: Read` (and
+          # `Contents: Read` so checkout works) — and the API call below
+          # gets the access it needs. Without the secret the gh call
+          # falls back to GITHUB_TOKEN and fails with 403.
+          GH_TOKEN: ${{ secrets.TRAFFIC_PAT || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p .github
