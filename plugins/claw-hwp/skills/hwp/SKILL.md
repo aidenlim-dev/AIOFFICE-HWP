@@ -152,7 +152,7 @@ Inline `**bold**` and `*italic*` are parsed automatically inside `text` and tabl
 
 **Known limitations** (rhwp serializer constraints — applies to anything emitted via this skill):
 
-- **HWPX tables are dropped by rhwp's `exportHwpx()`**. If a doc has tables, write `.hwp` and (if HWPX is required) round-trip through Hancom Office or 한컴독스 to re-emit the table XML. `convert.js` won't help — it goes through the same rhwp serializer.
+- **`.hwpx` from-scratch drops tables**: rhwp's `exportHwpx()` strips tables when `create.js` writes a fresh `.hwpx` or `convert.js` runs `.hwp → .hwpx`. For a new `.hwpx` with tables, write `.hwp` instead — or start from an existing `.hwpx` with tables and add/edit via `hwpx-edit.js` (`insert_table`, cell ops). **Editing an existing `.hwpx` preserves its tables in place.**
 - **`.hwp ↔ .hwpx` conversion via `convert.js` is lossy** (tables, images, complex shapes can break). Editing in the original format (`.hwp` raw-patch / `.hwpx` XML edit) keeps everything intact — only run `convert.js` when the user explicitly asks for a format change.
 - **`replace_text` doesn't see table cells** (see op table above). For table-cell edits on an existing file, the `set_cell_text*` ops are the only path.
 - **Big-form (50+ page) in-place `apply_text_style` / `apply_paragraph_style`** is not yet supported. The styling ops route through rhwp emit, which works for new documents and small files but fails Hancom-Docs validation on large existing forms — covered by a planned raw-patch CharShape extension.
@@ -165,7 +165,7 @@ Inline `**bold**` and `*italic*` are parsed automatically inside `text` and tabl
 
 | Input | Use | What's available |
 |-------|-----|------------------|
-| `.hwpx` | **`hwpx-edit.js`** | text/paragraph/table cell · row · column · merge · insert_table · char & paragraph styling · header/footer · bullet/number lists · footnote/endnote · hyperlink |
+| `.hwpx` | **`hwpx-edit.js`** | text · paragraph · table (`insert_table`, cell content/background/border/diagonal/align/size, row/column, merge) · image (insert/replace/delete) · char & paragraph styling · header/footer · page break · bullet/number lists (style: korean/decimal, custom bullet glyph) · footnote/endnote · hyperlink |
 | `.hwp` | **`create.js`** (raw-patch via `cell-patch.js`) | set_cell_text · replace_text · append_paragraph/heading/table/list/break · setup_document · apply_text_style · apply_paragraph_style |
 
 Detect format by reading the first two bytes — `PK` = HWPX (treat as `.hwpx` regardless of extension).
@@ -190,7 +190,7 @@ echo '{
 
 Returns JSON `{ ok, output, results: [...] }`. The whole batch is **atomic** — if any op errors, nothing is saved and the error names the failing op index. `output` defaults to `<input>_edited.hwpx`; pass `"output": "<same path>"` to overwrite in place.
 
-The full operation vocabulary (text, paragraph, table row/column/merge, char & paragraph styling, image insert/replace/delete, field) is documented in **`references/hwpx-edit-ops.md`** — read it before composing a payload. Table/paragraph indices are **document-order, 0-based**; discover them with `extract_text.js --inspect` and `--format markdown`.
+The full operation vocabulary (text · paragraph · table including `insert_table` + cell content/background/border/diagonal/align/size + row/column + merge · char/paragraph styling · image insert/replace/delete · header/footer · page break · bullet/number lists · footnote/endnote · hyperlink · field) is documented in **`references/hwpx-edit-ops.md`** — read it before composing a payload. Table/paragraph indices are **document-order, 0-based**; discover them with `extract_text.js --inspect` and `--format markdown`.
 
 Notes:
 - `hwpx-edit.js` is **`.hwpx` only** — it rejects `.hwp` with a clear error. Use the `.hwp` path (next section) for `.hwp` input.
