@@ -2265,6 +2265,23 @@ async function readStdin() {
 
   doc.endBatch();
 
+  // Force PARA_LINE_SEG regeneration before serialization. applyParaFormat
+  // and applyCharFormat update the paraShape / charShape records but
+  // don't invalidate the cached line layout — Hancom Docs renders based
+  // on PARA_LINE_SEG, so without this an apply_paragraph_style
+  // {align:center} on para 8 would update paraShape but the rendered
+  // line in Hancom would still show the old (justify) alignment from
+  // the cached lineseg. reflowLinesegs() walks every paragraph and
+  // regenerates the layout cache against the current shape state.
+  try {
+    const reflowed = doc.reflowLinesegs();
+    if (typeof reflowed === "number" && reflowed > 0) {
+      log.push(`reflowLinesegs: ${reflowed} paragraph(s) recomputed`);
+    }
+  } catch (err) {
+    log.push(`reflowLinesegs: skipped (${err.message})`);
+  }
+
   // Serialize and save based on extension.
   fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
   let bytes;
