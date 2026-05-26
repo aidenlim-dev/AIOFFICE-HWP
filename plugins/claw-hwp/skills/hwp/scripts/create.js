@@ -464,6 +464,20 @@ function applyParaProps(doc, cursor, opts = {}) {
   const props = {
     alignment: alignMap[align] || "justify",
     pageBreakBefore: opts.pageBreakBefore ?? false,
+    // Reset fill back to neutral white. splitParagraph copies the prior
+    // paragraph's paraShape including fillType/fillColor — without this
+    // an apply_paragraph_style {background_color: ...} on para N bleeds
+    // into N+1, N+2, ... created by subsequent append_paragraph ops.
+    // White solid = rhwp's "no visible fill" default; the explicit
+    // borderTop/Bottom/Left/Right ZERO neutralizes the auto-border-on-
+    // fill quirk the same way buildParaFormatProps does for the apply
+    // path.
+    fillType: "solid",
+    fillColor: "#ffffff",
+    borderTop: { type: 0, width: 0, color: "#000000" },
+    borderBottom: { type: 0, width: 0, color: "#000000" },
+    borderLeft: { type: 0, width: 0, color: "#000000" },
+    borderRight: { type: 0, width: 0, color: "#000000" },
   };
   if (opts.lineSpacing != null) props.lineSpacing = opts.lineSpacing;
   if (opts.spacingBefore != null) props.spacingBefore = opts.spacingBefore;
@@ -1163,14 +1177,20 @@ const HANDLERS = {
 
   apply_paragraph_style(doc, op, cursor) {
     if (op.index == null && op.paragraph == null) {
-      throw new Error("apply_paragraph_style: 'index' (paragraph index, 0-based) is required");
+      throw new Error("apply_paragraph_style: 'index' (paragraph index, 0-based) is required (use \"last\" or -1 to target the most recently appended paragraph)");
     }
     const sec = op.section ?? 0;
-    const idx = op.index ?? op.paragraph;
-    if (typeof idx !== "number" || idx < 0) {
-      throw new Error("apply_paragraph_style: 'index' must be a non-negative integer");
-    }
     const paraCount = doc.getParagraphCount(sec);
+    let idx = op.index ?? op.paragraph;
+    // "last" / -1 → the most recently appended paragraph in this
+    // section. Lets payloads stop counting headings/intros and just say
+    // "the paragraph I just added".
+    if (idx === "last" || idx === -1) {
+      idx = paraCount - 1;
+    }
+    if (typeof idx !== "number" || idx < 0) {
+      throw new Error(`apply_paragraph_style: 'index' must be a non-negative integer (or "last" / -1); got ${JSON.stringify(op.index)}`);
+    }
     if (idx >= paraCount) {
       throw new Error(`apply_paragraph_style: index ${idx} out of range (section ${sec} has ${paraCount} paragraphs)`);
     }
