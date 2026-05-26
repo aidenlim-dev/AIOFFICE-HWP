@@ -59,6 +59,7 @@ each table) or rely on `--inspect`'s `cellCount` and open the doc to confirm.
 | `append_table_column` | `table`, `cells` (string[], top→bottom) | Adds a cell to every row's end; updates `colCnt`. |
 | `delete_table_column` | `table`, `col` | Removes the cell at `col` in every row; updates `colCnt`. |
 | `merge_cells` | `table`, `mode`, + range | `mode:"horizontal"` → `row`, `start`, `count` (sets `colSpan`); `mode:"vertical"` → `col`, `start`, `count` (sets `rowSpan`). `count >= 2`. Absorbed cells removed. Assumes no prior merge in the range. |
+| `insert_table` | `index`, `rows`, `cols`, `cells?` (string[][]) | Inserts a fresh `rows × cols` table as a new paragraph **after** paragraph `index` (use `-1` to prepend at the start of the first section). `cells[r][c]` fills each cell (missing entries → empty). Clones the first existing `<hp:tbl>` of the doc as the template so the new table inherits real Hancom-Docs-valid styling (borderFill, cellSz, cellMargin, etc.). **Requires the base doc to contain at least one table.** |
 
 ### Styling (clone-mutate-retarget in `header.xml`)
 

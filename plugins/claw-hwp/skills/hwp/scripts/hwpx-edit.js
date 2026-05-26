@@ -26,6 +26,7 @@
 //   append_table_column   { table, cells: [..] }   // cells top-to-bottom
 //   delete_table_column   { table, col }
 //   merge_cells           { table, mode: "horizontal"|"vertical", row|col, start, count }
+//   insert_table          { index, rows, cols, cells? }  // appends a new table paragraph after paragraph `index` (use -1 to prepend)
 //   apply_text_style      { target, color?, bold?, italic?, underline?, size? }
 //   apply_paragraph_style { index, align?, indent?, lineSpacing? }
 //   insert_image          { source, ext?, width?, height? }
@@ -459,6 +460,107 @@ function opMergeCells(doc, tableIndex, mode, opts) {
   const newTbl = `<hp:tbl${el.attrs}>${dropLinesegs(tbl)}</hp:tbl>`;
   doc.write(section, spliceEl(doc.read(section), el, newTbl));
   return { table: tableIndex, mode, merged: opts.count };
+}
+
+// Insert a brand-new table (rows × cols) as a fresh paragraph at `index`.
+// Hancom Docs is strict about table validity — every required inner element
+// (cellAddr, cellSpan, cellSz, cellMargin, subList, etc.) must be present in
+// the exact shape it expects. Hand-rolling that envelope from scratch tends to
+// produce docs that the lenient renderer opens and Hancom Docs rejects, so we
+// clone the first existing tbl in the document as the template and rebuild it
+// at the requested size — same trick used by `buildPic` for images.
+//
+// Requires the source doc to already contain at least one table; throws a
+// clear error otherwise (in that case open a doc with any table, copy it in,
+// or use the bundled template doc).
+function opInsertTable(doc, index, rows, cols, cells) {
+  if (!Number.isInteger(rows) || rows < 1) throw new Error('insert_table: rows must be a positive integer');
+  if (!Number.isInteger(cols) || cols < 1) throw new Error('insert_table: cols must be a positive integer');
+
+  const tables = doc.tables();
+  if (!tables.length) throw new Error('insert_table: no table to clone as a template — base doc must contain at least one existing table');
+
+  const srcTbl = tables[0];
+  const srcSection = srcTbl.section;
+  const srcXml = doc.read(srcSection);
+
+  // Find the enclosing top-level paragraph of the source table.
+  const paras = scanTopLevel(srcXml, 'hp:p');
+  const srcPara = paras.find((p) => p.start <= srcTbl.el.start && p.end >= srcTbl.el.end);
+  if (!srcPara) throw new Error('insert_table: source table is not inside a top-level paragraph (unexpected)');
+
+  // Pick the first row's first cell as the cell template.
+  const srcRows = scanTopLevel(srcTbl.el.inner, 'hp:tr');
+  if (!srcRows.length) throw new Error('insert_table: source table has no rows');
+  const srcTcs = scanTopLevel(srcRows[0].inner, 'hp:tc');
+  if (!srcTcs.length) throw new Error('insert_table: source row has no cells');
+  const cellTemplate = srcTcs[0];
+
+  // Build cells row-by-row.
+  const builtRows = [];
+  for (let r = 0; r < rows; r++) {
+    const cellStrs = [];
+    for (let c = 0; c < cols; c++) {
+      const text = (cells && cells[r] && cells[r][c] !== undefined) ? cells[r][c] : '';
+      let cellInner = setCellInner(cellTemplate.inner, text);
+      // cellAddr → (r, c)
+      if (/<hp:cellAddr\b/.test(cellInner)) {
+        cellInner = cellInner.replace(/<hp:cellAddr\s+[^>]*\/?>/, `<hp:cellAddr colAddr="${c}" rowAddr="${r}"/>`);
+      } else {
+        cellInner = cellInner.replace(/<\/hp:subList>/, `</hp:subList><hp:cellAddr colAddr="${c}" rowAddr="${r}"/>`);
+      }
+      // cellSpan → 1×1 (drop any inherited merge)
+      if (/<hp:cellSpan\b/.test(cellInner)) {
+        cellInner = cellInner.replace(/<hp:cellSpan\s+[^>]*\/?>/, '<hp:cellSpan colSpan="1" rowSpan="1"/>');
+      }
+      let tc = `<hp:tc${cellTemplate.attrs}>${cellInner}</hp:tc>`;
+      tc = freshenIds(tc);
+      cellStrs.push(tc);
+    }
+    builtRows.push(`<hp:tr${srcRows[0].attrs}>${cellStrs.join('')}</hp:tr>`);
+  }
+
+  // Keep the source tbl's pre-row metadata (hp:sz, hp:pos, hp:outMargin,
+  // hp:inMargin) — these sit before the first <hp:tr>.
+  const firstTrIdx = srcTbl.el.inner.indexOf('<hp:tr');
+  const tblMeta = firstTrIdx >= 0 ? srcTbl.el.inner.slice(0, firstTrIdx) : '';
+
+  let newTblAttrs = srcTbl.el.attrs;
+  if (/rowCnt="\d+"/.test(newTblAttrs)) newTblAttrs = newTblAttrs.replace(/rowCnt="\d+"/, `rowCnt="${rows}"`);
+  else newTblAttrs = ` rowCnt="${rows}"` + newTblAttrs;
+  if (/colCnt="\d+"/.test(newTblAttrs)) newTblAttrs = newTblAttrs.replace(/colCnt="\d+"/, `colCnt="${cols}"`);
+  else newTblAttrs = ` colCnt="${cols}"` + newTblAttrs;
+
+  const newTbl = `<hp:tbl${newTblAttrs}>${tblMeta}${builtRows.join('')}</hp:tbl>`;
+
+  // Splice newTbl into a clone of the source paragraph (preserve its run /
+  // ctrl wrapping, which Hancom requires for body tables).
+  const tblOffsetInPara = srcTbl.el.start - srcPara.openEnd;
+  const tblLen = srcTbl.el.end - srcTbl.el.start;
+  const paraInnerWithNewTbl =
+    srcPara.inner.slice(0, tblOffsetInPara) + newTbl + srcPara.inner.slice(tblOffsetInPara + tblLen);
+  let newParaAttrs = srcPara.attrs.replace(/\sid="\d+"/, ` id="${freshId()}"`);
+  const newPara = `<hp:p${newParaAttrs}>${dropLinesegs(paraInnerWithNewTbl)}</hp:p>`;
+
+  // Inject at the target paragraph index (global, ordered across sections).
+  // index === -1 prepends at the start of the first section's body.
+  const allParas = doc.paragraphs();
+  if (!Number.isInteger(index) || index < -1 || index >= allParas.length) {
+    throw new Error(`insert_table: index ${index} out of range (-1..${allParas.length - 1}; -1 to prepend)`);
+  }
+  if (index === -1) {
+    const firstSec = doc.sectionNames()[0];
+    let xml = doc.read(firstSec);
+    const firstP = xml.match(/<hp:p(\s|>)/);
+    if (firstP) xml = xml.slice(0, firstP.index) + newPara + xml.slice(firstP.index);
+    else xml = xml.replace(/<\/hs:sec>/, newPara + '</hs:sec>');
+    doc.write(firstSec, xml);
+  } else {
+    const target = allParas[index];
+    const xml = doc.read(target.section);
+    doc.write(target.section, xml.slice(0, target.el.end) + newPara + xml.slice(target.el.end));
+  }
+  return { inserted: true, rows, cols, afterIndex: index };
 }
 
 // ── style operations (clone-mutate-retarget in header.xml) ───────────────────
@@ -902,6 +1004,7 @@ function applyOp(doc, op) {
     case 'append_table_column': return opAppendTableColumn(doc, op.table, op.cells);
     case 'delete_table_column': return opDeleteTableColumn(doc, op.table, op.col);
     case 'merge_cells': return opMergeCells(doc, op.table, op.mode, op);
+    case 'insert_table': return opInsertTable(doc, op.index, op.rows, op.cols, op.cells);
     case 'apply_text_style': return opApplyTextStyle(doc, op.target, op);
     case 'apply_paragraph_style': return opApplyParagraphStyle(doc, op.index, op);
     case 'insert_image': return opInsertImage(doc, op.source, op.ext, op.width, op.height);
