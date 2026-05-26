@@ -1236,6 +1236,27 @@ const HANDLERS = {
     log.push(
       `apply_paragraph_style sec=${sec} para=${idx} props=${Object.keys(props).join(",")}`
     );
+
+    // Mirror Hancom Office's "문단 모양 + 글자 모양" combo behavior: when
+    // a paragraph background_color is set, Hancom expects the same color
+    // to also live on each character's shadeColor inside that paragraph
+    // (otherwise the page-margin's row grid and other Hancom-internal
+    // visuals can show through the per-character cells). User-verified
+    // 2026-05-26: setting both 문단/글자 모양 to the same gray is the
+    // canonical way to get a "uniform tinted paragraph". We auto-apply
+    // the character shadeColor across the whole paragraph here so callers
+    // don't need a separate apply_text_style call. Opt out by passing
+    // `char_bg: false`.
+    const bg = op.background_color ?? op.backgroundColor ?? op.fillColor;
+    const charBgEnabled = op.char_bg !== false && op.charBg !== false;
+    if (bg && bg !== false && charBgEnabled) {
+      const shadeColor = bg === true ? "#ffff00" : normalizeHexColor(bg);
+      const len = doc.getParagraphLength(sec, idx);
+      if (len > 0) {
+        doc.applyCharFormat(sec, idx, 0, len, JSON.stringify({ shadeColor }));
+        log.push(`apply_paragraph_style → auto char shadeColor=${shadeColor} on para ${idx} (${len} chars)`);
+      }
+    }
   },
 };
 
@@ -1354,20 +1375,33 @@ function buildParaFormatProps(input) {
       anyBorderRequested = true;
     }
   }
-  // Fill — paragraph background.
+  // Fill — paragraph background. Always emit fillType + fillColor +
+  // patternType:-1 so EVERY apply_paragraph_style call resets the bg
+  // back to neutral; this kills the splitParagraph bleed where Para N
+  // with background_color=#cccccc would leak the gray fill into a
+  // freshly-appended Para N+1 (verified 2026-05-26).
+  //
+  // patternType:-1 is critical. rhwp's applyParaFormat with just
+  // {fillType:"solid", fillColor} resets patternType to 0 (HWP spec:
+  // 0 = horizontal stripes overlay), which Hancom Docs renders as
+  // thin stripes drawn over the solid fill. Forcing patternType:-1
+  // (no pattern) makes the solid fill render alone. patternColor is
+  // irrelevant when patternType=-1, but we mirror rhwp's blank-template
+  // default (#999999) so the BorderFill record matches the pristine
+  // structure.
   const bg = input.background_color ?? input.backgroundColor ?? input.fillColor;
-  if (bg) {
-    props.fillType = "solid";
-    props.fillColor = normalizeHexColor(bg);
-  }
-  // If fill is set OR any border was explicitly requested, force the
-  // un-requested sides to ZERO so rhwp's auto-border-on-fill quirk and
-  // any cross-side bleed (the same "force all four sides" comment in
-  // applyParaBorders) are neutralized.
-  if (bg || anyBorderRequested) {
-    for (const [, rhwpKey] of sides) {
-      if (!(rhwpKey in props)) props[rhwpKey] = { type: 0, width: 0, color: "#000000" };
-    }
+  props.fillType = "solid";
+  props.fillColor = (bg && bg !== false) ? normalizeHexColor(bg) : "#ffffff";
+  props.patternType = -1;
+  props.patternColor = "#999999";
+  // Force the un-requested sides to ZERO. Since fill is now ALWAYS
+  // emitted (above), rhwp will create a new BorderFill record on every
+  // applyParaFormat call — and without explicit borders, rhwp's
+  // serializer defaults them to type:1 (solid) width:0, which Hancom
+  // Docs renders as a 1px frame around the paragraph. Explicit zeros
+  // here prevent that.
+  for (const [, rhwpKey] of sides) {
+    if (!(rhwpKey in props)) props[rhwpKey] = { type: 0, width: 0, color: "#000000" };
   }
   return props;
 }
