@@ -1,11 +1,13 @@
 <h1 align="center">claw-hwp</h1>
 
 <p align="center">
-  HWP/HWPX skill for Claude — read, create, and edit Korean Hangul documents in Claude Code, Desktop, and web.<br/>
-  Built on <a href="https://github.com/edwardkim/rhwp">rhwp</a> WASM.
+  <a href="https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview">Agent Skill</a> for Claude to read, create, and edit Korean Hangul documents (.hwp / .hwpx) — with Hancom Office / Hancom Docs–compatible save guaranteed.<br/>
+  Works in Claude Code · Desktop · web. <a href="https://github.com/edwardkim/rhwp">rhwp</a> parser engine + our own edit infrastructure.
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/github/stars/DoHyun468/claw-hwp?style=flat&logo=github&label=Stars" alt="Stars" />
+  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/DoHyun468/claw-hwp/main/.github/traffic-summary.json" alt="Clones (14-day)" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT" /></a>
   <img src="https://img.shields.io/badge/status-WIP-orange" alt="WIP" />
 </p>
@@ -40,7 +42,7 @@ No Hancom Office, no LibreOffice, no Windows COM required.
 
 ## Known limitations
 
-These come from rhwp's serializer. Worth knowing before you start.
+These come from the HWP 5.0 format itself and a few v1-scope edges. Worth knowing before you start.
 
 - **Tables are preserved when editing `.hwp` or `.hwpx`.** Tables only get dropped in two cases: when `create.js` writes a **brand-new `.hwpx` from scratch**, or when `convert.js` runs `.hwp → .hwpx` — both go through rhwp's `exportHwpx()` which strips tables. **If you're creating a new document with tables, output as `.hwp`.** Editing existing files keeps tables intact in either format: `.hwp` via byte-level raw-patch (cell content·text replace·paragraph/table insert·page setup·formatting), `.hwpx` via direct XML edit (cells·alignment·background·borders·rows/columns·insert_table·headers/footers·lists·footnotes·hyperlinks).
 - **`.hwp ↔ .hwpx` conversion is lossy.** Tables / images / complex shapes can break — **edit in the input's original format** (`.hwp` stays `.hwp`, `.hwpx` stays `.hwpx`). Only run `convert.js` when the user explicitly requests a format change.
@@ -50,8 +52,8 @@ These come from rhwp's serializer. Worth knowing before you start.
 
 ## Built on
 
-- **[edwardkim/rhwp](https://github.com/edwardkim/rhwp)** — Rust + WebAssembly core for HWP parsing, rendering, and `.hwp` ↔ `.hwpx` conversion. This skill is built on rhwp.
-- **[golbin/hop](https://github.com/golbin/hop)** — the open-source HWP desktop app that wraps rhwp. Reference for editor UX patterns.
+- **[edwardkim/rhwp](https://github.com/edwardkim/rhwp)** — Rust + WebAssembly core for HWP parsing, rendering, and `.hwp` ↔ `.hwpx` conversion. claw-hwp uses it as the parser engine.
+- **[golbin/hop](https://github.com/golbin/hop)** — open-source HWP desktop viewer/editor built on the same rhwp core. Reference for editor UX patterns.
 - **[anthropics/skills](https://github.com/anthropics/skills)** — Anthropic's official skill repository. The `docx`, `pptx`, `xlsx` skills are the structural blueprint we mirror.
 
 ## Korean HWP open-source ecosystem
@@ -68,7 +70,7 @@ Pick `hop` for desktop GUI, `claw-hwp` for AI-driven workflows.
 
 ## Status
 
-🚧 v1.0 submitted to Anthropic's official marketplace on 2026-05-14, pending review. Read / create / edit / convert / preview pipeline verified across all four surfaces.
+🚧 v1.0 submitted to Anthropic's official marketplace on 2026-05-14, pending review. v1.1 edit feature expansion (character/paragraph/cell formatting, headers/footers, lists, footnotes, hyperlinks, insert_table) shipped. Read / create / edit / convert / preview pipeline verified across all four surfaces.
 
 ## Roadmap
 
