@@ -1,60 +1,13 @@
 name: Refresh traffic data
 
 on:
-  schedule:
-    # Daily at 00:00 UTC (≈ 09:00 KST). GitHub Traffic API retains 14 days
-    # of data, so a daily cron captures the rolling window without gaps.
-    - cron: "0 0 * * *"
   workflow_dispatch:
-  # Force a one-time run when this workflow file itself changes — newly
-  # merged workflows aren't fully indexed by GitHub until they execute
-  # at least once, so without this trigger `workflow_dispatch` and the
-  # initial `schedule` event get rejected with HTTP 500. Path filter is
-  # tight (only this file) so the workflow's own commits don't loop.
   push:
-    branches: [main]
     paths:
       - '.github/workflows/traffic.yml'
-
-permissions:
-  contents: write
 
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Fetch traffic + write shields.io endpoint JSON
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          mkdir -p .github
-          # GitHub Traffic API: requires push access. The default
-          # GITHUB_TOKEN in Actions has it for the repo itself, so no
-          # PAT is needed. Returns { count, uniques, clones: [...] }.
-          clones=$(gh api "repos/${{ github.repository }}/traffic/clones" --jq '.count')
-          # shields.io endpoint schema (label + message + color).
-          cat > .github/traffic-summary.json <<EOF
-          {
-            "schemaVersion": 1,
-            "label": "Clones (14d)",
-            "message": "${clones}",
-            "color": "blue",
-            "namedLogo": "git"
-          }
-          EOF
-
-      - name: Commit if changed
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/traffic-summary.json
-          if git diff --cached --quiet; then
-            echo "no traffic changes"
-          else
-            git commit -m "chore: refresh traffic data [skip ci]"
-            git push
-          fi
+      - run: echo "minimal traffic - testing trigger"
