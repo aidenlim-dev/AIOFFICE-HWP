@@ -22,7 +22,7 @@
 
 - **read** — extract text, tables, and metadata from `.hwp` / `.hwpx`
 - **create** — write new documents (headings, paragraphs, tables, images, page breaks). For tables, output as `.hwp` — see [Known limitations](#known-limitations)
-- **edit** — text replace, paragraph insert, formatting changes on existing documents — by unpacking the XML and using Claude's native `Edit` tool
+- **edit** — text replace, paragraph/table insert, cell editing, headers·footers, bullet·numbered lists, footnotes, hyperlinks, and more on existing documents
 - **convert** — `.hwp ↔ .hwpx` both directions via rhwp WASM. Not lossless — round-tripping can damage tables and images
 - **preview** — view rhwp-rendered pages inline or in a browser (the path differs by surface — see [Usage by surface](#usage-by-surface))
 
@@ -43,7 +43,7 @@ No Hancom Office, no LibreOffice, no Windows COM required.
 These come from rhwp's serializer. Worth knowing before you start.
 
 - **Tables are dropped when emitting `.hwpx`.** Whether you create a new `.hwpx` via `create.js` or convert `.hwp → .hwpx`, rhwp's `exportHwpx()` strips tables. **If you need tables, write `.hwp` instead.** If you really need `.hwpx`, opening and re-saving the result in Hancom Office or 한컴독스 will regenerate the table XML.
-- **Editing existing `.hwp` files can lose tables.** The `.hwp` edit path internally converts to `.hwpx` first, which trips the same serializer. **If you need to edit while preserving existing tables, start from a `.hwpx` source** — that path edits the XML directly and tables are preserved.
+- **Editing existing `.hwp` files can lose tables.** The `.hwp` edit path internally converts to `.hwpx` first, which trips the same serializer. **If you need to edit while preserving existing tables, start from a `.hwpx` source** — that path edits the XML directly and tables are preserved, and covers cell content·alignment·background·borders, bullet·numbered lists, footnotes, and hyperlinks.
 - **`.hwp ↔ .hwpx` round-tripping is lossy.** Tables, images, and complex shapes can be damaged. Keep `.hwpx` as the canonical format when possible; only emit `.hwp` when explicitly required.
 - **PDF / DOCX conversion is not yet supported.** Planned for a later release via LibreOffice headless.
 
@@ -82,7 +82,7 @@ Pick `hop` for desktop GUI, `claw-hwp` for AI-driven workflows.
 - [x] v0.8 — Vendored Node deps — zero-config install across Code / Desktop / web
 - [x] v0.9 — Plugin icon
 - [x] v1.0 — Submitted to Anthropic's official marketplace (pending review)
-- [ ] v1.1 — Footnotes (`append_paragraph_with_footnotes`) + Markdown→HWP citation styles (numeric_inline / footnote / footnote_with_bibliography)
+- [x] v1.1 — Footnotes (`append_paragraph_with_footnotes`) + Markdown→HWP citation styles (numeric_inline / footnote / footnote_with_bibliography)
 - [ ] v1.2+ — PDF / DOCX conversion, image extraction, viewer/editor React packages
 
 ## Install
