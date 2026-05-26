@@ -638,8 +638,13 @@ function addCellzone(doc, tableIndex, row, col, borderFillId) {
 
 function opSetCellBackground(doc, tableIndex, row, col, color) {
   const c = normHex(color);
-  const brush = `<hh:fillBrush><hc:winBrush faceColor="${c}" hatchColor="#999999" alpha="0"/></hh:fillBrush>`;
-  const bfId = ensureBorderFill(doc, STD_SLASH_NONE + PLAIN_SIDES + brush);
+  // Hancom-native shape (verified against 한컴독스 round-trip):
+  //   borders all NONE (background isn't supposed to draw a border)
+  //   diagonal SOLID default
+  //   fillBrush is in the `hc:` namespace, NOT `hh:` — using hh: makes Hancom
+  //   ignore the brush entirely and the cell stays unfilled.
+  const brush = `<hc:fillBrush><hc:winBrush faceColor="${c}" hatchColor="#999999" alpha="0"/></hc:fillBrush>`;
+  const bfId = ensureBorderFill(doc, STD_SLASH_NONE + NONE_SIDES + DEFAULT_DIAG + brush);
   addCellzone(doc, tableIndex, row, col, bfId);
   return { table: tableIndex, row, col, color: c, borderFillId: bfId };
 }
