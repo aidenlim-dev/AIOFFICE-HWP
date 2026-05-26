@@ -27,7 +27,7 @@
 //   delete_table_column   { table, col }
 //   merge_cells           { table, mode: "horizontal"|"vertical", row|col, start, count }
 //   insert_table          { index, rows, cols, cells? }  // appends a new table paragraph after paragraph `index` (use -1 to prepend)
-//   apply_text_style      { target, color?, bold?, italic?, underline?, size? }
+//   apply_text_style      { target, color?, bold?, italic?, underline?, size?, highlight?, strikethrough? }
 //   apply_paragraph_style { index, align?, indent?, lineSpacing? }
 //   insert_image          { source, ext?, width?, height? }
 //   replace_image         { target, source }
@@ -489,10 +489,15 @@ function opInsertTable(doc, index, rows, cols, cells) {
   const srcPara = paras.find((p) => p.start <= srcTbl.el.start && p.end >= srcTbl.el.end);
   if (!srcPara) throw new Error('insert_table: source table is not inside a top-level paragraph (unexpected)');
 
-  // Pick the first row's first cell as the cell template.
+  // Pick a body cell as the template. Row 0 is usually a styled header
+  // (grey fill in most government / report templates), so prefer row 1's
+  // first cell when the source has more than one row — gives a clean
+  // white-background body cell by default. Fall back to row 0 for
+  // single-row source tables.
   const srcRows = scanTopLevel(srcTbl.el.inner, 'hp:tr');
   if (!srcRows.length) throw new Error('insert_table: source table has no rows');
-  const srcTcs = scanTopLevel(srcRows[0].inner, 'hp:tc');
+  const templateRow = srcRows.length >= 2 ? srcRows[1] : srcRows[0];
+  const srcTcs = scanTopLevel(templateRow.inner, 'hp:tc');
   if (!srcTcs.length) throw new Error('insert_table: source row has no cells');
   const cellTemplate = srcTcs[0];
 
@@ -517,7 +522,7 @@ function opInsertTable(doc, index, rows, cols, cells) {
       tc = freshenIds(tc);
       cellStrs.push(tc);
     }
-    builtRows.push(`<hp:tr${srcRows[0].attrs}>${cellStrs.join('')}</hp:tr>`);
+    builtRows.push(`<hp:tr${templateRow.attrs}>${cellStrs.join('')}</hp:tr>`);
   }
 
   // Keep the source tbl's pre-row metadata (hp:sz, hp:pos, hp:outMargin,
@@ -612,6 +617,20 @@ function opApplyTextStyle(doc, target, style) {
     inner = style.underline
       ? ensureChild(inner, '<hh:underline type="BOTTOM" shape="SOLID" color="#000000"/>', 'hh:underline')
       : inner.replace(/<hh:underline[^>]*\/>/g, '');
+  }
+  if (style.highlight !== undefined) {
+    // true → yellow (#FFFF00); false / null → 'none'; hex string → that color.
+    const c = style.highlight === true ? '#FFFF00'
+            : (style.highlight === false || style.highlight === null) ? 'none'
+            : `#${String(style.highlight).replace(/^#/, '')}`;
+    attrs = setOrAddAttr(attrs, 'shadeColor', c);
+  }
+  if (style.strikethrough !== undefined) {
+    const shape = style.strikethrough ? 'SOLID' : 'NONE';
+    const so = `<hh:strikeout shape="${shape}" color="#000000"/>`;
+    inner = /<hh:strikeout\b[^>]*\/>/.test(inner)
+      ? inner.replace(/<hh:strikeout\b[^>]*\/>/, so)
+      : inner + so;
   }
   const newCharPr = `<hh:charPr${attrs}>${inner}</hh:charPr>`;
   let h2 = spliceEl(header, base, `<hh:charPr${base.attrs}>${base.inner}</hh:charPr>` + newCharPr);
