@@ -34,7 +34,7 @@
 //   set_cell_size         { table, row, col, width?, height? }             // HWP units
 //   set_page_break        { index, on? }                                   // sets <hp:p pageBreak="1"> before paragraph index
 //   set_bullet_list       { index, char?, level? }                        // bullet (• default; char="▶"|"◯"|"□"|"★" etc. registers a new bullet entry)
-//   set_number_list       { index, level? }                                // numbered list — level 0..3 cycles 1./가./1)/가) formats automatically
+//   set_number_list       { index, level?, style? }                        // numbered list — `style: "korean"` → 1./가./1)/가); `style: "decimal"` → 1./1.1./1.1.1.; omit → use doc's existing numbering id=1 (varies by template)
 //   clear_list            { index }                                        // removes list formatting
 //   apply_text_style      { target, color?, bold?, italic?, underline?, size?, highlight?, strikethrough?, supscript?, subscript?, fontFace? }
 //   apply_paragraph_style { index, align?, indent?, lineSpacing? }
@@ -813,6 +813,61 @@ function ensureBullet(doc, char) {
   return newId;
 }
 
+// Look up (or register) a numbering definition matching `style`. Returns the
+// id of the <hh:numbering> entry to point heading@idRef at.
+//   "korean"  → 1./가./1)/가)/(1)/(가) (Hancom's stock multi-level format)
+//   "decimal" → 1./1.1./1.1.1./...
+// Without a style, returns '1' (use whatever numbering id=1 the doc carries —
+// some templates carry korean, some carry decimal, so the visual result
+// depends on the doc unless an explicit style is requested).
+function ensureNumbering(doc, style) {
+  if (!style) return '1';
+  const s = String(style).toLowerCase();
+  if (s !== 'korean' && s !== 'decimal') throw new Error(`ensureNumbering: style must be "korean" or "decimal" (got ${style})`);
+  const headerName = doc.headerName();
+  if (!headerName) throw new Error('ensureNumbering: Contents/header.xml missing');
+  let header = doc.read(headerName);
+  const list = scanTopLevel(header, 'hh:numberings')[0];
+  if (!list) throw new Error('ensureNumbering: <hh:numberings> missing');
+  // Match on the level=2 paraHead text — that's where korean (`^2.`) and
+  // decimal (`^1.^2.`) diverge.
+  const want = s === 'decimal' ? '^1.^2.' : '^2.';
+  for (const n of scanTopLevel(list.inner, 'hh:numbering')) {
+    const m = n.inner.match(/<hh:paraHead\b[^>]*\slevel="2"[^>]*>([^<]*)<\/hh:paraHead>/);
+    if (m && m[1] === want) return getAttr(n.attrs, 'id');
+  }
+  // Build new numbering definition.
+  const ids = scanTopLevel(list.inner, 'hh:numbering').map((n) => Number(getAttr(n.attrs, 'id') || 0));
+  const newId = String(Math.max(0, ...ids) + 1);
+  const head = (lvl, fmt, text) =>
+    `<hh:paraHead start="1" level="${lvl}" align="LEFT" useInstWidth="1" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="${fmt}" charPrIDRef="4294967295" checkable="0">${text}</hh:paraHead>`;
+  const emptyHead = (lvl) =>
+    `<hh:paraHead start="1" level="${lvl}" align="LEFT" useInstWidth="1" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="DIGIT" charPrIDRef="4294967295" checkable="0"/>`;
+  let body;
+  if (s === 'decimal') {
+    const parts = [];
+    for (let lvl = 1; lvl <= 10; lvl++) {
+      const txt = Array.from({ length: lvl }, (_, i) => `^${i + 1}.`).join('');
+      parts.push(head(lvl, 'DIGIT', txt));
+    }
+    body = parts.join('');
+  } else {
+    body =
+      head(1, 'DIGIT', '^1.') +
+      head(2, 'HANGUL_SYLLABLE', '^2.') +
+      head(3, 'DIGIT', '^3)') +
+      head(4, 'HANGUL_SYLLABLE', '^4)') +
+      head(5, 'DIGIT', '(^5)') +
+      head(6, 'HANGUL_SYLLABLE', '(^6)') +
+      emptyHead(7) + emptyHead(8) + emptyHead(9) + emptyHead(10);
+  }
+  const newNum = `<hh:numbering id="${newId}" start="1">${body}</hh:numbering>`;
+  let newHeader = spliceEl(header, list, `<hh:numberings${list.attrs}>${list.inner + newNum}</hh:numberings>`);
+  newHeader = bumpListCount(newHeader, 'hh:numberings', +1);
+  doc.write(headerName, newHeader);
+  return newId;
+}
+
 // Bullet / numbered list — Hancom's mechanism is a paraPr with
 //   <hh:heading type="BULLET|NUMBER" idRef="N" level="L"/>
 // retargeting the paragraph's paraPrIDRef. For NUMBER, level=0/1/2/3 cycles
@@ -831,11 +886,14 @@ function opSetParagraphList(doc, index, type, level, options) {
   const headerName = doc.headerName();
   if (!headerName) throw new Error('set_paragraph_list: Contents/header.xml missing');
 
-  // ensureBullet may mutate header.xml — call it FIRST so subsequent header
-  // reads (for paraPrs) see the new bullets list. Doing it after caching
-  // `header` made the trailing doc.write blow away the bullets change.
+  // ensureBullet / ensureNumbering may mutate header.xml — call them FIRST so
+  // subsequent header reads (for paraPrs) see the new lists. Doing it after
+  // caching `header` makes the trailing doc.write overwrite the lists change.
   const bulletChar = options && options.char ? String(options.char) : '';
-  const bulletId = t === 'BULLET' ? ensureBullet(doc, bulletChar) : '1';
+  const numberStyle = options && options.style ? options.style : null;
+  let listIdRef = '1';
+  if (t === 'BULLET') listIdRef = ensureBullet(doc, bulletChar);
+  else if (t === 'NUMBER') listIdRef = ensureNumbering(doc, numberStyle);
 
   let header = doc.read(headerName);
   const paraPrs = scanTopLevel(header, 'hh:paraPr');
@@ -850,7 +908,7 @@ function opSetParagraphList(doc, index, type, level, options) {
   if (t === 'NONE') {
     wantInner = base.inner.replace(/<hh:heading\b[^/]*\/>/g, '');
   } else {
-    const heading = `<hh:heading type="${t}" idRef="${bulletId}" level="${lvl}"/>`;
+    const heading = `<hh:heading type="${t}" idRef="${listIdRef}" level="${lvl}"/>`;
     if (/<hh:heading\b[^/]*\/>/.test(base.inner)) {
       wantInner = base.inner.replace(/<hh:heading\b[^/]*\/>/, heading);
     } else {
@@ -1532,7 +1590,7 @@ function applyOp(doc, op) {
     case 'set_cell_size': return opSetCellSize(doc, op.table, op.row, op.col, op.width, op.height);
     case 'set_page_break': return opSetPageBreak(doc, op.index, op.on);
     case 'set_bullet_list': return opSetParagraphList(doc, op.index, 'BULLET', op.level, { char: op.char });
-    case 'set_number_list': return opSetParagraphList(doc, op.index, 'NUMBER', op.level);
+    case 'set_number_list': return opSetParagraphList(doc, op.index, 'NUMBER', op.level, { style: op.style });
     case 'clear_list': return opSetParagraphList(doc, op.index, 'NONE', 0);
     case 'apply_text_style': return opApplyTextStyle(doc, op.target, op);
     case 'apply_paragraph_style': return opApplyParagraphStyle(doc, op.index, op);
