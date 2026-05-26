@@ -32,6 +32,10 @@
 //   set_cell_diagonal     { table, row, col, direction, color?, width? }   // direction = BACKSLASH | SLASH
 //   set_cell_align        { table, row, col, horizontal?, vertical? }      // horiz = LEFT/CENTER/RIGHT/JUSTIFY/DISTRIBUTE, vert = TOP/CENTER/BOTTOM
 //   set_cell_size         { table, row, col, width?, height? }             // HWP units
+//   set_page_break        { index, on? }                                   // sets <hp:p pageBreak="1"> before paragraph index
+//   set_bullet_list       { index, level? }                                // makes paragraph a bullet (•) list item
+//   set_number_list       { index, level? }                                // makes paragraph a numbered (1.) list item
+//   clear_list            { index }                                        // removes list formatting
 //   apply_text_style      { target, color?, bold?, italic?, underline?, size?, highlight?, strikethrough?, supscript?, subscript?, fontFace? }
 //   apply_paragraph_style { index, align?, indent?, lineSpacing? }
 //   insert_image          { source, ext?, width?, height? }
@@ -752,6 +756,94 @@ function opSetCellAlign(doc, tableIndex, row, col, horizontal, vertical) {
   return { table: tableIndex, row, col, horizontal: horizontal || null, vertical: vertical || null, ...(paraInfo || {}) };
 }
 
+// Insert a page break BEFORE the paragraph at `index` — Hancom stores this
+// as a single attribute on the paragraph: <hp:p ... pageBreak="1">.
+function opSetPageBreak(doc, index, on) {
+  const paras = doc.paragraphs();
+  if (index < 0 || index >= paras.length) throw new Error(`set_page_break: index ${index} out of range (0..${paras.length - 1})`);
+  const { section, el } = paras[index];
+  const want = on === false ? '0' : '1';
+  let newAttrs = /pageBreak="\d"/.test(el.attrs)
+    ? el.attrs.replace(/pageBreak="\d"/, `pageBreak="${want}"`)
+    : el.attrs + ` pageBreak="${want}"`;
+  const rebuilt = `<hp:p${newAttrs}>${el.inner}</hp:p>`;
+  doc.write(section, spliceEl(doc.read(section), el, rebuilt));
+  return { index, pageBreak: want === '1' };
+}
+
+// Bullet / numbered list — Hancom's mechanism is a paraPr with
+//   <hh:heading type="BULLET|NUMBER" idRef="N" level="L"/>
+// retargeting the paragraph's paraPrIDRef. The bullet character / number
+// format itself lives in <hh:bullets>/<hh:numberings> (idRef=1 is the
+// standard default already present in every standard doc — we don't create
+// new ones). type="NONE" clears the list by removing the heading element
+// from a new paraPr clone (or pointing at one without a heading).
+function opSetParagraphList(doc, index, type, level) {
+  const t = String(type || '').toUpperCase();
+  if (!['BULLET', 'NUMBER', 'NONE'].includes(t)) throw new Error('set_paragraph_list: type must be BULLET / NUMBER / NONE');
+  const lvl = Number(level || 0);
+  const paras = doc.paragraphs();
+  if (index < 0 || index >= paras.length) throw new Error(`set_paragraph_list: index ${index} out of range`);
+  const { section, el } = paras[index];
+
+  const headerName = doc.headerName();
+  if (!headerName) throw new Error('set_paragraph_list: Contents/header.xml missing');
+  let header = doc.read(headerName);
+  const paraPrs = scanTopLevel(header, 'hh:paraPr');
+
+  // 1) Look for an existing paraPr that already carries the target heading.
+  if (t !== 'NONE') {
+    for (const pp of paraPrs) {
+      const m = pp.inner.match(/<hh:heading\s+type="([^"]+)"\s+idRef="(\d+)"\s+level="(\d+)"/);
+      if (m && m[1] === t && Number(m[3]) === lvl) {
+        const useId = getAttr(pp.attrs, 'id');
+        const newOpen = el.attrs.replace(/paraPrIDRef="\d+"/, `paraPrIDRef="${useId}"`);
+        doc.write(section, spliceEl(doc.read(section), el, `<hp:p${newOpen}>${el.inner}</hp:p>`));
+        return { index, type: t, level: lvl, paraPrId: useId, reusedExisting: true };
+      }
+    }
+  }
+
+  // 2) Need a new paraPr — clone the paragraph's current paraPr + mutate the
+  // heading element. Reuse a placeholder paraPr if available (same
+  // Hancom-native trick used by apply_text_style / apply_paragraph_style).
+  const srcParaRef = (el.attrs.match(/paraPrIDRef="(\d+)"/) || [, '0'])[1];
+  const base = paraPrs.find((pp) => getAttr(pp.attrs, 'id') === srcParaRef) || paraPrs[0];
+  const refCounts = {};
+  for (const name of doc.sectionNames()) {
+    for (const m of doc.read(name).matchAll(/paraPrIDRef="(\d+)"/g)) {
+      refCounts[m[1]] = (refCounts[m[1]] || 0) + 1;
+    }
+  }
+  const placeholder = paraPrs.find((pp) => (refCounts[getAttr(pp.attrs, 'id')] || 0) === 0 && getAttr(pp.attrs, 'id') !== srcParaRef);
+  const useId = placeholder ? getAttr(placeholder.attrs, 'id')
+                            : String(Math.max(...paraPrs.map((pp) => Number(getAttr(pp.attrs, 'id') || 0))) + 1);
+  let mutAttrs = base.attrs.replace(/\s*id="\d+"/, ` id="${useId}"`);
+  let mutInner = base.inner;
+  if (t === 'NONE') {
+    // Strip any existing <hh:heading.../> child.
+    mutInner = mutInner.replace(/<hh:heading\b[^/]*\/>/g, '');
+  } else {
+    const heading = `<hh:heading type="${t}" idRef="1" level="${lvl}"/>`;
+    if (/<hh:heading\b[^/]*\/>/.test(mutInner)) {
+      mutInner = mutInner.replace(/<hh:heading\b[^/]*\/>/, heading);
+    } else {
+      // Insert just after <hh:align ... /> (Hancom's standard position).
+      mutInner = /<hh:align\s+[^>]*\/>/.test(mutInner)
+        ? mutInner.replace(/(<hh:align\s+[^>]*\/>)/, `$1${heading}`)
+        : heading + mutInner;
+    }
+  }
+  const updated = `<hh:paraPr${mutAttrs}>${mutInner}</hh:paraPr>`;
+  header = placeholder
+    ? spliceEl(header, placeholder, updated)
+    : bumpListCount(spliceEl(header, base, `<hh:paraPr${base.attrs}>${base.inner}</hh:paraPr>` + updated), 'hh:paraProperties', +1);
+  doc.write(headerName, header);
+  const newOpen = el.attrs.replace(/paraPrIDRef="\d+"/, `paraPrIDRef="${useId}"`);
+  doc.write(section, spliceEl(doc.read(section), el, `<hp:p${newOpen}>${el.inner}</hp:p>`));
+  return { index, type: t, level: lvl, paraPrId: useId, basedOn: srcParaRef, placeholderReused: Boolean(placeholder) };
+}
+
 function opSetCellSize(doc, tableIndex, row, col, width, height) {
   const { section, el } = getTable(doc, tableIndex);
   const rows = scanTopLevel(el.inner, 'hp:tr');
@@ -1387,6 +1479,10 @@ function applyOp(doc, op) {
     case 'set_cell_diagonal': return opSetCellDiagonal(doc, op.table, op.row, op.col, op.direction, op.color, op.width);
     case 'set_cell_align': return opSetCellAlign(doc, op.table, op.row, op.col, op.horizontal, op.vertical);
     case 'set_cell_size': return opSetCellSize(doc, op.table, op.row, op.col, op.width, op.height);
+    case 'set_page_break': return opSetPageBreak(doc, op.index, op.on);
+    case 'set_bullet_list': return opSetParagraphList(doc, op.index, 'BULLET', op.level);
+    case 'set_number_list': return opSetParagraphList(doc, op.index, 'NUMBER', op.level);
+    case 'clear_list': return opSetParagraphList(doc, op.index, 'NONE', 0);
     case 'apply_text_style': return opApplyTextStyle(doc, op.target, op);
     case 'apply_paragraph_style': return opApplyParagraphStyle(doc, op.index, op);
     case 'insert_image': return opInsertImage(doc, op.source, op.ext, op.width, op.height);
