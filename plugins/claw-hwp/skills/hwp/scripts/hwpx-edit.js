@@ -791,24 +791,41 @@ function opSetParagraphList(doc, index, type, level) {
   let header = doc.read(headerName);
   const paraPrs = scanTopLevel(header, 'hh:paraPr');
 
-  // 1) Look for an existing paraPr that already carries the target heading.
-  if (t !== 'NONE') {
-    for (const pp of paraPrs) {
-      const m = pp.inner.match(/<hh:heading\s+type="([^"]+)"\s+idRef="(\d+)"\s+level="(\d+)"/);
-      if (m && m[1] === t && Number(m[3]) === lvl) {
-        const useId = getAttr(pp.attrs, 'id');
-        const newOpen = el.attrs.replace(/paraPrIDRef="\d+"/, `paraPrIDRef="${useId}"`);
-        doc.write(section, spliceEl(doc.read(section), el, `<hp:p${newOpen}>${el.inner}</hp:p>`));
-        return { index, type: t, level: lvl, paraPrId: useId, reusedExisting: true };
-      }
+  // Base = the paragraph's current paraPr (for its margin/lineSpacing/etc).
+  const srcParaRef = (el.attrs.match(/paraPrIDRef="(\d+)"/) || [, '0'])[1];
+  const base = paraPrs.find((pp) => getAttr(pp.attrs, 'id') === srcParaRef) || paraPrs[0];
+
+  // Build the EXACT desired inner — base.inner with the heading set/replaced/cleared.
+  // Hancom's standard placement puts <hh:heading> right after <hh:align>.
+  let wantInner;
+  if (t === 'NONE') {
+    wantInner = base.inner.replace(/<hh:heading\b[^/]*\/>/g, '');
+  } else {
+    const heading = `<hh:heading type="${t}" idRef="1" level="${lvl}"/>`;
+    if (/<hh:heading\b[^/]*\/>/.test(base.inner)) {
+      wantInner = base.inner.replace(/<hh:heading\b[^/]*\/>/, heading);
+    } else {
+      wantInner = /<hh:align\s+[^>]*\/>/.test(base.inner)
+        ? base.inner.replace(/(<hh:align\s+[^>]*\/>)/, `$1${heading}`)
+        : heading + base.inner;
     }
   }
 
-  // 2) Need a new paraPr — clone the paragraph's current paraPr + mutate the
-  // heading element. Reuse a placeholder paraPr if available (same
-  // Hancom-native trick used by apply_text_style / apply_paragraph_style).
-  const srcParaRef = (el.attrs.match(/paraPrIDRef="(\d+)"/) || [, '0'])[1];
-  const base = paraPrs.find((pp) => getAttr(pp.attrs, 'id') === srcParaRef) || paraPrs[0];
+  // Reuse only a paraPr whose inner matches wantInner EXACTLY (i.e. one we
+  // produced earlier in this batch from the same base). Hancom's stock list
+  // paraPrs (e.g. baseline paraPr 38) carry default indents like
+  // margin.left=1000 — matching merely on heading type/level would inherit
+  // those indents and produce visually different output from the user's body.
+  for (const pp of paraPrs) {
+    if (pp.inner === wantInner) {
+      const useId = getAttr(pp.attrs, 'id');
+      const newOpen = el.attrs.replace(/paraPrIDRef="\d+"/, `paraPrIDRef="${useId}"`);
+      doc.write(section, spliceEl(doc.read(section), el, `<hp:p${newOpen}>${el.inner}</hp:p>`));
+      return { index, type: t, level: lvl, paraPrId: useId, reusedExisting: true };
+    }
+  }
+
+  // Otherwise — reuse a placeholder paraPr (Hancom-native trick) or append new.
   const refCounts = {};
   for (const name of doc.sectionNames()) {
     for (const m of doc.read(name).matchAll(/paraPrIDRef="(\d+)"/g)) {
@@ -818,23 +835,8 @@ function opSetParagraphList(doc, index, type, level) {
   const placeholder = paraPrs.find((pp) => (refCounts[getAttr(pp.attrs, 'id')] || 0) === 0 && getAttr(pp.attrs, 'id') !== srcParaRef);
   const useId = placeholder ? getAttr(placeholder.attrs, 'id')
                             : String(Math.max(...paraPrs.map((pp) => Number(getAttr(pp.attrs, 'id') || 0))) + 1);
-  let mutAttrs = base.attrs.replace(/\s*id="\d+"/, ` id="${useId}"`);
-  let mutInner = base.inner;
-  if (t === 'NONE') {
-    // Strip any existing <hh:heading.../> child.
-    mutInner = mutInner.replace(/<hh:heading\b[^/]*\/>/g, '');
-  } else {
-    const heading = `<hh:heading type="${t}" idRef="1" level="${lvl}"/>`;
-    if (/<hh:heading\b[^/]*\/>/.test(mutInner)) {
-      mutInner = mutInner.replace(/<hh:heading\b[^/]*\/>/, heading);
-    } else {
-      // Insert just after <hh:align ... /> (Hancom's standard position).
-      mutInner = /<hh:align\s+[^>]*\/>/.test(mutInner)
-        ? mutInner.replace(/(<hh:align\s+[^>]*\/>)/, `$1${heading}`)
-        : heading + mutInner;
-    }
-  }
-  const updated = `<hh:paraPr${mutAttrs}>${mutInner}</hh:paraPr>`;
+  const mutAttrs = base.attrs.replace(/\s*id="\d+"/, ` id="${useId}"`);
+  const updated = `<hh:paraPr${mutAttrs}>${wantInner}</hh:paraPr>`;
   header = placeholder
     ? spliceEl(header, placeholder, updated)
     : bumpListCount(spliceEl(header, base, `<hh:paraPr${base.attrs}>${base.inner}</hh:paraPr>` + updated), 'hh:paraProperties', +1);
