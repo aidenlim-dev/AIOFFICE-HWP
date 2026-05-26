@@ -600,6 +600,35 @@ function retargetRun(xml, run, newId) {
   return xml.slice(0, run.start) + `<hp:run${newOpen}>` + run.inner + '</hp:run>' + xml.slice(run.end);
 }
 
+// If `target` is a SUBSTRING of the run's <hp:t>, split the run into 3 runs
+// — [before / target / after] — so the new charPr only applies to the target
+// substring. Effects like 위첨자 / 아래첨자 / bold etc. visually depend on
+// being scoped to just the styled letters; retargeting the whole line's run
+// makes Hancom Docs ignore the effect on screen.
+// If `target` already IS the whole hp:t, falls back to a plain retarget (no
+// gratuitous splitting). Returns the rewritten xml, or null if the run's
+// inner is more complex than a single <hp:t> (e.g. has tabs, line breaks,
+// embedded controls) and can't be safely split.
+function splitRunAroundText(xml, run, target, newId) {
+  const tMatch = run.inner.match(/^<hp:t(\s[^>]*)?>([^<]*)<\/hp:t>$/);
+  if (!tMatch) return null;
+  const tAttrs = tMatch[1] || '';
+  const text = tMatch[2];
+  const idx = text.indexOf(target);
+  if (idx < 0) return null;
+  if (idx === 0 && idx + target.length === text.length) return retargetRun(xml, run, newId);
+  const before = text.slice(0, idx);
+  const after = text.slice(idx + target.length);
+  const oldAttrs = run.attrs;
+  const newAttrs = /charPrIDRef="\d+"/.test(oldAttrs)
+    ? oldAttrs.replace(/charPrIDRef="\d+"/, `charPrIDRef="${newId}"`)
+    : ` charPrIDRef="${newId}"${oldAttrs}`;
+  const beforeRun = before ? `<hp:run${oldAttrs}><hp:t${tAttrs}>${before}</hp:t></hp:run>` : '';
+  const targetRun = `<hp:run${newAttrs}><hp:t${tAttrs}>${target}</hp:t></hp:run>`;
+  const afterRun = after ? `<hp:run${oldAttrs}><hp:t${tAttrs}>${after}</hp:t></hp:run>` : '';
+  return xml.slice(0, run.start) + beforeRun + targetRun + afterRun + xml.slice(run.end);
+}
+
 // Highlight (마커펜 / 형광펜) in OWPML is an INLINE marker pair, not a
 // charPr attribute. Hancom Docs stores it as
 //   <hp:t>...<hp:markpenBegin color="#FFFF00"/>대상<hp:markpenEnd/>...</hp:t>
@@ -752,10 +781,14 @@ function opApplyTextStyle(doc, target, style) {
     h2 = bumpListCount(h2, 'hh:charProperties', +1);
   }
   doc.write(headerName, h2);
-  doc.write(hitSection, dropLinesegs(retargetRun(doc.read(hitSection), hitRun, useId)));
+  const sectionXml = doc.read(hitSection);
+  const splitXml = splitRunAroundText(sectionXml, hitRun, target, useId);
+  doc.write(hitSection, dropLinesegs(splitXml || retargetRun(sectionXml, hitRun, useId)));
   return {
     target, charPrId: useId, baseCharPrId: sourceRef,
-    placeholderReused: Boolean(placeholder), retargeted: 1,
+    placeholderReused: Boolean(placeholder),
+    runSplit: splitXml !== null && !(splitXml === retargetRun(sectionXml, hitRun, useId)),
+    retargeted: 1,
     ...(highlightOut || {}),
   };
 }
