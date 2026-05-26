@@ -479,36 +479,73 @@ function opMergeCells(doc, tableIndex, mode, opts) {
 // clone the first existing tbl in the document as the template and rebuild it
 // at the requested size — same trick used by `buildPic` for images.
 //
-// Requires the source doc to already contain at least one table; throws a
-// clear error otherwise (in that case open a doc with any table, copy it in,
-// or use the bundled template doc).
+// When the doc has no existing table, we fall back to a minimal Hancom-native
+// table envelope built from scratch — uses borderFillIDRef="1" (the unstyled
+// "no borders" entry that every standard .hwpx ships with), a 5155×2075 HWP
+// unit cell (the same size 한컴독스 itself uses for new tables on A4), and
+// a plain body paragraph. Verified against a doc that 한컴독스 created via
+// its own "표 삽입" menu.
+const FALLBACK_TBL_ATTRS = ` id="0" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="0" cellSpacing="0" borderFillIDRef="1" noAdjust="0"`;
+const FALLBACK_TBL_META = `<hp:sz width="42520" widthRelTo="ABSOLUTE" height="4150" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="0" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="286" right="286" top="286" bottom="286"/><hp:inMargin left="510" right="510" top="138" bottom="138"/>`;
+const FALLBACK_CELL_ATTRS = ` name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="1"`;
+const FALLBACK_CELL_INNER = `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0"><hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t></hp:t></hp:run></hp:p></hp:subList><hp:cellAddr colAddr="0" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/><hp:cellSz width="5155" height="2075"/><hp:cellMargin left="0" right="0" top="0" bottom="0"/>`;
+
 function opInsertTable(doc, index, rows, cols, cells) {
   if (!Number.isInteger(rows) || rows < 1) throw new Error('insert_table: rows must be a positive integer');
   if (!Number.isInteger(cols) || cols < 1) throw new Error('insert_table: cols must be a positive integer');
 
   const tables = doc.tables();
-  if (!tables.length) throw new Error('insert_table: no table to clone as a template — base doc must contain at least one existing table');
+  const hasSource = tables.length > 0;
 
-  const srcTbl = tables[0];
-  const srcSection = srcTbl.section;
-  const srcXml = doc.read(srcSection);
+  let srcSection, srcPara, srcParaAttrs, templateRowAttrs, srcTblAttrs, tblMeta, cellTemplateAttrs, cellTemplateInner;
 
-  // Find the enclosing top-level paragraph of the source table.
-  const paras = scanTopLevel(srcXml, 'hp:p');
-  const srcPara = paras.find((p) => p.start <= srcTbl.el.start && p.end >= srcTbl.el.end);
-  if (!srcPara) throw new Error('insert_table: source table is not inside a top-level paragraph (unexpected)');
+  if (hasSource) {
+    const srcTbl = tables[0];
+    srcSection = srcTbl.section;
+    const srcXml = doc.read(srcSection);
 
-  // Pick a body cell as the template. Row 0 is usually a styled header
-  // (grey fill in most government / report templates), so prefer row 1's
-  // first cell when the source has more than one row — gives a clean
-  // white-background body cell by default. Fall back to row 0 for
-  // single-row source tables.
-  const srcRows = scanTopLevel(srcTbl.el.inner, 'hp:tr');
-  if (!srcRows.length) throw new Error('insert_table: source table has no rows');
-  const templateRow = srcRows.length >= 2 ? srcRows[1] : srcRows[0];
-  const srcTcs = scanTopLevel(templateRow.inner, 'hp:tc');
-  if (!srcTcs.length) throw new Error('insert_table: source row has no cells');
-  const cellTemplate = srcTcs[0];
+    // Find the enclosing top-level paragraph of the source table.
+    const paras = scanTopLevel(srcXml, 'hp:p');
+    srcPara = paras.find((p) => p.start <= srcTbl.el.start && p.end >= srcTbl.el.end);
+    if (!srcPara) throw new Error('insert_table: source table is not inside a top-level paragraph (unexpected)');
+    srcParaAttrs = srcPara.attrs;
+
+    // Pick a body cell as the template. Row 0 is usually a styled header
+    // (grey fill in most government / report templates), so prefer row 1's
+    // first cell when the source has more than one row — gives a clean
+    // white-background body cell by default. Fall back to row 0 for
+    // single-row source tables.
+    const srcRows = scanTopLevel(srcTbl.el.inner, 'hp:tr');
+    if (!srcRows.length) throw new Error('insert_table: source table has no rows');
+    const templateRow = srcRows.length >= 2 ? srcRows[1] : srcRows[0];
+    templateRowAttrs = templateRow.attrs;
+    const srcTcs = scanTopLevel(templateRow.inner, 'hp:tc');
+    if (!srcTcs.length) throw new Error('insert_table: source row has no cells');
+    cellTemplateAttrs = srcTcs[0].attrs;
+    cellTemplateInner = srcTcs[0].inner;
+    srcTblAttrs = srcTbl.el.attrs;
+
+    // Keep the source tbl's pre-row metadata (hp:sz, hp:pos, hp:outMargin, hp:inMargin).
+    const firstTrIdx = srcTbl.el.inner.indexOf('<hp:tr');
+    tblMeta = firstTrIdx >= 0 ? srcTbl.el.inner.slice(0, firstTrIdx) : '';
+  } else {
+    // Fallback path — no source table to clone. Register a SOLID 0.12mm
+    // black-border <hh:borderFill> (Hancom default) so each cell shows real
+    // gridlines instead of Hancom's "boundary hint" dashed-red overlay that
+    // appears whenever a cell points at a borderless borderFill.
+    const solidBorderFillId = ensureBorderFill(doc, STD_SLASH_NONE + PLAIN_SIDES + DEFAULT_DIAG);
+    srcSection = doc.sectionNames()[0];
+    srcPara = null;
+    srcParaAttrs = '';
+    templateRowAttrs = '';
+    cellTemplateAttrs = FALLBACK_CELL_ATTRS.replace(/borderFillIDRef="\d+"/, `borderFillIDRef="${solidBorderFillId}"`);
+    cellTemplateInner = FALLBACK_CELL_INNER;
+    srcTblAttrs = FALLBACK_TBL_ATTRS.replace(/borderFillIDRef="\d+"/, `borderFillIDRef="${solidBorderFillId}"`);
+    tblMeta = FALLBACK_TBL_META;
+  }
+
+  const cellTemplate = { attrs: cellTemplateAttrs, inner: cellTemplateInner };
+  const templateRow = { attrs: templateRowAttrs };
 
   // Build cells row-by-row.
   const builtRows = [];
@@ -534,12 +571,7 @@ function opInsertTable(doc, index, rows, cols, cells) {
     builtRows.push(`<hp:tr${templateRow.attrs}>${cellStrs.join('')}</hp:tr>`);
   }
 
-  // Keep the source tbl's pre-row metadata (hp:sz, hp:pos, hp:outMargin,
-  // hp:inMargin) — these sit before the first <hp:tr>.
-  const firstTrIdx = srcTbl.el.inner.indexOf('<hp:tr');
-  const tblMeta = firstTrIdx >= 0 ? srcTbl.el.inner.slice(0, firstTrIdx) : '';
-
-  let newTblAttrs = srcTbl.el.attrs;
+  let newTblAttrs = srcTblAttrs;
   if (/rowCnt="\d+"/.test(newTblAttrs)) newTblAttrs = newTblAttrs.replace(/rowCnt="\d+"/, `rowCnt="${rows}"`);
   else newTblAttrs = ` rowCnt="${rows}"` + newTblAttrs;
   if (/colCnt="\d+"/.test(newTblAttrs)) newTblAttrs = newTblAttrs.replace(/colCnt="\d+"/, `colCnt="${cols}"`);
@@ -547,14 +579,27 @@ function opInsertTable(doc, index, rows, cols, cells) {
 
   const newTbl = `<hp:tbl${newTblAttrs}>${tblMeta}${builtRows.join('')}</hp:tbl>`;
 
-  // Splice newTbl into a clone of the source paragraph (preserve its run /
-  // ctrl wrapping, which Hancom requires for body tables).
-  const tblOffsetInPara = srcTbl.el.start - srcPara.openEnd;
-  const tblLen = srcTbl.el.end - srcTbl.el.start;
-  const paraInnerWithNewTbl =
-    srcPara.inner.slice(0, tblOffsetInPara) + newTbl + srcPara.inner.slice(tblOffsetInPara + tblLen);
-  let newParaAttrs = srcPara.attrs.replace(/\sid="\d+"/, ` id="${freshId()}"`);
-  const newPara = `<hp:p${newParaAttrs}>${dropLinesegs(paraInnerWithNewTbl)}</hp:p>`;
+  // Build the wrapper paragraph holding the new table. When we have a source
+  // paragraph, clone its run/ctrl wrapping (which Hancom requires for body
+  // tables). When we don't (fallback path), wrap the table in a minimal run
+  // with a textWrap-friendly ctrl env.
+  let newPara;
+  if (srcPara) {
+    const tblOffsetInPara = tables[0].el.start - srcPara.openEnd;
+    const tblLen = tables[0].el.end - tables[0].el.start;
+    const paraInnerWithNewTbl =
+      srcPara.inner.slice(0, tblOffsetInPara) + newTbl + srcPara.inner.slice(tblOffsetInPara + tblLen);
+    const newParaAttrs = srcParaAttrs.replace(/\sid="\d+"/, ` id="${freshId()}"`);
+    newPara = `<hp:p${newParaAttrs}>${dropLinesegs(paraInnerWithNewTbl)}</hp:p>`;
+  } else {
+    // Hancom's own table-bearing paragraphs put <hp:tbl> DIRECTLY inside
+    // <hp:run> — wrapping it in <hp:ctrl> here (which is what we used to
+    // do) made the file unopenable in 한컴독스, even though the table XML
+    // looked structurally fine.
+    const wrapperPAttrs = ` id="${freshId()}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"`;
+    const wrapperRun = `<hp:run charPrIDRef="0">${newTbl}</hp:run>`;
+    newPara = `<hp:p${wrapperPAttrs}>${wrapperRun}</hp:p>`;
+  }
 
   // Inject at the target paragraph index (global, ordered across sections).
   // index === -1 prepends at the start of the first section's body.
