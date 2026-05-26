@@ -21,8 +21,8 @@
 `claw-hwp` is an [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) that lets Claude work directly with Korean Hangul documents (`.hwp` / `.hwpx`). The Korean office ecosystem is effectively standardized on Hancom's `.hwp` / `.hwpx` formats, and Claude can't read or edit them out of the box. Install this skill and Claude can:
 
 - **read** — extract text, tables, and metadata from `.hwp` / `.hwpx`
-- **create** — write new documents (headings, paragraphs, tables, images, page breaks). For tables, output as `.hwp` — see [Known limitations](#known-limitations)
-- **edit** — text replace, paragraph/table insert, cell editing, headers·footers, bullet·numbered lists, footnotes, hyperlinks, and more on existing documents
+- **create** — write new documents (headings, paragraphs, tables, images, page breaks + character formatting (bold·italic·underline·strikethrough·highlight·color·size·font) and paragraph formatting (alignment·line spacing·indent·margins·background)). For tables, output as `.hwp` — see [Known limitations](#known-limitations)
+- **edit** — edit existing documents in their **original format** (no `.hwp` ↔ `.hwpx` conversion). `.hwp` via byte-level raw-patch (cell content·text replace·paragraph/table insert·page setup·character/paragraph formatting); `.hwpx` via direct XML edit (cells·headers/footers·bullet/numbered lists·footnotes·hyperlinks·insert_table·etc.). Both paths preserve existing tables.
 - **convert** — `.hwp ↔ .hwpx` both directions via rhwp WASM. Not lossless — round-tripping can damage tables and images
 - **preview** — view rhwp-rendered pages inline or in a browser (the path differs by surface — see [Usage by surface](#usage-by-surface))
 
@@ -42,9 +42,10 @@ No Hancom Office, no LibreOffice, no Windows COM required.
 
 These come from rhwp's serializer. Worth knowing before you start.
 
-- **Tables are dropped when emitting `.hwpx`.** Whether you create a new `.hwpx` via `create.js` or convert `.hwp → .hwpx`, rhwp's `exportHwpx()` strips tables. **If you need tables, write `.hwp` instead.** If you really need `.hwpx`, opening and re-saving the result in Hancom Office or 한컴독스 will regenerate the table XML.
-- **Editing existing `.hwp` files can lose tables.** The `.hwp` edit path internally converts to `.hwpx` first, which trips the same serializer. **If you need to edit while preserving existing tables, start from a `.hwpx` source** — that path edits the XML directly and tables are preserved, and covers cell content·alignment·background·borders, bullet·numbered lists, footnotes, and hyperlinks.
-- **`.hwp ↔ .hwpx` round-tripping is lossy.** Tables, images, and complex shapes can be damaged. Keep `.hwpx` as the canonical format when possible; only emit `.hwp` when explicitly required.
+- **Tables are preserved when editing `.hwp` or `.hwpx`.** Tables only get dropped in two cases: when `create.js` writes a **brand-new `.hwpx` from scratch**, or when `convert.js` runs `.hwp → .hwpx` — both go through rhwp's `exportHwpx()` which strips tables. **If you're creating a new document with tables, output as `.hwp`.** Editing existing files keeps tables intact in either format: `.hwp` via byte-level raw-patch (cell content·text replace·paragraph/table insert·page setup·formatting), `.hwpx` via direct XML edit (cells·alignment·background·borders·rows/columns·insert_table·headers/footers·lists·footnotes·hyperlinks).
+- **`.hwp ↔ .hwpx` conversion is lossy.** Tables / images / complex shapes can break — **edit in the input's original format** (`.hwp` stays `.hwp`, `.hwpx` stays `.hwpx`). Only run `convert.js` when the user explicitly requests a format change.
+- **In-place character/paragraph formatting on large existing `.hwp` files (50+ pages)** is limited in v1 to small forms (1-2 pages). Applying styles at the moment of paragraph creation works for any size; retroactively styling a specific snippet inside a big existing document is on the roadmap (raw-patch extension).
+- **In-place image insertion on existing `.hwp` files** (`append_image`) is not yet Hancom-Docs compatible in v1 — debugging the raw-patch mini-stream chain. Creating a new `.hwp` from scratch with images works.
 - **PDF / DOCX conversion is not yet supported.** Planned for a later release via LibreOffice headless.
 
 ## Built on
@@ -82,7 +83,8 @@ Pick `hop` for desktop GUI, `claw-hwp` for AI-driven workflows.
 - [x] v0.8 — Vendored Node deps — zero-config install across Code / Desktop / web
 - [x] v0.9 — Plugin icon
 - [x] v1.0 — Submitted to Anthropic's official marketplace (pending review)
-- [x] v1.1 — Footnotes (`append_paragraph_with_footnotes`) + Markdown→HWP citation styles (numeric_inline / footnote / footnote_with_bibliography)
+- [x] v1.1 — Edit feature expansion (character/paragraph/cell formatting, headers/footers, bullet/numbered lists, footnotes, hyperlinks, insert_table, Markdown→HWP citation styles)
+- [ ] v1.x — In-place character/paragraph formatting on large existing files (50+ pages) — raw-patch CharShape extension
 - [ ] v1.2+ — PDF / DOCX conversion, image extraction, viewer/editor React packages
 
 ## Install
