@@ -46,7 +46,7 @@ These come from the HWP 5.0 format itself and a few v1-scope edges. Worth knowin
 
 - **Tables are preserved when editing `.hwp` or `.hwpx`.** Conversion (`.hwp ↔ .hwpx`) can damage tables (rhwp serializer limitation) — prefer staying in the input's original format. Editing existing files keeps tables intact in either format: `.hwp` via byte-level raw-patch (cell content·text replace·paragraph/table insert·page setup·formatting), `.hwpx` via direct XML edit (cells·alignment·background·borders·rows/columns·insert_table·headers/footers·lists·footnotes·hyperlinks). Tables are also supported when creating new documents in either `.hwp` or `.hwpx`.
 - **`.hwp ↔ .hwpx` conversion is lossy.** Tables / images / complex shapes can break — **edit in the input's original format** (`.hwp` stays `.hwp`, `.hwpx` stays `.hwpx`). Only run `convert.js` when the user explicitly requests a format change.
-- **In-place character formatting on large existing `.hwp` files (50+ pages)** is supported via raw-patch CharShape — `apply_text_style` (bold·italic·underline·strikethrough·highlight·color·size·super/subscript·etc.) round-trips through Hancom Office and Hancom Docs cleanly. **Paragraph-level formatting** (alignment·line spacing·indent·background via `apply_paragraph_style`) is still limited to small forms (1-2 pages); the raw-patch ParaShape extension lands in a follow-up.
+- **In-place character/paragraph formatting on large existing `.hwp` files (50+ pages)** is supported via raw-patch — both `apply_text_style` (bold·italic·underline·strikethrough·highlight·color·size·super/subscript·etc., via CharShape) and `apply_paragraph_style` (alignment·line spacing·indent·margins·spacing before/after·background via ParaShape + BorderFill) round-trip through Hancom Office and Hancom Docs cleanly.
 - **In-place image insertion on existing `.hwp` files** (`append_image`) is not yet Hancom-Docs compatible in v1 — debugging the raw-patch mini-stream chain. Creating a new `.hwp` from scratch with images works.
 - **PDF / DOCX conversion is not yet supported.** Planned for a later release via LibreOffice headless.
 
@@ -87,7 +87,7 @@ Pick `hop` for desktop GUI, `claw-hwp` for AI-driven workflows.
 - [x] v1.0 — Submitted to Anthropic's official marketplace (pending review)
 - [x] v1.1 — Edit feature expansion (character/paragraph/cell formatting, headers/footers, bullet/numbered lists, footnotes, hyperlinks, insert_table, Markdown→HWP citation styles)
 - [x] v1.2 — Character-level formatting on large existing files (50+ pages) via raw-patch CharShape — `apply_text_style` is Hancom-Docs–compatible ✓
-- [ ] v1.3 — Paragraph-level formatting on large files (raw-patch ParaShape — `apply_paragraph_style`)
+- [x] v1.3 — Paragraph-level formatting on large files via raw-patch ParaShape + BorderFill — `apply_paragraph_style` is Hancom-Docs–compatible ✓
 - [ ] v1.2+ — PDF / DOCX conversion, image extraction, viewer/editor React packages
 
 ## Install
