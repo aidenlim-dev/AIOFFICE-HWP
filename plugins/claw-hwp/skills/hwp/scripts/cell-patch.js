@@ -1885,7 +1885,26 @@ function findLastLevel0Paragraph(records) {
 //   - instance_id to a fresh unique value
 function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFlag, newInstanceId, breakValOverride, lineSegCount) {
   const bodySize = srcParaHeaderRec.size;
-  if (bodySize < 24) throw new Error(`PARA_HEADER body too short to clone properly: ${bodySize} (need >= 24)`);
+  // PARA_HEADER body layout:
+  //   bytes  0..3   char_count_raw (u32, MSB=paragraph flag)
+  //   bytes  4..7   control_mask   (u32)
+  //   bytes  8..9   para_shape_id  (u16)
+  //   byte   10     style_id       (u8)
+  //   byte   11     break_val      (u8)
+  //   bytes 12..13  num_char_shapes (u16)
+  //   bytes 14..15  range_tags_count (u16)
+  //   bytes 16..17  line_segs_count  (u16)
+  //   bytes 18..21  instance_id    (u32)
+  //   bytes 22..23  change_tracking_state (u16, HWP 5.0.3+)
+  //
+  // Older forms (HWP 5.0.0 pre-change-tracking — e.g. some Hop-exported
+  // h22-style files) emit 22-byte PARA_HEADER bodies without the
+  // trailing change_tracking_state field. All our writes stay within
+  // offsets 0..21, so 22-byte bodies clone correctly — the trailing 2
+  // bytes simply don't exist, and the emitted record stays 22 bytes too
+  // (consistent with the source format Hancom Office already accepts
+  // for this file).
+  if (bodySize < 22) throw new Error(`PARA_HEADER body too short to clone properly: ${bodySize} (need >= 22)`);
   const body = Buffer.alloc(bodySize);
   raw.copy(body, 0, srcParaHeaderRec.dataOff, srcParaHeaderRec.dataOff + bodySize);
   // char_count_raw with optional MSB flag.
@@ -1905,7 +1924,8 @@ function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFla
   body.writeUInt16LE(lineSegCount | 0, 16);
   // instance_id (offset 18..21) → fresh unique value
   body.writeUInt32LE(newInstanceId >>> 0, 18);
-  // bytes 22..23 stay as cloned from source.
+  // bytes 22..23 (change_tracking_state) stay as cloned from source if
+  // present; absent in 22-byte (older HWP 5.0.0) bodies.
 
   // Header: level 0, tag PARA_HEADER, size field matches body.
   if (bodySize > 0xFFE) {
