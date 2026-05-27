@@ -1160,18 +1160,20 @@ const HANDLERS = {
     );
   },
 
-  // ── Styling ops (rhwp emit path) ──────────────────────────────────────
+  // ── Styling ops (rhwp-driven path) ────────────────────────────────────
   //
-  // apply_text_style / apply_paragraph_style mirror hwpx-edit-module's op
-  // names so cold-start Claude calls the same vocabulary regardless of
+  // apply_text_style / apply_paragraph_style mirror the .hwpx editor's op
+  // names so a cold-started Claude calls the same vocabulary regardless of
   // input format. These run through rhwp's WASM applyCharFormat /
   // applyParaFormat, which means they're stuck behind rhwp's exportHwp
-  // round-trip:
-  //   - from-scratch documents ✓ 한컴독스 OK
-  //   - small mini-stream Section0 files ✓
-  //   - big forms (50+ pages, ktx-style) ✗ (rhwp round-trip limit —
-  //     Hop hits the same wall; verified 2026-05-22). Big-form support
-  //     lives in cell-patch.js applyTextStyleInPlace (Phase B).
+  // round-trip behavior:
+  //   - building a new document from scratch ✓ Hancom-Docs compatible
+  //   - in-place edits on small single-page .hwp files ✓
+  //   - in-place edits on large multi-page .hwp files (50+ pages) ✗
+  //     (rhwp's serializer can't round-trip large existing files through
+  //     Hancom Docs). The large-file path lives in cell-patch.js
+  //     applyTextStyleInPlace and applyParagraphStyleInPlace, which the
+  //     RAW_PATCH_OPS dispatcher below routes to first.
 
   apply_text_style(doc, op, cursor) {
     if (typeof op.target !== "string" || op.target.length === 0) {
@@ -2057,16 +2059,18 @@ async function readStdin() {
   const APPEND_TABLE_OPS = new Set(['append_table']);
   const SETUP_DOC_OPS = new Set(['setup_document']);
   const APPEND_IMAGE_OPS = new Set(['append_image']);
-  // Phase B: text styling via raw-patch — applies CharShape edits
-  // byte-level on top of existing .hwp without rhwp round-trip.
-  // Works on big forms (50+ pages) where rhwp emit gets rejected by
-  // Hancom Docs. See cell-patch.js applyTextStyleInPlace for the
-  // CharShape body / ID_MAPPINGS / PARA_CHAR_SHAPE handling.
+  // Text styling via raw-patch — applies CharShape edits at the byte
+  // level on top of an existing .hwp without round-tripping through
+  // rhwp's serializer. Required for large multi-page files (50+ pages)
+  // where the rhwp-driven path can't reproduce a Hancom-Docs-compatible
+  // output. See cell-patch.js applyTextStyleInPlace for the CharShape
+  // body, HWPTAG_ID_MAPPINGS counter bumps, and PARA_CHAR_SHAPE handling.
   const APPLY_TEXT_STYLE_OPS = new Set(['apply_text_style']);
-  // Phase B Step 2: paragraph styling via raw-patch. Same flow as
-  // apply_text_style but operates on PARA_SHAPE + (for background_color)
-  // BORDER_FILL + auto-shaded CharShape. See cell-patch.js
-  // applyParagraphStyleInPlace for the PARA_SHAPE body / ID_MAPPINGS /
+  // Paragraph styling via raw-patch. Same overall flow as
+  // apply_text_style but operates on PARA_SHAPE rather than CHAR_SHAPE,
+  // and additionally appends a HWPTAG_BORDER_FILL when
+  // background_color is set. See cell-patch.js applyParagraphStyleInPlace
+  // for the PARA_SHAPE body, HWPTAG_ID_MAPPINGS counter bumps, and
   // PARA_HEADER paraShapeId handling.
   const APPLY_PARAGRAPH_STYLE_OPS = new Set(['apply_paragraph_style']);
   // All paragraph-shaped append ops route through appendParagraphInPlace.
@@ -2143,8 +2147,9 @@ async function readStdin() {
         //     CTRL_HEADER size / SHAPE_COMPONENT body / CTRL_DATA, valid
         //     PARA_LINE_SEG for the image height)
         //   - rewrite paraShape / charShape IDs to point at the user
-        //     file's existing image paragraph (ktx-style: paraShape=29
-        //     for the nested image paragraph #11)
+        //     file's existing image paragraph (in the sample form we
+        //     tested, that's paraShape index 29 on a nested paragraph
+        //     within an image cell)
         const rhwp = (await import("./vendor/rhwp/rhwp.js"));
         if (!globalThis.__rhwp_loaded_for_template) {
           await rhwp.default({

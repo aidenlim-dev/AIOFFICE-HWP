@@ -1901,7 +1901,7 @@ function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFla
   body.writeUInt16LE(0, 14);
   // line_segs_count (offset 16) → caller-supplied. 0 for plain paragraphs
   // (Hancom recomputes layout from text), 1 for break paragraphs (where
-  // we emit a PARA_LINE_SEG record to match the ktx-style structure).
+  // we emit a PARA_LINE_SEG record to match the structure Hancom Office
   body.writeUInt16LE(lineSegCount | 0, 16);
   // instance_id (offset 18..21) → fresh unique value
   body.writeUInt32LE(newInstanceId >>> 0, 18);
@@ -2048,7 +2048,7 @@ export async function appendParagraphInPlace(filePath, ops) {
   // the file).
   //
   // Safe choice: insert right after the LAST SIMPLE BODY paragraph
-  // (a paragraph with no controls/tables). For a form like ktx.hwp
+  // (a paragraph with no controls/tables). For a typical multi-page form
   // the simple body sits before the cover-page paragraph, so the new
   // text shows up between the running body text and the table block.
   // The section's last-paragraph flag (high bit on text_count) stays
@@ -2067,8 +2067,8 @@ export async function appendParagraphInPlace(filePath, ops) {
     //   - Plain paragraph: PARA_HEADER + PARA_TEXT + PARA_CHAR_SHAPE
     //     (line_segs_count=0; Hancom recomputes line layout)
     //   - Break-only paragraph: PARA_HEADER + PARA_CHAR_SHAPE + PARA_LINE_SEG
-    //     (no PARA_TEXT; matches ktx's empty page-break paragraphs).
-    //     ktx's #13/#90 (page break) carry line_segs_count=1 and a
+    //     (no PARA_TEXT; matches Hancom-Office-saved files' empty page-break paragraphs).
+    //     Hancom-Office samples' page-break paragraphs carry line_segs_count=1 and a
     //     PARA_LINE_SEG record. Hancom Docs rejects break paragraphs
     //     that have line_segs_count=0 (the v1 attempt of Phase 4-2/3).
     const lineSegCount = isBreakOnly ? 1 : 0;
@@ -2144,7 +2144,7 @@ export async function appendParagraphInPlace(filePath, ops) {
 //   1. Allocate a fresh mini-FAT chain for the image bytes (image < 4096
 //      bytes for v1 — most embedded icons / 1x1 png / small bitmaps fit).
 //      Larger images need regular FAT allocation; deferred.
-//   2. Pick an unused directory slot (type=0). ktx has 3; if none we'd
+//   2. Pick an unused directory slot (type=0). the typical pre-allocated count is around 3; if none we'd
 //      need to expand the directory chain (deferred).
 //   3. Write the new entry: name = "BIN000<N>.<ext>" UTF-16LE, type=2
 //      (stream), color=0 (red), L/R/C=-1, start=miniChain[0],
@@ -2388,7 +2388,7 @@ const TAG_BIN_DATA_DEF = 0x12;
 //   bits 8..9 = status (0=NotAccessed, 1=Success)
 // Already-compressed image formats (jpg/png/gif) use NoCompress so Hancom
 // doesn't try to deflate them again on load. BMP / raw bitmaps use Default.
-// Matches ktx.hwp pattern: jpg → 0x21, bmp → 0x01.
+// Matches the byte pattern Hancom Office writes for these stream types: jpg → 0x21, bmp → 0x01.
 const COMPRESSED_FORMATS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
 
 function buildBinDataDefBody(storageId, ext, attrOverride) {
@@ -2592,7 +2592,7 @@ function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, ne
       //   offset 10     styleId u8
       //   offset 11     break_val u8
       // The cluster's paraShape is the fresh-template's #0 which doesn't
-      // exist in the user's ktx DocInfo (different table). Point the
+      // exist in the user's DocInfo (different table) (different table). Point the
       // cluster at the anchor paragraph's paraShape so the rendering
       // engine resolves it correctly.
       if (typeof anchorParaShape === 'number' && r.size >= 10) {
@@ -2602,7 +2602,7 @@ function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, ne
   }
   // PARA_CHAR_SHAPE (tag 0x44) — first entry's charShape u32 at body offset 4.
   // Same reasoning as paraShape: fresh-template's charShape #0 isn't the
-  // same character as ktx's #0 (different DocInfo tables). Point the
+  // same character role as the donor file's first numbering entry (different DocInfo tables). Point the
   // top-level paragraph's first char_shape entry at the anchor's charShape.
   if (typeof anchorCharShape === 'number') {
     for (let i = startIdx; i < endIdx; i++) {
@@ -2661,7 +2661,7 @@ function cloneImageClusterBytes(records, raw, startIdx, endIdx, oldBinDataId, ne
 //     SHAPE_COMPONENT lvl 2 — donor's $pic body (level-shifted from 4→2)
 //     CTRL_DATA lvl 3 — donor's body (level-shifted from 5→3)
 //
-// The donor records come from the user's existing image (e.g. ktx's nested
+// The donor records come from the user's existing image (e.g. a nested
 // paragraph #11 lvl-3-5 image). Cloning their bodies verbatim keeps every
 // DocInfo reference (paraShape ref inside CommonObjAttr, BorderFill, etc)
 // resolved against the same DocInfo. We only rewrite:
@@ -2690,7 +2690,7 @@ function buildImageOnlyParagraphCluster({
   ph.writeUInt16LE(0, 14);                          // range_tags_count
   ph.writeUInt16LE(1, 16);                          // line_segs_count
   ph.writeUInt32LE(0, 18);                           // instance_id (fresh template uses 0)
-  // bytes 22..23 left as zeros (extra padding seen in ktx)
+  // bytes 22..23 left as zeros (extra padding observed in Hancom-Office-saved files)
   // But canonical PARA_HEADER size in fresh template is 22 — keep 22.
 
   // 2. PARA_TEXT body (18 bytes): inline extended ctrl char (16) + EOP (2)
@@ -2947,9 +2947,9 @@ async function appendImageBodyControl(filePath, newBinDataId, imageHeightHwp, te
 //      restore the previous csId)
 //   5. deflate + write back — original bytes untouched everywhere else
 //
-// Ground truth was learned by comparing user-supplied Hancom Office
-// outputs (ktx_phase_b_styling_spec (1).hwp etc.) against the pre-edit
-// base — see the commit log + the dump scripts in /tmp for details.
+// Ground truth was learned by comparing Hancom-Office-saved sample
+// files against the pre-edit base — see the commit log for the
+// detailed byte-level analysis.
 // CharShape body layout (74 bytes):
 //   0-13   font_ids[7]     (u16 × 7)
 //   14-20  ratios[7]       (u8 × 7)
@@ -3464,14 +3464,15 @@ export async function applyTextStyleInPlace(filePath, ops) {
   return Object.assign(summary, { mode: 'in-place', styled_count: summary.length });
 }
 
-// ── Phase B Step 2: applyParagraphStyleInPlace ──────────────────────────────
+// ── applyParagraphStyleInPlace ──────────────────────────────────────────────
 //
 // Raw-patch path for paragraph-level styles (alignment / indent / margins /
-// line spacing / spacing before-after / background) on big forms that rhwp
-// emit can't round-trip through Hancom Docs. Mirrors applyTextStyleInPlace's
-// architecture: clone the paragraph's current PARA_SHAPE, overlay style
-// props, dedup or append to DocInfo (bumping HWPTAG_ID_MAPPINGS counts),
-// then rewrite the PARA_HEADER's paraShapeId field.
+// line spacing / spacing before-after / background) on large multi-page
+// `.hwp` files where round-tripping through rhwp's `exportHwp()` produces
+// output Hancom Docs rejects. Mirrors applyTextStyleInPlace's architecture:
+// clone the paragraph's current PARA_SHAPE, overlay style props, dedup
+// against existing entries or append to DocInfo (bumping the matching
+// HWPTAG_ID_MAPPINGS count), then rewrite the PARA_HEADER's paraShapeId.
 //
 // PARA_SHAPE body layout (58 bytes, per rhwp serializer):
 //   0-3:   attr1 (u32) — bits 0-1 line_spacing_type, bits 2-4 alignment
@@ -3627,13 +3628,17 @@ function appendParaShapeToDocInfo(diRaw, body) {
 // Build a 53-byte BORDER_FILL body with a solid background fill at the
 // requested color. Borders are all type=0 (none) so the paragraph gets a
 // flat color without 1px frame artifacts.
-// Two known-working BorderFill patterns (for the same logical "solid fill"):
-//   - rhwp: diagonal type=0, size_marker=1 (works in rhwp emit small docs)
-//   - ktx:  diagonal type=1, size_marker=0 (Hancom Office's pattern for ktx-style forms)
-// Default to rhwp pattern. Debug callers can pass `_bfPattern: 'ktx'`.
+//
+// Two byte patterns produce a working solid fill in Hancom Docs:
+//   - 'rhwp'  (default): diagonal_type=0, size_marker=1 — the pattern
+//             rhwp's `exportHwp()` writes for new documents.
+//   - 'hancom': diagonal_type=1, size_marker=0 — the pattern Hancom
+//             Office desktop writes when it saves a `.hwp` natively.
+// Both render identically. Default to 'rhwp'. Debug callers can opt
+// into the Hancom-native pattern via `_bfPattern: 'hancom'`.
 function buildBorderFillSolidBody(hexColor, pattern = 'rhwp') {
   const buf = Buffer.alloc(53);
-  if (pattern === 'ktx') {
+  if (pattern === 'hancom') {
     buf.writeUInt8(0x01, 26);  // diagonal type=1
     // size_marker stays 0
   } else {
@@ -3676,12 +3681,13 @@ function appendBorderFillToDocInfo(diRaw, body) {
   const oldCount = newDi.readUInt32LE(off);
   newDi.writeUInt32LE(oldCount + 1, off);
   // Return the **1-based** ID for ParaShape references.
-  // Empirically verified (2026-05-27 against REF1 from Hancom Office):
-  // ParaShape.border_fill_id and similar HWP fill-reference fields are
-  // 1-based (with 0 reserved as "no fill"), even though the BorderFill
-  // array is stored 0-indexed. REF1 PS[7] (B8's paraShape) has
-  // border_fill_id=2 and visibly renders as BF[1] (gray b2b2b2) — i.e.
-  // bfId-1 = array index. We mirror this.
+  // ParaShape.border_fill_id (and similar HWP BorderFill-reference
+  // fields) are 1-based, with 0 reserved as the "no fill" sentinel,
+  // even though the BorderFill array itself is stored 0-indexed.
+  // Verified against a Hancom-Office-saved sample: a paragraph that
+  // visibly renders the gray BorderFill at array index 1 carries
+  // border_fill_id = 2 in its ParaShape — i.e. (id - 1) is the
+  // array index. We mirror that convention.
   return { newDi, newBfId: bfCount + 1 };
 }
 
@@ -3902,10 +3908,10 @@ export async function applyParagraphStyleInPlace(filePath, ops) {
     const bg = resolveBackgroundColor(op);
 
     // Background: create a new BorderFill + reference it from the new
-    // ParaShape. Hancom Docs uses **1-based** indexing for BorderFill
-    // refs (verified 2026-05-27 against REF1: B8's paraShape
-    // border_fill_id=2 visibly maps to BF[1] (the gray)). The 1-based
-    // ID conversion lives inside appendBorderFillToDocInfo's return.
+    // ParaShape. Hancom Docs uses 1-based indexing for ParaShape's
+    // border_fill_id field (0 means "no fill"); the 1-based conversion
+    // is encapsulated inside appendBorderFillToDocInfo's return value
+    // so callers can just write it directly onto the ParaShape.
     let newBfId = null;
     if (bg) {
       if (Number.isInteger(op._useExistingBfId)) {
@@ -3935,15 +3941,15 @@ export async function applyParagraphStyleInPlace(filePath, ops) {
     // Rewrite PARA_HEADER paraShapeId. PARA_HEADER body offset 8-9.
     secRaw = setParaHeaderShapeId(secRaw, hit.paraHeaderRec, newPsId);
 
-    // Background: paragraph fill alone (above) gives the uniform gray
-    // rectangle Hancom Office desktop produces (REF1 PS[7] →
-    // BF[1] gray, with CS[22].shade_color = 0xFFFFFFFF / "no shade").
-    // We deliberately do NOT mirror Phase A's auto char shadeColor
-    // overlay here — Hancom doesn't do it, and paragraph fill already
-    // covers between-glyph gaps uniformly on this raw-patch path
-    // (PARA_LINE_SEG layout cache is preserved, unlike rhwp emit).
-    // The `_applyCharShade: true` debug knob is retained for parity
-    // experiments but is OFF by default.
+    // Background: the paragraph fill set above is enough on its own to
+    // produce the uniform colored rectangle Hancom Office desktop emits
+    // when a user applies "문단 모양 - 배경" — the desktop app doesn't
+    // touch per-character shade either (the CharShape used by the
+    // styled paragraph keeps shade_color = 0xFFFFFFFF / "no shade").
+    // On this raw-patch path the layout cache (PARA_LINE_SEG records)
+    // stays intact, so the paragraph fill covers between-glyph gaps
+    // uniformly. The opt-in `_applyCharShade: true` knob is retained
+    // for parity experiments; it is OFF by default.
     if (bg && op._applyCharShade === true) {
       const refreshed = typeof op.target === 'string' && op.target.length > 0
         ? (() => { const h = findTextRangeInSection(secRaw, op.target); if (h) { h.start = 0; h.end = h.textLength; } return h; })()
