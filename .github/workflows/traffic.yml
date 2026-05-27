@@ -2,9 +2,14 @@ name: Refresh traffic data
 
 on:
   schedule:
-    # Daily at 00:00 UTC (≈ 09:00 KST). GitHub Traffic API retains 14 days
-    # of data, so a daily cron captures the rolling window without gaps.
-    - cron: "0 0 * * *"
+    # Daily at 00:30 UTC (≈ 09:30 KST). Offset off the top of the hour
+    # because GitHub Actions's schedule queue is busiest at exact-hour
+    # marks — `0 0 * * *` runs frequently slip 1-2h or get dropped under
+    # load (GitHub docs: "schedule event can be delayed during periods
+    # of high load. High load times include the start of every hour").
+    # GitHub Traffic API retains 14 days of data, so a daily cron
+    # captures the rolling window without gaps regardless of the offset.
+    - cron: "30 0 * * *"
   workflow_dispatch:
   push:
     branches: [main]
