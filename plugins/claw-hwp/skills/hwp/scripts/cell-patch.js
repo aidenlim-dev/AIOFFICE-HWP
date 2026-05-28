@@ -1610,7 +1610,18 @@ const TBL_CTRL_ID = 0x74626c20; // 'tbl '
 // table in the section. We prefer small tables as templates so the
 // cloned cluster bytes are minimal.
 function findTemplateTableCluster(records, raw) {
+  // Two trackers:
+  //   - best: smallest by area among ALL tables (fallback)
+  //   - bestContent: smallest by area among tables with rows>=2 AND cols>=2
+  //     (filters out single-row/column layout tables — those are often
+  //     borderless cosmetic-alignment tables and cloning them produces a
+  //     visually-invisible result. Concrete case observed: h22 work_report
+  //     has 4 tables — a 1x2 borderless header layout (area 2) and two
+  //     real 9x4 content tables with visible borders; the old "smallest
+  //     overall" rule picked the 1x2 and the inserted table came out
+  //     invisible. The rows/cols filter picks 9x4 instead, which renders.)
   let best = null;
+  let bestContent = null;
   for (let i = 0; i < records.length; i++) {
     if (records[i].tag !== TAG_PARA_HEADER || records[i].level !== 0) continue;
     // Locate cluster end (next level-0 PARA_HEADER or records.length)
@@ -1632,14 +1643,17 @@ function findTemplateTableCluster(records, raw) {
       const rows = tableBody.readUInt16LE(4);
       const cols = tableBody.readUInt16LE(6);
       const area = rows * cols;
-      if (!best || area < best.area) {
-        best = { paraStartIdx: i, clusterEndIdx: end, rows, cols, area };
+      const candidate = { paraStartIdx: i, clusterEndIdx: end, rows, cols, area };
+      if (!best || area < best.area) best = candidate;
+      if (rows >= 2 && cols >= 2) {
+        if (!bestContent || area < bestContent.area) bestContent = candidate;
       }
       break;
     }
   }
-  if (!best) throw new Error('append_table: no existing table found in section to use as a template — raw-patch needs a template (form-design tables in advance, or call append_table on a form that already has at least one table)');
-  return best;
+  const chosen = bestContent || best;
+  if (!chosen) throw new Error('append_table: no existing table found in section to use as a template — raw-patch needs a template (form-design tables in advance, or call append_table on a form that already has at least one table)');
+  return chosen;
 }
 
 // Clone the table cluster while emptying cell content.
@@ -1708,6 +1722,123 @@ function cloneTableClusterBytes(records, raw, startIdx, endIdx) {
   return Buffer.concat(parts);
 }
 
+// ── synthesize-path helpers (approach A) ──────────────────────────────────
+//
+// When the caller provides `_templateBytes` (a small .hwp produced by rhwp
+// containing exactly one table with the user's rows×cols), extract that
+// table cluster and splice it into the target. The cells in the
+// rhwp-produced cluster reference rhwp's own BorderFill IDs (typically 3
+// for the all-1-thick visible style). Those IDs in the target's DocInfo
+// may not match — concretely, the target's BF #3 has different border
+// styling than rhwp's BF #3. Remap to a uniform-visible BF in the target.
+//
+// borderFillId is consistently the LAST u16 of a level-2 LIST_HEADER body
+// (offset = bodySize - 2), confirmed by inspecting both rhwp's 34-byte
+// cell LIST_HEADER bodies and h22's 46-byte ones (the extra trailing
+// bytes in h22 are after the borderFillId, not before).
+
+// Read a named stream's decompressed bytes from a CFB buffer using
+// cell-patch's own primitives (no sheetjs dependency). The stream is
+// inflated via raw deflate (HWP's standard section compression).
+function readDecodedStreamFromCfb(buf, streamPathParts) {
+  const { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
+  const fat = readFat(buf, fatAddrs, ssz);
+  const { entries } = readDirectory(buf, fat, ssz, dirStart);
+  const dirEntry = findStreamEntry(entries, streamPathParts);
+  let compressed;
+  if (dirEntry.size < 4096) {
+    const minifat = readMinifat(buf, fat, ssz, minifatStart);
+    if (entries[0].start < 0) throw new Error('mini-stream needed but root entry has no chain');
+    const rc = walkChain(fat, entries[0].start);
+    const chain = walkChain(minifat, dirEntry.start);
+    compressed = readMiniChainBytes(buf, chain, rc, ssz, mssz, dirEntry.size);
+  } else {
+    const chain = walkChain(fat, dirEntry.start);
+    compressed = readChainBytes(buf, chain, ssz, dirEntry.size);
+  }
+  return Buffer.from(inflateRawSync(compressed));
+}
+
+// Pull the table cluster's raw bytes out of an rhwp-generated template.
+// Returns the byte slice (head of top-level PARA_HEADER through to the
+// end of the cluster, before the next top-level PARA_HEADER).
+function extractTableClusterFromTemplate(templateBytes) {
+  const raw = readDecodedStreamFromCfb(templateBytes, ['BodyText', 'Section0']);
+  const recs = parseRecords(raw);
+  for (let i = 0; i < recs.length; i++) {
+    if (recs[i].tag !== TAG_PARA_HEADER || recs[i].level !== 0) continue;
+    let end = recs.length;
+    for (let j = i + 1; j < recs.length; j++) {
+      if (recs[j].tag === TAG_PARA_HEADER && recs[j].level === 0) { end = j; break; }
+    }
+    for (let j = i + 1; j < end; j++) {
+      const r = recs[j];
+      if (r.tag === TAG_CTRL_HEADER && r.level === 1 && r.size >= 4
+          && raw.readUInt32LE(r.dataOff) === TBL_CTRL_ID) {
+        const startByte = recs[i].headOff;
+        const endByte = end < recs.length ? recs[end].headOff : raw.length;
+        return Buffer.from(raw.slice(startByte, endByte));  // mutable copy
+      }
+    }
+  }
+  throw new Error('synthesize: no table cluster found in template');
+}
+
+// Walk the target's DocInfo and return the 1-based ID of a BorderFill
+// with uniform visible borders (kind=0 solid, thickness 1 on all four
+// sides). Falls back to any BF with all four borders > 0. Returns null
+// if nothing visible exists.
+function findUniformVisibleBorderFillId(diRaw) {
+  const TAG_BORDER_FILL_DI = 20;  // HWPTAG_BORDER_FILL in DocInfo space
+  const recs = parseRecords(diRaw);
+  // Prefer uniform 1/1/1/1 ("normal" looking table border)
+  let bfIdx = 0;
+  for (const r of recs) {
+    if (r.tag !== TAG_BORDER_FILL_DI) continue;
+    bfIdx++;
+    const body = diRaw.slice(r.dataOff, r.dataOff + r.size);
+    if (body.length < 22) continue;
+    const lt = body.readUInt8(3), rt = body.readUInt8(9);
+    const tt = body.readUInt8(15), bt = body.readUInt8(21);
+    if (lt > 0 && rt > 0 && tt > 0 && bt > 0 && lt === rt && rt === tt && tt === bt) {
+      return bfIdx;
+    }
+  }
+  // Fallback: any BF with all four sides > 0 (even if uneven)
+  bfIdx = 0;
+  for (const r of recs) {
+    if (r.tag !== TAG_BORDER_FILL_DI) continue;
+    bfIdx++;
+    const body = diRaw.slice(r.dataOff, r.dataOff + r.size);
+    if (body.length < 22) continue;
+    if (body.readUInt8(3) > 0 && body.readUInt8(9) > 0
+        && body.readUInt8(15) > 0 && body.readUInt8(21) > 0) {
+      return bfIdx;
+    }
+  }
+  return null;
+}
+
+// Rewrite every level-2 LIST_HEADER's borderFillId in the cluster bytes
+// to `newBfId`. Mutates the buffer in place.
+function remapClusterCellBorderFillId(clusterBytes, newBfId) {
+  const recs = parseRecords(clusterBytes);
+  let count = 0;
+  for (const r of recs) {
+    if (r.tag !== TAG_LIST_HEADER || r.level !== 2) continue;
+    if (r.size < 2) continue;
+    clusterBytes.writeUInt16LE(newBfId & 0xFFFF, r.dataOff + r.size - 2);
+    count++;
+  }
+  return count;
+}
+
+// Read DocInfo bytes from a CFB buffer. Used by the synthesize path so it
+// can find a target-side visible BorderFill ID to remap cell references to.
+function readDocInfoRawFromCfb(buf) {
+  return readDecodedStreamFromCfb(buf, ['DocInfo']);
+}
+
 export async function appendTableInPlace(filePath, ops) {
   if (!Array.isArray(ops) || ops.length === 0) {
     return Object.assign([], { mode: 'in-place', appended_count: 0 });
@@ -1744,8 +1875,85 @@ export async function appendTableInPlace(filePath, ops) {
   const summary = [];
   for (const op of ops) {
     const records = parseRecords(raw);
-    const tpl = findTemplateTableCluster(records, raw);
-    const cluster = cloneTableClusterBytes(records, raw, tpl.paraStartIdx, tpl.clusterEndIdx);
+
+    // Two paths:
+    //   (A) synthesize — caller pre-built an rhwp template (.hwp bytes
+    //       with exactly one user-sized table); we extract that cluster,
+    //       remap its cell borderFillIds to a visible BF in the target's
+    //       DocInfo, and splice. Honors user-supplied rows/cols.
+    //   (B) clone (legacy) — pick the smallest "real content" table
+    //       already in the section (rows≥2 AND cols≥2 preferred) and
+    //       clone it byte-for-byte with cells emptied. Doesn't honor
+    //       user-supplied rows/cols.
+    // Path (A) requires DocInfo lookup; we read it once per op (could be
+    // hoisted out of the loop if perf matters, but tables are usually
+    // single-op).
+    let cluster, entry;
+    if (Buffer.isBuffer(op._templateBytes) && op._templateBytes.length > 0) {
+      const tplCluster = extractTableClusterFromTemplate(op._templateBytes);
+      const tplRecs = parseRecords(tplCluster);
+      // Read out tpl rows/cols for the summary entry
+      let tplRows = 0, tplCols = 0;
+      for (const r of tplRecs) {
+        if (r.tag === TAG_TABLE && r.level === 2 && r.size >= 8) {
+          tplRows = tplCluster.readUInt16LE(r.dataOff + 4);
+          tplCols = tplCluster.readUInt16LE(r.dataOff + 6);
+          break;
+        }
+      }
+      // Remap cell borderFillId to target's uniform-visible BF if available
+      const diRaw = readDocInfoRawFromCfb(buf);
+      const targetBfId = findUniformVisibleBorderFillId(diRaw);
+      let remappedCellCount = 0;
+      let remappedTo = null;
+      if (targetBfId !== null) {
+        remappedCellCount = remapClusterCellBorderFillId(tplCluster, targetBfId);
+        remappedTo = targetBfId;
+      }
+      cluster = tplCluster;
+      // Even on the synth path, cell text content is NOT filled — we
+      // build an empty rows×cols frame and let the user follow up with
+      // set_cell_text. Flag this so create.js can surface it.
+      const contentMismatches = [];
+      const hdrs = Array.isArray(op.headers) ? op.headers : null;
+      const dataRows = Array.isArray(op.rows) ? op.rows : null;
+      if (hdrs && hdrs.length > 0) {
+        contentMismatches.push(`headers=${JSON.stringify(op.headers)} not filled into cells (cells emit empty — call set_cell_text after to populate)`);
+      }
+      if (dataRows && dataRows.length > 0 && Array.isArray(dataRows[0]) && dataRows[0].some((v) => v !== '' && v != null)) {
+        contentMismatches.push(`rows data not filled into cells (cells emit empty — call set_cell_text after to populate)`);
+      }
+      entry = {
+        section: 0,
+        rows: tplRows,
+        cols: tplCols,
+        note: 'synthesized via rhwp template + spliced surgically — shape honors user input, cell content empty',
+        border_fill_id_remap: { to: remappedTo, cells_remapped: remappedCellCount },
+      };
+      if (contentMismatches.length > 0) entry.user_input_ignored = contentMismatches;
+    } else {
+      const tpl = findTemplateTableCluster(records, raw);
+      cluster = cloneTableClusterBytes(records, raw, tpl.paraStartIdx, tpl.clusterEndIdx);
+
+      // Mismatch detection (clone path only — synthesize honors user input).
+      const userRowsLen = Array.isArray(op.rows) ? op.rows.length : null;
+      const userCols = typeof op.cols === 'number' ? op.cols
+        : (Array.isArray(op.headers) ? op.headers.length : null);
+      const userHeaders = Array.isArray(op.headers) ? op.headers.length : 0;
+      const mismatches = [];
+      if (userRowsLen !== null && tpl.rows !== (userRowsLen + (userHeaders ? 1 : 0))) {
+        mismatches.push(`requested ${userRowsLen} data row(s)${userHeaders ? ' + headers' : ''} but cloned table has rows=${tpl.rows}`);
+      }
+      if (userCols !== null && userCols !== tpl.cols) {
+        mismatches.push(`requested cols=${userCols} but cloned table has cols=${tpl.cols}`);
+      }
+      if (userHeaders > 0) {
+        mismatches.push(`headers=${JSON.stringify(op.headers)} ignored (cells emit empty — fill with set_cell_text or set_cell_text_by_label after)`);
+      }
+
+      entry = { section: 0, rows: tpl.rows, cols: tpl.cols, note: 'cloned from existing table template (raw-patch can only clone, not synthesize)' };
+      if (mismatches.length > 0) entry.user_input_ignored = mismatches;
+    }
 
     // Insert after the last simple body paragraph (same anchor as
     // append_paragraph) so the new table lands in a reasonable place.
@@ -1754,7 +1962,8 @@ export async function appendTableInPlace(filePath, ops) {
       ? records[insertCluster.endIdx].headOff
       : raw.length;
     raw = Buffer.concat([raw.slice(0, insertAt), cluster, raw.slice(insertAt)]);
-    summary.push({ section: 0, rows: tpl.rows, cols: tpl.cols, note: 'cloned from existing table template' });
+
+    summary.push(entry);
   }
 
   // Deflate + write back
@@ -1885,7 +2094,26 @@ function findLastLevel0Paragraph(records) {
 //   - instance_id to a fresh unique value
 function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFlag, newInstanceId, breakValOverride, lineSegCount) {
   const bodySize = srcParaHeaderRec.size;
-  if (bodySize < 24) throw new Error(`PARA_HEADER body too short to clone properly: ${bodySize} (need >= 24)`);
+  // PARA_HEADER body layout:
+  //   bytes  0..3   char_count_raw (u32, MSB=paragraph flag)
+  //   bytes  4..7   control_mask   (u32)
+  //   bytes  8..9   para_shape_id  (u16)
+  //   byte   10     style_id       (u8)
+  //   byte   11     break_val      (u8)
+  //   bytes 12..13  num_char_shapes (u16)
+  //   bytes 14..15  range_tags_count (u16)
+  //   bytes 16..17  line_segs_count  (u16)
+  //   bytes 18..21  instance_id    (u32)
+  //   bytes 22..23  change_tracking_state (u16, HWP 5.0.3+)
+  //
+  // Older forms (HWP 5.0.0 pre-change-tracking — e.g. some Hop-exported
+  // h22-style files) emit 22-byte PARA_HEADER bodies without the
+  // trailing change_tracking_state field. All our writes stay within
+  // offsets 0..21, so 22-byte bodies clone correctly — the trailing 2
+  // bytes simply don't exist, and the emitted record stays 22 bytes too
+  // (consistent with the source format Hancom Office already accepts
+  // for this file).
+  if (bodySize < 22) throw new Error(`PARA_HEADER body too short to clone properly: ${bodySize} (need >= 22)`);
   const body = Buffer.alloc(bodySize);
   raw.copy(body, 0, srcParaHeaderRec.dataOff, srcParaHeaderRec.dataOff + bodySize);
   // char_count_raw with optional MSB flag.
@@ -1905,7 +2133,8 @@ function buildClonedParaHeader(srcParaHeaderRec, raw, newCharCount, paragraphFla
   body.writeUInt16LE(lineSegCount | 0, 16);
   // instance_id (offset 18..21) → fresh unique value
   body.writeUInt32LE(newInstanceId >>> 0, 18);
-  // bytes 22..23 stay as cloned from source.
+  // bytes 22..23 (change_tracking_state) stay as cloned from source if
+  // present; absent in 22-byte (older HWP 5.0.0) bodies.
 
   // Header: level 0, tag PARA_HEADER, size field matches body.
   if (bodySize > 0xFFE) {
@@ -3412,7 +3641,13 @@ export async function applyTextStyleInPlace(filePath, ops) {
     });
   }
 
-  // Deflate + write DocInfo.
+  // Deflate + write DocInfo. mini-stream paths must use ext.miniChain /
+  // ext.newRegularChain — NOT ext.chain (that field doesn't exist on
+  // deflateMiniChainWithExpansion's return). Promotion happens when the new
+  // compressed size crosses the 4096-byte mini-stream cutoff (e.g. h22 mini
+  // DocInfo growing past the threshold after appending a new ParaShape).
+  // Previously this branch was missing and produced a runtime
+  // `Cannot read properties of undefined` crash for mini-stream forms.
   {
     const inMini = diInMini;
     const capacity = inMini ? diChain.length * mssz : diChain.length * ssz;
@@ -3422,9 +3657,15 @@ export async function applyTextStyleInPlace(filePath, ops) {
         diRaw, diChain,
       );
       buf = ext.buf; fat = ext.fat; minifat = ext.minifat; minifatStart = ext.minifatStart;
-      rootChain = ext.rootChain;
-      diChain = ext.chain;
-      writeMiniChainBytes(buf, diChain, rootChain, ssz, mssz, ext.compressed);
+      if (ext.promoted) {
+        diChain = ext.newRegularChain;
+        writeChainBytes(buf, diChain, ssz, ext.compressed);
+        buf.writeInt32LE(diChain[0], diEntry.entryFileOffset + 0x74);
+      } else {
+        rootChain = ext.rootChain;
+        diChain = ext.miniChain;
+        writeMiniChainBytes(buf, diChain, rootChain, ssz, mssz, ext.compressed);
+      }
       buf.writeUInt32LE(ext.compressed.length, diEntry.entryFileOffset + 0x78);
       buf.writeUInt32LE(0, diEntry.entryFileOffset + 0x7C);
     } else {
@@ -3436,7 +3677,7 @@ export async function applyTextStyleInPlace(filePath, ops) {
     }
   }
 
-  // Deflate + write Section0.
+  // Deflate + write Section0. Same mini-stream pattern as DocInfo above.
   {
     const inMini = secInMini;
     const capacity = inMini ? secChain.length * mssz : secChain.length * ssz;
@@ -3446,9 +3687,611 @@ export async function applyTextStyleInPlace(filePath, ops) {
         secRaw, secChain,
       );
       buf = ext.buf; fat = ext.fat; minifat = ext.minifat; minifatStart = ext.minifatStart;
-      rootChain = ext.rootChain;
-      secChain = ext.chain;
-      writeMiniChainBytes(buf, secChain, rootChain, ssz, mssz, ext.compressed);
+      if (ext.promoted) {
+        secChain = ext.newRegularChain;
+        writeChainBytes(buf, secChain, ssz, ext.compressed);
+        buf.writeInt32LE(secChain[0], secEntry.entryFileOffset + 0x74);
+      } else {
+        rootChain = ext.rootChain;
+        secChain = ext.miniChain;
+        writeMiniChainBytes(buf, secChain, rootChain, ssz, mssz, ext.compressed);
+      }
+      buf.writeUInt32LE(ext.compressed.length, secEntry.entryFileOffset + 0x78);
+      buf.writeUInt32LE(0, secEntry.entryFileOffset + 0x7C);
+    } else {
+      const ext = deflateAndFitWithExpansion(secRaw, capacity, ssz, fat, fatAddrs, secChain, buf, false);
+      buf = ext.buf; fat = ext.fat; secChain = ext.chain;
+      writeChainBytes(buf, secChain, ssz, ext.compressed);
+      buf.writeUInt32LE(ext.compressed.length, secEntry.entryFileOffset + 0x78);
+      buf.writeUInt32LE(0, secEntry.entryFileOffset + 0x7C);
+    }
+  }
+
+  writeFileSync(filePath, buf);
+  return Object.assign(summary, { mode: 'in-place', styled_count: summary.length });
+}
+
+// ── applyParagraphStyleInPlace ──────────────────────────────────────────────
+//
+// Raw-patch path for paragraph-level styles (alignment / indent / margins /
+// line spacing / spacing before-after / background) on large multi-page
+// `.hwp` files where round-tripping through rhwp's `exportHwp()` produces
+// output Hancom Docs rejects. Mirrors applyTextStyleInPlace's architecture:
+// clone the paragraph's current PARA_SHAPE, overlay style props, dedup
+// against existing entries or append to DocInfo (bumping the matching
+// HWPTAG_ID_MAPPINGS count), then rewrite the PARA_HEADER's paraShapeId.
+//
+// PARA_SHAPE body layout (58 bytes, per rhwp serializer):
+//   0-3:   attr1 (u32) — bits 0-1 line_spacing_type, bits 2-4 alignment
+//   4-7:   margin_left (i32)
+//   8-11:  margin_right (i32)
+//   12-15: indent (i32)
+//   16-19: spacing_before (i32)
+//   20-23: spacing_after (i32)
+//   24-27: line_spacing (i32, default 160)
+//   28-29: tab_def_id (u16)
+//   30-31: numbering_id (u16)
+//   32-33: border_fill_id (u16)
+//   34-41: border_spacing[4] (i16: left, right, top, bottom)
+//   42-45: attr2 (u32)
+//   46-49: attr3 (u32)
+//   50-53: line_spacing_v2 (u32)
+//   54-57: trailing tail (Hancom-emitted .hwp always has it; write 0)
+//
+// BORDER_FILL body for a solid-fill background (53 bytes):
+//   0-1:   attr (u16) = 0
+//   2-25:  borders[4] (each: type u8 + width u8 + color u32) = 24 bytes
+//   26-31: diagonal (type u8 + width u8 + color u32) = 6 bytes
+//   32-35: fill_type (u32) = 1 (solid)
+//   36-39: background_color (ColorRef u32 = 0x00BBGGRR)
+//   40-43: pattern_color (ColorRef) = 0x00FFFFFF
+//   44-47: pattern_type (i32) = -1 (no pattern overlay)
+//   48-51: size_marker (u32) = 0
+//   52:    alpha (u8) = 0
+
+const TAG_PARA_SHAPE = 25;
+const TAG_BORDER_FILL = 20;
+
+// ID_MAPPINGS body is 18 u32 entries (per rhwp serialize_id_mappings):
+//   0  bin_data_count
+//   1..7  font_count[0..6] (7 languages)
+//   8  border_fill_count          ← offset 32
+//   9  char_shape_count           ← offset 36 (ID_MAPPINGS_CHAR_SHAPE_OFFSET)
+//   10 tab_def_count
+//   11 numbering_count
+//   12 bullet_count
+//   13 para_shape_count           ← offset 52
+//   14 style_count
+//   15 memo_shape_count
+//   16-17 reserved
+const ID_MAPPINGS_BORDER_FILL_OFFSET = 8 * 4;
+const ID_MAPPINGS_PARA_SHAPE_OFFSET = 13 * 4;
+
+const ALIGNMENT_MAP = {
+  justify: 0,
+  justified: 0,
+  left: 1,
+  right: 2,
+  center: 3,
+  distribute: 4,
+  split: 5,
+};
+
+const LINE_SPACING_TYPE_MAP = {
+  percent: 0,
+  fixed: 1,
+  space_only: 2,
+  spaceonly: 2,
+  minimum: 3,
+};
+
+// Synthesize a 58-byte ParaShape body by cloning `base` and overlaying style
+// props. `base` must be the ParaShape body the target paragraph already
+// uses, so unmanaged fields (border_spacing, attr2, attr3, tab_def_id,
+// numbering_id) stay consistent with surrounding paragraphs.
+//
+// PARA_SHAPE size by HWP version (mirrors the 22 vs 24 PARA_HEADER pattern):
+//   46 bytes — HWP 5.0.0 pre-attr3 (some older forms, e.g. h22-style).
+//              Covers attr1 + margins + indent + spacings + line_spacing +
+//              tab_def_id + numbering_id + border_fill_id + border_spacing[4]
+//              + attr2 (offsets 0..45). No attr3, line_spacing_v2, or tail.
+//   54 bytes — Intermediate (attr3 + line_spacing_v2 present, no tail).
+//   58 bytes — HWP 5.0.3+ (full layout with 4-byte trailing tail).
+// We always emit 58 bytes (zero-pad missing tail fields). Hancom Office and
+// Hancom Docs both accept the longer body in older forms because record sizes
+// are self-describing — each record carries its own length and the reader
+// just reads what's there. Concrete check: 46-byte h22 → 58-byte emit →
+// Hancom Docs ✓ (verified 2026-05-28 with the apply_paragraph_style test).
+function buildParaShapeBody(base, style) {
+  if (!Buffer.isBuffer(base) || base.length < 46) {
+    throw new Error(`ParaShape base must be ≥46 bytes (got ${base ? base.length : typeof base})`);
+  }
+  // Always pad/truncate to 58 bytes (Hancom-emitted .hwp expects the trailing 4-byte tail).
+  const buf = Buffer.alloc(58);
+  base.copy(buf, 0, 0, Math.min(base.length, 58));
+
+  let attr1 = buf.readUInt32LE(0);
+  if (style.alignment != null) {
+    const a = ALIGNMENT_MAP[String(style.alignment).toLowerCase()];
+    if (a == null) throw new Error(`apply_paragraph_style: unknown alignment "${style.alignment}"`);
+    attr1 = ((attr1 & ~(0x07 << 2)) | (a << 2)) >>> 0;
+  }
+  if (style.lineSpacingType != null) {
+    const t = LINE_SPACING_TYPE_MAP[String(style.lineSpacingType).toLowerCase()];
+    if (t == null) throw new Error(`apply_paragraph_style: unknown lineSpacingType "${style.lineSpacingType}"`);
+    attr1 = ((attr1 & ~0x03) | t) >>> 0;
+  }
+  buf.writeUInt32LE(attr1 >>> 0, 0);
+
+  if (style.marginLeft != null) buf.writeInt32LE(Math.round(style.marginLeft), 4);
+  if (style.marginRight != null) buf.writeInt32LE(Math.round(style.marginRight), 8);
+  if (style.indent != null) buf.writeInt32LE(Math.round(style.indent), 12);
+  if (style.spacingBefore != null) buf.writeInt32LE(Math.round(style.spacingBefore), 16);
+  if (style.spacingAfter != null) buf.writeInt32LE(Math.round(style.spacingAfter), 20);
+  if (style.lineSpacing != null) {
+    const v = Math.round(style.lineSpacing);
+    buf.writeInt32LE(v, 24);
+    buf.writeUInt32LE(v >>> 0, 50);  // line_spacing_v2 — keep in sync (5.0.2.5+ readers prefer this)
+  }
+  if (style.borderFillId != null) {
+    buf.writeUInt16LE(style.borderFillId & 0xFFFF, 32);
+  }
+  return buf;
+}
+
+function readParaShapeBodies(diRaw) {
+  const out = [];
+  for (const r of walkRecords(diRaw)) {
+    if (r.tag === TAG_PARA_SHAPE) {
+      out.push(diRaw.slice(r.dataOff, r.dataOff + r.size));
+    }
+  }
+  return out;
+}
+
+// Append a new PARA_SHAPE record at the end of the existing PARA_SHAPE run
+// in DocInfo, AND bump the count in HWPTAG_ID_MAPPINGS. Returns the new
+// paraShapeId (0-based, document order) and the updated DocInfo buffer.
+function appendParaShapeToDocInfo(diRaw, body) {
+  let psCount = 0;
+  let lastParaShapeRecEnd = -1;
+  let idMappingsDataOff = -1;
+  for (const r of walkRecords(diRaw)) {
+    if (r.tag === TAG_PARA_SHAPE) {
+      psCount++;
+      lastParaShapeRecEnd = r.dataOff + r.size;
+    }
+    if (r.tag === 17) idMappingsDataOff = r.dataOff;
+  }
+  if (idMappingsDataOff < 0) {
+    throw new Error('HWPTAG_ID_MAPPINGS not found in DocInfo — file looks malformed');
+  }
+  const insertAt = lastParaShapeRecEnd >= 0 ? lastParaShapeRecEnd : diRaw.length;
+  const header = buildRecordHeader(TAG_PARA_SHAPE, 0, body.length);
+  const newRec = Buffer.concat([header, body]);
+  const newDi = Buffer.concat([
+    diRaw.slice(0, insertAt),
+    newRec,
+    diRaw.slice(insertAt),
+  ]);
+  // ID_MAPPINGS (tag=17) lives BEFORE any PARA_SHAPE (tag=25 — DocInfo is
+  // grouped by tag in ascending order), so idMappingsDataOff stays valid.
+  const off = idMappingsDataOff + ID_MAPPINGS_PARA_SHAPE_OFFSET;
+  if (off + 4 > newDi.length) {
+    throw new Error('ID_MAPPINGS body too short to hold PARA_SHAPE count');
+  }
+  const oldCount = newDi.readUInt32LE(off);
+  newDi.writeUInt32LE(oldCount + 1, off);
+  return { newDi, newPsId: psCount };
+}
+
+// Build a 53-byte BORDER_FILL body with a solid background fill at the
+// requested color. Borders are all type=0 (none) so the paragraph gets a
+// flat color without 1px frame artifacts.
+//
+// Two byte patterns produce a working solid fill in Hancom Docs:
+//   - 'rhwp'  (default): diagonal_type=0, size_marker=1 — the pattern
+//             rhwp's `exportHwp()` writes for new documents.
+//   - 'hancom': diagonal_type=1, size_marker=0 — the pattern Hancom
+//             Office desktop writes when it saves a `.hwp` natively.
+// Both render identically. Default to 'rhwp'. Debug callers can opt
+// into the Hancom-native pattern via `_bfPattern: 'hancom'`.
+function buildBorderFillSolidBody(hexColor, pattern = 'rhwp') {
+  const buf = Buffer.alloc(53);
+  if (pattern === 'hancom') {
+    buf.writeUInt8(0x01, 26);  // diagonal type=1
+    // size_marker stays 0
+  } else {
+    // rhwp pattern: diagonal type stays 0, size_marker=1
+    buf.writeUInt32LE(1, 48);
+  }
+  buf.writeUInt32LE(1, 32);           // fill_type = solid
+  buf.writeUInt32LE(parseColorBGR(hexColor) >>> 0, 36);
+  buf.writeUInt32LE(0x00999999, 40);  // pattern_color = #999999
+  buf.writeInt32LE(-1, 44);           // pattern_type = -1
+  return buf;
+}
+
+function appendBorderFillToDocInfo(diRaw, body) {
+  let bfCount = 0;
+  let lastBorderFillRecEnd = -1;
+  let idMappingsDataOff = -1;
+  for (const r of walkRecords(diRaw)) {
+    if (r.tag === TAG_BORDER_FILL) {
+      bfCount++;
+      lastBorderFillRecEnd = r.dataOff + r.size;
+    }
+    if (r.tag === 17) idMappingsDataOff = r.dataOff;
+  }
+  if (idMappingsDataOff < 0) {
+    throw new Error('HWPTAG_ID_MAPPINGS not found in DocInfo — file looks malformed');
+  }
+  const insertAt = lastBorderFillRecEnd >= 0 ? lastBorderFillRecEnd : diRaw.length;
+  const header = buildRecordHeader(TAG_BORDER_FILL, 0, body.length);
+  const newRec = Buffer.concat([header, body]);
+  const newDi = Buffer.concat([
+    diRaw.slice(0, insertAt),
+    newRec,
+    diRaw.slice(insertAt),
+  ]);
+  const off = idMappingsDataOff + ID_MAPPINGS_BORDER_FILL_OFFSET;
+  if (off + 4 > newDi.length) {
+    throw new Error('ID_MAPPINGS body too short to hold BORDER_FILL count');
+  }
+  const oldCount = newDi.readUInt32LE(off);
+  newDi.writeUInt32LE(oldCount + 1, off);
+  // Return the **1-based** ID for ParaShape references.
+  // ParaShape.border_fill_id (and similar HWP BorderFill-reference
+  // fields) are 1-based, with 0 reserved as the "no fill" sentinel,
+  // even though the BorderFill array itself is stored 0-indexed.
+  // Verified against a Hancom-Office-saved sample: a paragraph that
+  // visibly renders the gray BorderFill at array index 1 carries
+  // border_fill_id = 2 in its ParaShape — i.e. (id - 1) is the
+  // array index. We mirror that convention.
+  return { newDi, newBfId: bfCount + 1 };
+}
+
+// Rewrite PARA_HEADER body offset 8-9 (u16) with `newPsId`. Returns updated
+// section buffer.
+function setParaHeaderShapeId(secRaw, paraHeaderRec, newPsId) {
+  if (paraHeaderRec.size < 10) return secRaw;
+  const out = Buffer.from(secRaw);
+  out.writeUInt16LE(newPsId & 0xFFFF, paraHeaderRec.dataOff + 8);
+  return out;
+}
+
+// Locate a paragraph by its level-0 PARA_HEADER index. Returns the same
+// shape as findTextRangeInSection but with start/end spanning the whole
+// paragraph (so applyShadeAcrossParagraph can highlight the whole thing).
+function findParagraphByIndexInSection(secRaw, targetIdx) {
+  const records = parseRecords(secRaw);
+  let paraIdx = -1;
+  let curHeader = null;
+  let curText = null;
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i];
+    if (r.tag === TAG_PARA_HEADER && r.level === 0) {
+      paraIdx++;
+      curHeader = r;
+      curText = null;
+    }
+    if (paraIdx === targetIdx && r.tag === TAG_PARA_TEXT && curHeader && !curText) {
+      curText = r;
+    }
+    if (paraIdx === targetIdx && r.tag === TAG_PARA_CHAR_SHAPE && r.level === 1 && curHeader) {
+      const len = curText ? Math.floor(curText.size / 2) : 0;
+      return {
+        paraIdx,
+        paraHeaderRec: curHeader,
+        paraTextRec: curText,
+        paraCharShapeRec: r,
+        start: 0,
+        end: len,
+        textLength: len,
+      };
+    }
+    if (paraIdx > targetIdx) break;
+  }
+  return null;
+}
+
+// Apply shadeColor across ALL chars in a paragraph. Mirrors the
+// "auto char shadeColor when background_color is set" pattern from Phase
+// A's apply_paragraph_style (create.js:1241-1258) — Hancom expects per-char
+// shade to coexist with paragraph fill so the page-margin grid doesn't
+// bleed through. Returns { diRaw, secRaw, deltaCharShapes }.
+function applyShadeAcrossParagraph(diRaw, secRaw, hit, hexColor) {
+  if (!hit.paraCharShapeRec || hit.textLength === 0) {
+    return { diRaw, secRaw, deltaCharShapes: 0 };
+  }
+  const baseCsId = csIdAtOffset(hit.paraCharShapeRec, secRaw, 0);
+  const csBodies = readCharShapeBodies(diRaw);
+  if (baseCsId >= csBodies.length) {
+    throw new Error(`apply_paragraph_style: baseCsId ${baseCsId} out of range (have ${csBodies.length})`);
+  }
+  const newBody = buildCharShapeBody(csBodies[baseCsId], { highlight: hexColor });
+  let newCsId = csBodies.findIndex(b => b.equals(newBody));
+  if (newCsId < 0) {
+    const r = appendCharShapeToDocInfo(diRaw, newBody);
+    diRaw = r.newDi;
+    newCsId = r.newCsId;
+  }
+  const csUpd = updateParaCharShapeRange(
+    secRaw, hit.paraCharShapeRec,
+    0, hit.textLength, newCsId,
+  );
+  return { diRaw, secRaw: csUpd.secRaw, deltaCharShapes: csUpd.deltaEntries };
+}
+
+// Convert apply_paragraph_style op props into the internal style shape used
+// by buildParaShapeBody. Mirrors create.js:1323 buildParaFormatProps but
+// only emits the fields raw-patch supports (no borders / no page-break /
+// no keep flags — those still need rhwp emit).
+function normalizeParaStyleOp(op) {
+  const style = {};
+  if (op.align != null || op.alignment != null) {
+    style.alignment = op.alignment ?? op.align;
+  }
+  if (op.line_spacing != null) {
+    style.lineSpacing = op.line_spacing;
+  } else if (op.lineSpacing != null) {
+    style.lineSpacing = op.lineSpacing;
+  }
+  if (op.line_spacing_type != null || op.lineSpacingType != null) {
+    style.lineSpacingType = op.lineSpacingType ?? op.line_spacing_type;
+  }
+  if (op.indent != null) style.indent = op.indent;
+  if (op.margin_left != null) style.marginLeft = op.margin_left;
+  else if (op.marginLeft != null) style.marginLeft = op.marginLeft;
+  if (op.margin_right != null) style.marginRight = op.margin_right;
+  else if (op.marginRight != null) style.marginRight = op.marginRight;
+  if (op.spacing_before != null) style.spacingBefore = op.spacing_before;
+  else if (op.spacingBefore != null) style.spacingBefore = op.spacingBefore;
+  if (op.spacing_after != null) style.spacingAfter = op.spacing_after;
+  else if (op.spacingAfter != null) style.spacingAfter = op.spacingAfter;
+  return style;
+}
+
+function resolveBackgroundColor(op) {
+  const v = op.background_color ?? op.backgroundColor ?? op.fillColor;
+  if (v == null || v === false) return null;
+  if (v === true) return '#ffff00';
+  return v;
+}
+
+/**
+ * Apply paragraph-level styles to existing `.hwp` content via raw-patch.
+ *
+ * Each op: `{ target | index, align?, line_spacing?, indent?,
+ *             margin_left?, margin_right?, spacing_before?, spacing_after?,
+ *             background_color? }`
+ *
+ * Targeting: prefer `target` (a string — first paragraph whose PARA_TEXT
+ * contains it). Fallback to `index` (0-based level-0 paragraph index in
+ * Section0). Same coordinate space as apply_text_style for consistency.
+ *
+ * For background_color, we ALSO apply the same color as character
+ * shadeColor across the whole paragraph (matching Hancom's
+ * "문단 모양 + 글자 모양" combo behavior — without the per-char shade the
+ * page-margin grid bleeds through gaps between glyph cells).
+ */
+export async function applyParagraphStyleInPlace(filePath, ops) {
+  if (!Array.isArray(ops) || ops.length === 0) {
+    return Object.assign([], { mode: 'in-place', styled_count: 0 });
+  }
+  for (const op of ops) {
+    const hasTarget = typeof op.target === 'string' && op.target.length > 0;
+    const hasIdx = Number.isInteger(op.index) && op.index >= 0;
+    if (!hasTarget && !hasIdx) {
+      throw new Error("apply_paragraph_style: 'target' (string) or 'index' (non-negative integer) is required");
+    }
+    const style = normalizeParaStyleOp(op);
+    const bg = resolveBackgroundColor(op);
+    if (Object.keys(style).length === 0 && !bg) {
+      throw new Error("apply_paragraph_style: at least one style prop required (align / line_spacing / indent / margin_* / spacing_* / background_color)");
+    }
+  }
+
+  let buf = readFileSync(filePath);
+  let { ssz, mssz, dirStart, fatAddrs, minifatStart } = parseCfbHeader(buf);
+  let fat = readFat(buf, fatAddrs, ssz);
+  const { entries } = readDirectory(buf, fat, ssz, dirStart);
+  let minifat = readMinifat(buf, fat, ssz, minifatStart);
+  let rootChain = null;
+  const ensureRootChain = () => {
+    if (rootChain) return rootChain;
+    if (entries[0].start < 0 || entries[0].start === ENDOFCHAIN) {
+      throw new Error('mini-stream needed but root entry has no chain');
+    }
+    rootChain = walkChain(fat, entries[0].start);
+    return rootChain;
+  };
+
+  const diEntry = findStreamEntry(entries, ['DocInfo']);
+  const diInMini = diEntry.size < 4096;
+  let diChain, diCompressed;
+  if (diInMini) {
+    const rc = ensureRootChain();
+    diChain = walkChain(minifat, diEntry.start);
+    diCompressed = readMiniChainBytes(buf, diChain, rc, ssz, mssz, diEntry.size);
+  } else {
+    diChain = walkChain(fat, diEntry.start);
+    diCompressed = readChainBytes(buf, diChain, ssz, diEntry.size);
+  }
+  let diRaw = Buffer.from(inflateRawSync(diCompressed));
+
+  const secEntry = findStreamEntry(entries, ['BodyText', 'Section0']);
+  const secInMini = secEntry.size < 4096;
+  let secChain, secCompressed;
+  if (secInMini) {
+    const rc = ensureRootChain();
+    secChain = walkChain(minifat, secEntry.start);
+    secCompressed = readMiniChainBytes(buf, secChain, rc, ssz, mssz, secEntry.size);
+  } else {
+    secChain = walkChain(fat, secEntry.start);
+    secCompressed = readChainBytes(buf, secChain, ssz, secEntry.size);
+  }
+  let secRaw = Buffer.from(inflateRawSync(secCompressed));
+
+  const summary = [];
+  for (const op of ops) {
+    // Locate paragraph: prefer target (consistent with apply_text_style),
+    // fall back to index.
+    let hit;
+    if (typeof op.target === 'string' && op.target.length > 0) {
+      hit = findTextRangeInSection(secRaw, op.target);
+      if (!hit) {
+        throw new Error(`apply_paragraph_style: target "${op.target}" not found in body`);
+      }
+      // Override start/end to span the whole paragraph (the text-range hit
+      // is just for paragraph identification; styling targets the whole para).
+      hit.start = 0;
+      hit.end = hit.textLength;
+    } else {
+      hit = findParagraphByIndexInSection(secRaw, op.index);
+      if (!hit) {
+        throw new Error(`apply_paragraph_style: index ${op.index} not found in section`);
+      }
+    }
+
+    // Read current paraShapeId.
+    if (hit.paraHeaderRec.size < 10) {
+      throw new Error('apply_paragraph_style: PARA_HEADER body too short to read paraShapeId');
+    }
+    const basePsId = secRaw.readUInt16LE(hit.paraHeaderRec.dataOff + 8);
+    const psBodies = readParaShapeBodies(diRaw);
+    if (basePsId >= psBodies.length) {
+      throw new Error(`apply_paragraph_style: basePsId ${basePsId} out of range (have ${psBodies.length})`);
+    }
+
+    const style = normalizeParaStyleOp(op);
+    const bg = resolveBackgroundColor(op);
+
+    // Background: create a new BorderFill + reference it from the new
+    // ParaShape. Hancom Docs uses 1-based indexing for ParaShape's
+    // border_fill_id field (0 means "no fill"); the 1-based conversion
+    // is encapsulated inside appendBorderFillToDocInfo's return value
+    // so callers can just write it directly onto the ParaShape.
+    let newBfId = null;
+    if (bg) {
+      if (Number.isInteger(op._useExistingBfId)) {
+        newBfId = op._useExistingBfId;
+      } else {
+        const bfBody = buildBorderFillSolidBody(bg, op._bfPattern || 'rhwp');
+        const bfRes = appendBorderFillToDocInfo(diRaw, bfBody);
+        diRaw = bfRes.newDi;
+        newBfId = bfRes.newBfId;
+      }
+      style.borderFillId = newBfId;
+    }
+
+    // Build new ParaShape body overlaying style props on base.
+    const newPsBody = buildParaShapeBody(psBodies[basePsId], style);
+
+    // Dedup: reuse an identical existing ParaShape if any. (Refresh the
+    // bodies list because appending a BorderFill shifts nothing for
+    // PARA_SHAPE indices, but we re-read for safety.)
+    let newPsId = readParaShapeBodies(diRaw).findIndex(b => b.equals(newPsBody));
+    if (newPsId < 0) {
+      const psRes = appendParaShapeToDocInfo(diRaw, newPsBody);
+      diRaw = psRes.newDi;
+      newPsId = psRes.newPsId;
+    }
+
+    // Rewrite PARA_HEADER paraShapeId. PARA_HEADER body offset 8-9.
+    secRaw = setParaHeaderShapeId(secRaw, hit.paraHeaderRec, newPsId);
+
+    // Background: the paragraph fill set above is enough on its own to
+    // produce the uniform colored rectangle Hancom Office desktop emits
+    // when a user applies "문단 모양 - 배경" — the desktop app doesn't
+    // touch per-character shade either (the CharShape used by the
+    // styled paragraph keeps shade_color = 0xFFFFFFFF / "no shade").
+    // On this raw-patch path the layout cache (PARA_LINE_SEG records)
+    // stays intact, so the paragraph fill covers between-glyph gaps
+    // uniformly. The opt-in `_applyCharShade: true` knob is retained
+    // for parity experiments; it is OFF by default.
+    if (bg && op._applyCharShade === true) {
+      const refreshed = typeof op.target === 'string' && op.target.length > 0
+        ? (() => { const h = findTextRangeInSection(secRaw, op.target); if (h) { h.start = 0; h.end = h.textLength; } return h; })()
+        : findParagraphByIndexInSection(secRaw, op.index);
+      if (refreshed && refreshed.paraCharShapeRec && refreshed.textLength > 0) {
+        const shadeRes = applyShadeAcrossParagraph(diRaw, secRaw, refreshed, bg);
+        diRaw = shadeRes.diRaw;
+        secRaw = shadeRes.secRaw;
+        if (shadeRes.deltaCharShapes !== 0) {
+          const refreshed2 = typeof op.target === 'string' && op.target.length > 0
+            ? findTextRangeInSection(secRaw, op.target)
+            : findParagraphByIndexInSection(secRaw, op.index);
+          if (refreshed2) secRaw = bumpParaHeaderCounts(secRaw, refreshed2.paraHeaderRec, shadeRes.deltaCharShapes, 0);
+        }
+      }
+    }
+
+    summary.push({
+      target: op.target,
+      index: op.index,
+      paraIdx: hit.paraIdx,
+      basePsId,
+      newPsId,
+      newBfId,
+    });
+  }
+
+  // Deflate + write DocInfo. mini-stream paths must use ext.miniChain /
+  // ext.newRegularChain — NOT ext.chain (that field doesn't exist on
+  // deflateMiniChainWithExpansion's return). Promotion happens when the new
+  // compressed size crosses the 4096-byte mini-stream cutoff (e.g. h22 mini
+  // DocInfo growing past the threshold after appending a new ParaShape).
+  // Previously this branch was missing and produced a runtime
+  // `Cannot read properties of undefined` crash for mini-stream forms.
+  {
+    const inMini = diInMini;
+    const capacity = inMini ? diChain.length * mssz : diChain.length * ssz;
+    if (inMini) {
+      const ext = deflateMiniChainWithExpansion(
+        { buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain: ensureRootChain(), rootEntry: entries[0] },
+        diRaw, diChain,
+      );
+      buf = ext.buf; fat = ext.fat; minifat = ext.minifat; minifatStart = ext.minifatStart;
+      if (ext.promoted) {
+        diChain = ext.newRegularChain;
+        writeChainBytes(buf, diChain, ssz, ext.compressed);
+        buf.writeInt32LE(diChain[0], diEntry.entryFileOffset + 0x74);
+      } else {
+        rootChain = ext.rootChain;
+        diChain = ext.miniChain;
+        writeMiniChainBytes(buf, diChain, rootChain, ssz, mssz, ext.compressed);
+      }
+      buf.writeUInt32LE(ext.compressed.length, diEntry.entryFileOffset + 0x78);
+      buf.writeUInt32LE(0, diEntry.entryFileOffset + 0x7C);
+    } else {
+      const ext = deflateAndFitWithExpansion(diRaw, capacity, ssz, fat, fatAddrs, diChain, buf, false);
+      buf = ext.buf; fat = ext.fat; diChain = ext.chain;
+      writeChainBytes(buf, diChain, ssz, ext.compressed);
+      buf.writeUInt32LE(ext.compressed.length, diEntry.entryFileOffset + 0x78);
+      buf.writeUInt32LE(0, diEntry.entryFileOffset + 0x7C);
+    }
+  }
+
+  // Deflate + write Section0. Same mini-stream pattern as DocInfo above.
+  {
+    const inMini = secInMini;
+    const capacity = inMini ? secChain.length * mssz : secChain.length * ssz;
+    if (inMini) {
+      const ext = deflateMiniChainWithExpansion(
+        { buf, ssz, mssz, fat, fatAddrs, minifat, minifatStart, rootChain: ensureRootChain(), rootEntry: entries[0] },
+        secRaw, secChain,
+      );
+      buf = ext.buf; fat = ext.fat; minifat = ext.minifat; minifatStart = ext.minifatStart;
+      if (ext.promoted) {
+        secChain = ext.newRegularChain;
+        writeChainBytes(buf, secChain, ssz, ext.compressed);
+        buf.writeInt32LE(secChain[0], secEntry.entryFileOffset + 0x74);
+      } else {
+        rootChain = ext.rootChain;
+        secChain = ext.miniChain;
+        writeMiniChainBytes(buf, secChain, rootChain, ssz, mssz, ext.compressed);
+      }
       buf.writeUInt32LE(ext.compressed.length, secEntry.entryFileOffset + 0x78);
       buf.writeUInt32LE(0, secEntry.entryFileOffset + 0x7C);
     } else {

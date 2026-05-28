@@ -2213,7 +2213,58 @@ async function readStdin() {
       const tableOps = ops.filter((o) => APPEND_TABLE_OPS.has(o.type));
       if (tableOps.length > 0) {
         const { appendTableInPlace } = await import('./cell-patch.js');
-        const tSummary = await appendTableInPlace(outPath, tableOps);
+
+        // When the user provides shape input (rows / cols / headers),
+        // pre-generate a per-op rhwp template containing a table of the
+        // requested shape. cell-patch's appendTableInPlace will splice the
+        // template's table cluster (with cell borderFillIds remapped to a
+        // visible BF in the target's DocInfo) instead of cloning a
+        // source-form table. Without shape input, fall back to clone.
+        //
+        // Inferring shape:
+        //   rows  = (user.rows?.length ?? 0) + (user.headers ? 1 : 0)
+        //   cols  = user.headers?.length ?? user.cols ?? user.rows?.[0]?.length
+        // If we can't infer both ≥1, leave _templateBytes unset → clone path.
+        const tableOpsWithTemplate = [];
+        let rhwpForTable = null;
+        for (const op of tableOps) {
+          const dataRowCount = Array.isArray(op.rows) ? op.rows.length : 0;
+          const headerCount = Array.isArray(op.headers) ? op.headers.length : 0;
+          const wantRows = dataRowCount + (headerCount > 0 ? 1 : 0);
+          const wantCols = headerCount
+            || (typeof op.cols === 'number' ? op.cols : 0)
+            || (Array.isArray(op.rows) && Array.isArray(op.rows[0]) ? op.rows[0].length : 0);
+          if (wantRows >= 1 && wantCols >= 1) {
+            // Lazily init rhwp once
+            if (!rhwpForTable) {
+              rhwpForTable = await import('./vendor/rhwp/rhwp.js');
+              if (!globalThis.__rhwp_loaded_for_template) {
+                await rhwpForTable.default({
+                  module_or_path: fs.readFileSync(
+                    path.resolve(path.dirname(new URL(import.meta.url).pathname), 'vendor/rhwp/rhwp_bg.wasm')
+                  ),
+                });
+                if (typeof globalThis.measureTextWidth !== 'function') {
+                  globalThis.measureTextWidth = (font, text) =>
+                    String(text || '').length * (parseFloat(font) || 10) * 0.55;
+                }
+                globalThis.__rhwp_loaded_for_template = true;
+              }
+            }
+            const tmpDoc = rhwpForTable.HwpDocument.createEmpty();
+            tmpDoc.createBlankDocument();
+            tmpDoc.beginBatch();
+            tmpDoc.createTable(0, 0, 0, wantRows, wantCols);
+            tmpDoc.endBatch();
+            const templateBytes = Buffer.from(tmpDoc.exportHwp());
+            tmpDoc.free();
+            tableOpsWithTemplate.push({ ...op, _templateBytes: templateBytes });
+          } else {
+            tableOpsWithTemplate.push(op);
+          }
+        }
+
+        const tSummary = await appendTableInPlace(outPath, tableOpsWithTemplate);
         subModes.push(`table:${tSummary.mode || 'in-place'}`);
         for (const e of tSummary) allEdits.push({ kind: 'table', ...e });
       }
@@ -2248,18 +2299,77 @@ async function readStdin() {
           'insert_column_break': 0x08,
           'setup_columns': 0x02,
         };
-        const normalizedAppendOps = appendOps.map((o) => ({
-          ...o,
-          text: o.text ?? '',
-          breakVal: BREAK_VAL[o.type] ?? 0,
-        }));
-        const appSummary = await appendParagraphInPlace(outPath, normalizedAppendOps);
+        // Expand bullet_list / numbered_list ops into N append_paragraph
+        // ops (one per item), each carrying a marker prefix in its text.
+        // The raw-patch path under the hood (appendParagraphInPlace) is
+        // text-per-paragraph and doesn't iterate `items[]` on its own; the
+        // expansion has to happen here in the dispatcher.
+        //
+        // Concrete marker strings:
+        //   bullet_list   → "• " (BULLET, U+2022 + space). Rendered as a
+        //                   plain text bullet — Hancom doesn't get a real
+        //                   numbering record on this path, just a visible
+        //                   marker glyph in the cell text. Same approach a
+        //                   user takes when typing bullets manually.
+        //   numbered_list → "1. ", "2. ", ... (decimal + period + space).
+        //                   Same plain-text approach.
+        // Drawback vs a real HWP numbering record: re-ordering items
+        // doesn't auto-renumber; the markers are baked into the text.
+        // Acceptable for the in-place raw-patch use case (LLM-driven
+        // edits where the user gets visible bullets/numbers).
+        const expandedAppendOps = [];
+        for (const o of appendOps) {
+          if ((o.type === 'append_bullet_list' || o.type === 'append_numbered_list')
+              && Array.isArray(o.items) && o.items.length > 0) {
+            const isNumbered = o.type === 'append_numbered_list';
+            o.items.forEach((item, idx) => {
+              const marker = isNumbered ? `${idx + 1}. ` : '• ';
+              expandedAppendOps.push({
+                type: 'append_paragraph',
+                text: `${marker}${String(item)}`,
+                breakVal: 0,
+                _expandedFrom: o.type,
+                _itemIndex: idx,
+              });
+            });
+          } else {
+            expandedAppendOps.push({
+              ...o,
+              text: o.text ?? '',
+              breakVal: BREAK_VAL[o.type] ?? 0,
+            });
+          }
+        }
+        const appSummary = await appendParagraphInPlace(outPath, expandedAppendOps);
         subModes.push(`append:${appSummary.mode || 'in-place'}`);
         for (const e of appSummary) allEdits.push({ kind: 'append', ...e });
       }
 
       const subMode = subModes.join('+');
-      process.stdout.write(JSON.stringify({
+
+      // Collect per-edit warnings into a top-level "warnings" array. The
+      // raw-patch path emits some ops that don't fully honor user input
+      // (e.g. append_table clones an existing table and ignores
+      // user-supplied rows/cols/headers — see appendTableInPlace). When
+      // the caller is an LLM agent, surface this prominently so it can
+      // tell the user instead of reporting bare "success".
+      const warnings = [];
+      for (const e of allEdits) {
+        if (e.kind === 'table' && Array.isArray(e.user_input_ignored) && e.user_input_ignored.length > 0) {
+          // Synth path keeps rows/cols honored — only flags content
+          // not filled. Clone path flags rows/cols + content + headers.
+          const isSynth = (e.note || '').startsWith('synthesized');
+          const intro = isSynth
+            ? `append_table synthesized a ${e.rows}×${e.cols} table (shape matches your request).`
+            : `append_table cloned an existing table (rows=${e.rows}, cols=${e.cols}). The raw-patch path can only clone, not synthesize.`;
+          warnings.push({
+            op: 'append_table',
+            message: `${intro} Tell the user: ${e.user_input_ignored.join('; ')}.`,
+          });
+        }
+      }
+
+      const response = {
         status: 'success',
         path: outPath,
         bytes_written: fs.statSync(outPath).size,
@@ -2268,7 +2378,10 @@ async function readStdin() {
         sub_mode: subMode,
         edits: allEdits,
         log: [`raw-patch path (Hancom Docs compatible, ${subMode}) — ${allEdits.length} edit(s) applied`],
-      }) + "\n");
+      };
+      if (warnings.length > 0) response.warnings = warnings;
+
+      process.stdout.write(JSON.stringify(response) + "\n");
       return;
     } catch (err) {
       process.stdout.write(JSON.stringify({
