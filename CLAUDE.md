@@ -32,7 +32,9 @@ HWP/HWPX 의 한컴독스 호환성 / 동작 spec 은 우리가 자의적으로 
   - **작은 폼 (fresh_image_100px, mini-stream Section0)**:
     - Hop 에서 image 추가 + 저장 → 한컴독스 ✅ (2026-05-22 검증, fresh_image_100px_v3.hwp)
     - 우리 plugin rhwp emit (`small_inplace_image_v7_rhwp_emit.hwp`) → 한컴독스 ✅
-  - 즉 rhwp round-trip 의 한컴독스 호환은 **폼 크기/구조에 따라 다름**. 큰 폼 reject 는 우리/Hop 공통 한계. 작은 폼 OK.
+  - **h22 (14KB, 7 paragraphs, mini-stream Section0)**:
+    - 우리 plugin rhwp emit (`h22_cold6_real_png.hwp`, 2026-05-28 검증): real PNG 100×100 추가 → 한컴독스 ✅ (이미지 정상 렌더링). 이전 단계는 dummy 65-byte PNG 였고 그건 broken-image icon — PNG 자체가 invalid 였던 게 원인. **rhwp round-trip 자체는 h22 OK.**
+  - 즉 rhwp round-trip 의 한컴독스 호환은 **폼 크기/구조에 따라 다름**. 큰 폼 reject 는 우리/Hop 공통 한계. 작은 폼 (h22, fresh_image_100px) 은 OK.
 - **이게 우리 raw-patch (cell-patch.js — 기존 bytes 통째 유지 + 변경 부분만 byte-level patch) 가 in-place edit 의 유일한 한컴독스 호환 path 인 이유.** Hop 도 못 푸는 문제를 우리가 회피해서 풀어둔 것.
 - **sheetjs `CFB.write` (vendor/cfb/cfb.js)**: directory entry [Sh33tJ5] 빈 stream 박음 → 한컴독스 ✗. **써서는 안 됨.** in-place edit 은 우리 raw-patch 인프라 사용.
 
@@ -60,3 +62,22 @@ HWP/HWPX 의 한컴독스 호환성 / 동작 spec 은 우리가 자의적으로 
 2. "rhwp round-trip = 한컴독스 OK (Hop 검증)" → 사실은 from-scratch 만 OK, round-trip 은 Hop 도 X
 
 두 번째 잘못의 원인: Hop 검증 시 사용자가 "잘 열린다" 한 file 이 from-scratch 였는데 우리가 round-trip 결과로 단정. **검증 결과를 받으면 "정확히 어떤 시나리오"인지 확인하고 추측 금지.**
+
+## 일반화 금지 (보고 / 문서 / 결론 작성 시)
+
+**원칙**: 사실을 적을 때 **일반화하지 말고 구체적 케이스 그대로 적기.** "전부 / 모두 / 항상 / 절대 안 됨" 같은 표현은 한 케이스만 본 결과를 다른 케이스로 확장하는 거. 본 만큼만 적어.
+
+이 원칙을 어겨서 같은 세션 내에 세 차례 헛고생함:
+
+1. **Sh33tJ5 grep methodology 오류** — ASCII grep `'Sh33tJ5'` 로 raw-patch 출력 12개 다 "no Sh33tJ5" 라 보고. 사실은 h22 원본 자체가 UTF-16 `S\0h\03\03\0t\0J\05\0` 로 Sh33tJ5 박혀있음. "Sh33tJ5 = 한컴독스 reject" 라는 일반화도 wrong — h22 자체가 한컴독스 열림.
+2. **Session 2 실패 misdiagnosis** — cold-start session 2 가 v1.4.8 cache (appendParagraphInPlace 없음) 에서 rhwp emit fallback 으로 corrupted 된 건데, 같은 시간에 직접 dispatch test 가 dev tree 의 "PARA_HEADER body too short (22 need >= 24)" throw 했음. 두 다른 실패를 같은 원인으로 묶어서 "22-byte fix = session 2 해결책" 으로 단정. 사실은 cache 버전 차이가 진짜 원인이었고 22-byte fix 는 다른 (실재하는) dev tree 버그를 fix.
+3. **"raw-patch 모든 op audit 통과" 일반화** — 코드 grep 으로 "24-byte 가정 다른 곳에 없음" 확인하고 "fix 가 다른 op 들 안 깨뜨림" 단정. 실측 실행해보니 4개 op 에서 사전 버그 표면화 (bullet/numbered list dispatch items[] 무시, append_table clone artifact, replace_text level-1 only, apply_paragraph_style 46-byte ParaShape).
+
+**구체적으로 적기 예시**:
+- ✗ "raw-patch 출력 다 Sh33tJ5 없음, Hancom Docs 호환"
+- ✓ "raw-patch 출력 12개 중 grep `'Sh33tJ5'` (ASCII) 매치 없음. 단 이 grep 은 UTF-16 인코딩 못 잡음 — UTF-16 LE 매치 다시 확인 필요. h22 원본 자체 포함 여부 미확인."
+
+- ✗ "이 fix 가 다른 op 들 안 깨뜨림"
+- ✓ "코드 정적 audit 으로 24-byte 강제 가정 다른 함수 (apply_paragraph_style line 3918 `< 10`, pickFreshInstanceId line 1949 `< 22` 등) 에 없음 확인. 실측 검증은 op 별 실행 후 별도 필요."
+
+**검증 결과 받으면**: 정확히 어떤 시나리오 / 어떤 코드 path / 어떤 버전 / 어떤 입력 — 자세히 적어. 추론으로 다른 케이스에 확장 금지.
