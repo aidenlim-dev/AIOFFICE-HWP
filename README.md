@@ -6,7 +6,6 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/DoHyun468/claw-hwp?style=flat&logo=github&label=Stars" alt="Stars" />
   <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/DoHyun468/claw-hwp/main/.github/traffic-summary.json" alt="Clones (14-day)" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT" /></a>
   <img src="https://img.shields.io/badge/status-WIP-orange" alt="WIP" />
