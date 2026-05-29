@@ -48,7 +48,7 @@ each table) or rely on `--inspect`'s `cellCount` and open the doc to confirm.
 
 | `type` | Args | Notes |
 |--------|------|-------|
-| `append_paragraph` | `text` | Appends to the last section, cloning the last paragraph's para/char refs. **Char-style inheritance:** if the immediately preceding paragraph carries inline styling (bold / italic / highlight via its charPr), the new paragraph inherits that ref and renders with the same style. Drop the inheritance with a follow-up `apply_text_style` that explicitly resets the unwanted attr (e.g. `bold: false`). |
+| `append_paragraph` | `text` | Appends to the last section, cloning the last paragraph's para/char refs. **Returns `index` of the new paragraph in the response — use it to chain follow-up index-based ops without manual counting.** **Char-style inheritance:** if the immediately preceding paragraph carries inline styling (bold / italic / highlight via its charPr), the new paragraph inherits that ref and renders with the same style. **paraPr inheritance** is the same — alignment (CENTER / JUSTIFY / etc.), line spacing, indent all clone from the previous paragraph. Drop unwanted inheritance with a follow-up `apply_text_style` (`bold: false`, etc.) or `apply_paragraph_style` (`align: "LEFT"`, etc.). |
 | `delete_paragraph` | `index` | Removes the Nth top-level paragraph. |
 | `set_page_break` | `index`, `on?` (default `true`) | Sets `pageBreak="1"` on paragraph `index` so it starts a new page (the break renders **before** the paragraph). Pass `"on": false` to clear an existing break. |
 
@@ -62,7 +62,7 @@ each table) or rely on `--inspect`'s `cellCount` and open the doc to confirm.
 | `append_table_column` | `table`, `cells` (string[], top→bottom) | Adds a cell to every row's end; updates `colCnt`. |
 | `delete_table_column` | `table`, `col` | Removes the cell at `col` in every row; updates `colCnt`. |
 | `merge_cells` | `table`, `mode`, + range | `mode:"horizontal"` → `row`, `start`, `count` (sets `colSpan`); `mode:"vertical"` → `col`, `start`, `count` (sets `rowSpan`). `count >= 2`. Absorbed cells removed. Assumes no prior merge in the range. |
-| `insert_table` | `index`, `rows`, `cols`, `cells?` (string[][]) | Inserts a fresh `rows × cols` table as a new paragraph **after** paragraph `index` (use `-1` to prepend at the start of the first section). `cells[r][c]` fills each cell (missing entries → empty). Clones the first existing `<hp:tbl>` of the doc as the template so the new table inherits real Hancom-Docs-valid styling (borderFill, cellSz, cellMargin, etc.). **Requires the base doc to contain at least one table.** |
+| `insert_table` | `index`, `rows`, `cols`, `cells?` (string[][]) | Inserts a fresh `rows × cols` table as a new paragraph **after** paragraph `index` (use `-1` to prepend at the start of the first section). `cells[r][c]` fills each cell (missing entries → empty). When the doc already contains a table, clones the first existing `<hp:tbl>` as the template so the new table inherits its borderFill / cellSz / cellMargin. When the doc has **no existing table**, falls back to hard-coded `FALLBACK_TBL_*` / `FALLBACK_CELL_*` templates verified against a Hancom-Docs-created table (registers a SOLID 0.12mm black-border `<hh:borderFill>` if one isn't already present). Works on any base doc. |
 
 ### Cell styling (cellzoneList / cellSz / subList / paraPr)
 
@@ -76,7 +76,7 @@ when the same edit is performed through its UI.
 
 | `type` | Args | Notes |
 |--------|------|-------|
-| `set_cell_background` | `table`, `row`, `col`, `color` (hex) | Adds a cellzone for that cell pointing at a borderFill with `<hc:fillBrush><hc:winBrush faceColor=...>`. Existing borderFills with the same body are reused; new ones get appended (`hh:borderFills@itemCnt` bumped). Note the `hc:` namespace — `hh:fillBrush` is silently ignored by Hancom. |
+| `set_cell_background` | `table`, `row`, `col`, `color` (hex), `mode?` (`"cellzone"` / `"shade"` / `"both"`, default `"both"`) | Adds a cellzone for that cell pointing at a borderFill with `<hc:fillBrush><hc:winBrush faceColor=...>`. Note the `hc:` namespace — `hh:fillBrush` is silently ignored. **mode trade-off:** `"cellzone"` writes the Hancom-native cellzone fill but **한컴독스 web viewer** sometimes paints only a glyph-height strip on tables not cloned from an existing one (fallback path). `"shade"` writes character shading (글자 모양 → 음영) on the cell text's charPr — strictly behind glyphs but always renders. `"both"` (default) writes both: cellzone for wide fill where supported, shade as a guaranteed fallback. Pick `"cellzone"` if the doc will be opened in Hancom desktop only; default `"both"` for web safety. |
 | `set_cell_border` | `table`, `row`, `col`, `color` (hex), `width?` (e.g. `"0.3 mm"`, default `"0.3 mm"`), `sides?` (subset of `["LEFT","RIGHT","TOP","BOTTOM"]`, default all four) | Cellzone + borderFill whose chosen sides are `type="SOLID"`. Others stay `type="SOLID" width="0.12 mm" color="#000000"` (the doc default). |
 | `set_cell_diagonal` | `table`, `row`, `col`, `direction` (`"BACKSLASH"` `\` or `"SLASH"` `/`), `color?` (default `"#000000"`), `width?` (default `"0.3 mm"`) | Cellzone + borderFill whose `<hh:slash>` or `<hh:backSlash>` has `type="CENTER"` (Hancom's chosen enum for a solid diagonal — not `"SOLID"`). |
 | `set_cell_align` | `table`, `row`, `col`, `horizontal?` (`"LEFT"`/`"CENTER"`/`"RIGHT"`/`"JUSTIFY"`/`"DISTRIBUTE"`), `vertical?` (`"TOP"`/`"CENTER"`/`"BOTTOM"`) | `vertical` swaps `<hp:subList vertAlign>`. `horizontal` rewrites the cell's first `<hp:p>` paraPrIDRef through the same placeholder-paraPr trick as `apply_paragraph_style`. Either or both. |
@@ -101,8 +101,8 @@ are registered on demand.
 
 | `type` | Args | Notes |
 |--------|------|-------|
-| `set_bullet_list` | `index`, `char?` (e.g. `"▶"`, `"◯"`, `"□"`, `"★"`, `"■"`, `"◆"`, `"✓"`), `level?` (default `0`) | Marks paragraph `index` as a bullet item. Without `char`, uses the doc's default bullet (typically a filled circle). With `char`, registers (or reuses) a `<hh:bullet>` whose `char` attribute is that glyph; Hancom renders the literal char. Creates `<hh:bullets>` from scratch if the doc has none. |
-| `set_number_list` | `index`, `level?` (default `0`), `style?` (`"korean"` or `"decimal"`) | Marks paragraph `index` as a numbered item. With `style: "korean"`, registers a numbering whose levels cycle `1.` / `가.` / `1)` / `가)` / `(1)` / `(가)`. With `style: "decimal"`, registers one whose levels are `1.` / `1.1.` / `1.1.1.` / …. Without `style`, uses the doc's existing numbering id=1 (visual format depends on the template). `level` 0–5 picks the format on that numbering's level chain. |
+| `set_bullet_list` | `index`, `char?` (e.g. `"▶"`, `"◯"`, `"□"`, `"★"`, `"■"`, `"◆"`, `"✓"`), `level?` (default `0`) | Marks paragraph `index` as a bullet item. **Hancom Docs web behavior:** Hancom's web viewer silently strips `<hh:heading type="BULLET">` from any paraPr it judges as foreign — including ones whose XML is byte-identical to Hancom-native paraPrs. The op handles this in two ways: (1) if the host doc already carries a Hancom-authored BULLET paraPr (a doc that round-tripped through Hancom Office / Hancom Docs at least once will have one), the paragraph's `paraPrIDRef` is retargeted to it (`reusedHancomNative: true` in the response) — the glyph survives web rendering. (2) Otherwise it falls back to prepending the bullet char + a space to the paragraph text as a literal prefix (`fallback: "text-prefix"` in the response) — visually identical, works across web and desktop, but loses the structural list semantics. Hancom Office desktop has no such restriction; both paths render fine there. **To get real list semantics on web:** start from a hwpx that has already been opened/saved by Hancom Office or Hancom Docs at least once. `create.js` stamps newly-generated hwpx files with a Hancom-round-trip fingerprint so list paraPrs survive, but this is best-effort. |
+| `set_number_list` | `index`, `level?` (default `0`), `style?` (`"korean"` or `"decimal"`) | Marks paragraph `index` as a numbered item. With `style: "korean"`, registers a numbering whose levels cycle `1.` / `가.` / `1)` / `가)` / `(1)` / `(가)`. With `style: "decimal"`, registers one whose levels are `1.` / `1.1.` / `1.1.1.` / …. Without `style`, uses the doc's existing numbering id=1 (visual format depends on the template). `level` 0–5 picks the format on that numbering's level chain. **Hancom Docs web behavior:** same `reuseExistingListParaPr` path as `set_bullet_list` — if the host doc carries a Hancom-authored NUMBER paraPr, web rendering survives (`reusedHancomNative: true`); otherwise the synthesised heading gets stripped by Hancom Docs web on open, and there is **no text-prefix fallback** for numbered items (NUMBER auto-increment can't be reconstructed at op time without doc-wide state). For numbered lists on web from a non-round-tripped doc, prepend `"1. "`, `"2. "`, … to the paragraph text yourself via `append_paragraph` / `set_paragraph_text`. |
 | `clear_list` | `index` | Strips any `<hh:heading>` from the paragraph's paraPr, leaving it as plain text. |
 
 > Lists clone the paragraph's CURRENT paraPr and splice the heading in, so the margin/lineSpacing of the body is preserved. The Hancom stock list paraPrs that carry default indents (margin.left=1000+) are intentionally NOT reused — bullet/numbered items render at the body's own left margin.
@@ -135,6 +135,25 @@ render time — we only place the control at the end of the target paragraph.
 | `insert_endnote` | `index`, `text` | Same shape as `insert_footnote` for `<hp:endNote>`. Text appears at the end of the document instead of per-page. |
 
 > rhwp's `.hwp → .hwpx` conversion drops actual notes (it only writes the `<hp:footNotePr>` style declaration), so this template is built from the OWPML envelope rather than cloned from a real instance — visually verify in Hancom Docs on first use. To restyle the marker, follow with `apply_text_style` on a unique anchor before the insertion.
+
+### Bookmark (책갈피)
+
+A bookmark is a named anchor placed at the start of a paragraph's first
+`<hp:run>`, wrapped in `<hp:ctrl>`:
+
+```
+<hp:run charPrIDRef="N">
+  <hp:ctrl><hp:bookmark name="이름"/></hp:ctrl>
+  <hp:t>그 자리의 텍스트</hp:t>
+</hp:run>
+```
+
+The `name` is what cross-references / "Go to" jumps target. The element
+itself is invisible in body rendering.
+
+| `type` | Args | Notes |
+|--------|------|-------|
+| `insert_bookmark` | `index`, `name` | Splices `<hp:ctrl><hp:bookmark name="…"/></hp:ctrl>` into the first `<hp:run>` of paragraph `index`, right after its opening tag (so it sits before the run's text). If the paragraph has no run yet (or only a self-closing one), wraps the bookmark in a fresh `<hp:run charPrIDRef="0">`. |
 
 ### Hyperlink (하이퍼링크)
 
