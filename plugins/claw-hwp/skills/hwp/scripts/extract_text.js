@@ -76,12 +76,14 @@ if (opts.withCellText && !opts.inspect) {
   process.stderr.write('note: --with-cell-text has no effect without --inspect; ignoring.\n');
 }
 
-// For --inspect on .hwp input, count tables via rhwp wasm directly. We can't
-// reuse the hwpx-XML path here because rhwp.exportHwpx() drops every table,
-// so an inspect that goes through the hwpx zip always reports tableCount=0
-// on .hwp inputs. That made the "form has tables → use form-fill flow"
-// heuristic in SKILL.md silently misfire and convinced past agent sessions
-// that empty-looking forms were genuinely empty. We talk to rhwp directly.
+// For --inspect on .hwp input, count tables by talking to rhwp directly
+// (the getCellInfo/getTextInCell sweep) rather than via exportHwpx → hwpx-XML.
+// The direct sweep yields per-table cell counts (and the --with-cell-text
+// dump) in one pass and addresses cells in the original .hwp's coordinate
+// space — that's what set_cell_text uses. (Historical note: older rhwp builds
+// dropped tables on exportHwpx, so the hwpx-XML path reported tableCount=0 and
+// convinced past sessions that table-heavy forms were empty; rhwp 0.7.x
+// preserves tables, but the direct sweep is still what gives cell-level data.)
 if (opts.inspect && !isHwpxZip) {
   process.stdout.write(JSON.stringify(await inspectHwpViaRhwp(inputBytes, opts.withCellText), null, 2) + '\n');
   process.exit(0);
@@ -189,6 +191,15 @@ async function convertHwpToHwpx(bytes) {
   const wasmBytes = fs.readFileSync(wasmPath);
   const rhwp = await import('./vendor/rhwp/rhwp.js');
   await rhwp.default({ module_or_path: wasmBytes });
+  // exportHwpx() runs rhwp's layout pass, which calls globalThis.measureTextWidth.
+  // Without this stub it throws "measureTextWidth is not a function" on any form
+  // whose content triggers layout (e.g. table-heavy government forms) — so plain
+  // text / markdown extraction of such .hwp files crashed and returned nothing.
+  // Mirrors the stub in inspectHwpViaRhwp / create.js / cell-patch.js.
+  if (typeof globalThis.measureTextWidth !== 'function') {
+    globalThis.measureTextWidth = (font, text) =>
+      text.length * (parseFloat(font) || 10) * 0.55;
+  }
   const doc = new rhwp.HwpDocument(new Uint8Array(bytes));
   try {
     return doc.exportHwpx();
