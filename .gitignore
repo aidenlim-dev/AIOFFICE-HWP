@@ -28,6 +28,8 @@ pnpm-debug.log*
 # test / coverage
 coverage/
 .nyc_output/
+__pycache__/
+*.py[cod]
 
 # claude
 .claude/settings.local.json
@@ -43,7 +45,7 @@ _*.md
 *_NOTES.md
 
 # dev-internal docs (per-developer working notes, not user-facing)
-# Plugin marketplace only fetches plugins/claw-hwp/ — these top-level
+# Plugin marketplace only fetches plugins/aioffice-hwp/ — these top-level
 # files aren't useful in the public repo or to plugin users.
 CLAUDE.md
 VERIFIED_BEHAVIORS.md

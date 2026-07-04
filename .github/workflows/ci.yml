@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    # Users install this plugin on Windows and macOS too — validate on all three
+    # so "works on my Linux CI" never masks a platform break.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: plugins/aioffice-hwp/skills/hwp/scripts/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install script dependencies
+        run: npm ci --prefix plugins/aioffice-hwp/skills/hwp/scripts --ignore-scripts
+
+      - name: Validate plugin manifests
+        run: |
+          set -euo pipefail
+          node -e 'JSON.parse(require("fs").readFileSync(".claude-plugin/marketplace.json", "utf8"))'
+          node -e 'JSON.parse(require("fs").readFileSync("plugins/aioffice-hwp/.claude-plugin/plugin.json", "utf8"))'
+
+      - name: Syntax-check JavaScript
+        run: |
+          set -euo pipefail
+          find scripts plugins/aioffice-hwp/skills/hwp/scripts \
+            -path '*/vendor/*' -prune -o \
+            -path '*/node_modules/*' -prune -o \
+            \( -name '*.js' -o -name '*.mjs' \) -print0 \
+            | xargs -0 -n1 node --check
+
+      - name: Syntax-check Python
+        run: |
+          set -euo pipefail
+          find plugins/aioffice-hwp/skills/hwp/scripts \
+            -path '*/node_modules/*' -prune -o \
+            -name '*.py' -print0 \
+            | xargs -0 python -m py_compile
+
+      - name: Smoke-test document creation
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          # git-bash on Windows hands out /tmp/... paths that node.exe can't
+          # resolve — convert to a mixed-style Windows path (C:/...) there.
+          if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -m "$tmp")"; fi
+          printf '%s\n' '{"path":"'"$tmp"'/smoke.hwpx","operations":[{"type":"setup_document","page_size":"a4","orientation":"portrait","margin_mm":20},{"type":"append_heading","level":1,"text":"AIOFFICE-HWP Smoke"},{"type":"append_paragraph","text":"smoke test"}]}' \
+            | node plugins/aioffice-hwp/skills/hwp/scripts/create.js \
+            | tee "$tmp/create.json"
+          grep -q '"status":"success"' "$tmp/create.json"
+          grep -q 'setup_document: a4 portrait' "$tmp/create.json"
+          test -s "$tmp/smoke.hwpx"
+          node plugins/aioffice-hwp/skills/hwp/scripts/extract_text.js --format text "$tmp/smoke.hwpx" \
+            | grep -q 'AIOFFICE-HWP Smoke'
+
+      - name: Smoke-test hwpx round-trip (unpack → pack → validate)
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -m "$tmp")"; fi
+          S=plugins/aioffice-hwp/skills/hwp/scripts
+          python "$S/unpack.py" "$S/templates/hancom_native_stub.hwpx" "$tmp/u"
+          python "$S/pack.py" "$tmp/u" "$tmp/repacked.hwpx" --original "$S/templates/hancom_native_stub.hwpx"
+          python "$S/validate.py" "$tmp/repacked.hwpx"
+
+      - name: Verify Pages viewer is generated from source
+        # Linux-only: Windows checkout may normalize line endings, which would
+        # make the byte-compare against committed docs/ produce false diffs.
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          node scripts/build-viewer.mjs
+          git diff --exit-code -- docs

@@ -1,0 +1,17 @@
+# Normalize line endings so Windows checkouts (core.autocrlf) can't corrupt
+# scripts or binary assets. Scripts run via `node`/`python3` on all platforms.
+* text=auto
+
+# Shell scripts must stay LF (executed on macOS/Linux)
+*.sh text eol=lf
+*.command text eol=lf
+
+# Windows batch files must stay CRLF (cmd.exe quirks with LF-only files)
+*.bat text eol=crlf
+
+# Binary assets — never touch
+*.hwpx binary
+*.hwp binary
+*.wasm binary
+*.png binary
+*.pyc binary

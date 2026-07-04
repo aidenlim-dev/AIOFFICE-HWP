@@ -1,4 +1,4 @@
-<h1 align="center">claw-hwp</h1>
+<h1 align="center">AIOFFICE-HWP</h1>
 
 <p align="center">
   한글 문서(<b>.hwp · .hwpx</b>)를 <b>Claude · Codex로</b> 읽고 · 만들고 · 고치는 도구<br/>
@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/DoHyun468/claw-hwp/main/.github/traffic-summary.json" alt="Clones (14-day)" />
+  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/aidenlim-dev/AIOFFICE-HWP/main/.github/traffic-summary.json" alt="Clones (14-day)" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT" /></a>
 </p>
 
@@ -20,7 +20,7 @@
 
 회사에서 한글(.hwp) 문서, 많이 쓰시죠? 보고서·공문·계획서·표가 잔뜩 든 서식들요.
 
-`claw-hwp`를 설치하면 **Claude·Codex 같은 AI에게 한국어로 말하듯 시키기만 하면** 한글 문서를 직접 읽고, 새로 만들고, 고쳐 줍니다.
+`AIOFFICE-HWP`를 설치하면 **Claude·Codex 같은 AI에게 한국어로 말하듯 시키기만 하면** 한글 문서를 직접 읽고, 새로 만들고, 고쳐 줍니다.
 
 > - "이 보고서 표에서 매출 칸을 120억으로 바꿔줘"
 > - "제목은 파란색 굵게, 본문은 맑은 고딕으로 해줘"
@@ -30,6 +30,8 @@
 이렇게 말하면 됩니다. 결과 파일은 **한컴오피스나 한컴독스(한글 웹)에서 그대로 열립니다 — 안 깨져요.**
 
 한컴오피스 · LibreOffice · 윈도우 전용 프로그램 — **아무것도 필요 없습니다.**
+
+> 컴퓨터에 [Node.js](https://nodejs.org/) 18 이상만 있으면 됩니다 (Windows·macOS·Linux 모두 지원). 도장 이미지 생성 등 일부 보조 기능은 Python 3.9+를 사용해요 — 없어도 문서 읽기/만들기/편집은 전부 동작합니다.
 
 ## 누구를 위한 건가요?
 
@@ -184,7 +186,7 @@
 3. 아래 주소를 붙여넣고 **동기화(Sync)**:
 
    ```
-   https://github.com/DoHyun468/claw-hwp
+   https://github.com/aidenlim-dev/AIOFFICE-HWP
    ```
 
 **끝!** 이제 한글 파일을 채팅에 올리거나 파일 이름을 말하면 자동으로 작동합니다.
@@ -194,40 +196,34 @@
 
 ### 👀 "눈으로 확인" 도우미도 같이 *(선택)*
 
-위에서 소개한 한컴독스 캡처를 쓰려면 — Claude Code(CLI)에서 한 줄:
-
-```
-claude plugin install https://github.com/DoHyun468/hancomdocs-capture
-```
-
-처음 한 번 한컴독스 로그인만 하면 계속 쓸 수 있어요.
+위에서 소개한 한컴독스 캡처는 본체와 분리된 선택 애드온입니다. 설치 가능한 배포본이 연결된 환경에서는 해당 애드온을 추가로 설치하고, 처음 한 번 한컴독스 로그인만 하면 계속 쓸 수 있어요.
 
 ### 🧑‍💻 코딩하시는 분 — Claude Code (CLI)
 
 ```bash
-claude plugin marketplace add https://github.com/DoHyun468/claw-hwp
-claude plugin install claw-hwp@claw-hwp
+claude plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
+claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 ```
 
 > 업데이트한 뒤에는 **새 세션(새 창)** 을 여세요 — 열려 있던 세션은 옛 버전으로 계속 동작합니다.
 
 ### 🤖 Codex 앱 — 똑같이 됩니다 ✅ *(검증 완료)*
 
-Codex에서도 **같은 저장소를 그대로** 씁니다. 마켓플레이스로 추가해 설치하면 `claw-hwp:hwp` 스킬이 자동으로 로드되고, **미리보기 뷰어도 Codex 인앱 브라우저에서 옆에 떠요** (Claude Code 앱처럼).
+Codex에서도 **같은 저장소를 그대로** 씁니다. 마켓플레이스로 추가해 설치하면 `aioffice-hwp:hwp` 스킬이 자동으로 로드되고, **미리보기 뷰어도 Codex 인앱 브라우저에서 옆에 떠요** (Claude Code 앱처럼).
 
 ```bash
-codex plugin marketplace add https://github.com/DoHyun468/claw-hwp
-codex plugin add claw-hwp@claw-hwp
+codex plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
+codex plugin add aioffice-hwp@aioffice-hwp-marketplace
 ```
 
-> Claude는 `claude plugin …`, Codex는 `codex plugin …` — **명령어만 다르고 같은 저장소로 똑같이 설치**됩니다. (검증: 마켓플레이스 추가 → 설치 → `claw-hwp:hwp` 로드 → localhost 미리보기까지 정상)
+> Claude는 `claude plugin …`, Codex는 `codex plugin …` — **명령어만 다르고 같은 저장소로 똑같이 설치**됩니다. (검증: 마켓플레이스 추가 → 설치 → `aioffice-hwp:hwp` 로드 → localhost 미리보기까지 정상)
 
 ---
 
 ## 🐞 문제가 있거나 안 되는 게 있으면
 
 - 곧 **GitHub 이슈 페이지**로 오류를 바로 보낼 수 있게 만들 예정입니다. *(준비 중)*
-- 그때까지는 [Issues](https://github.com/DoHyun468/claw-hwp/issues)에 **어떤 파일에서 무엇이 안 됐는지** 적어 주세요. 가능하면 그 한글 파일도 같이 올려 주시면 빠르게 고칠 수 있어요.
+- 그때까지는 [Issues](https://github.com/aidenlim-dev/AIOFFICE-HWP/issues)에 **어떤 파일에서 무엇이 안 됐는지** 적어 주세요. 가능하면 그 한글 파일도 같이 올려 주시면 빠르게 고칠 수 있어요.
 
 ---
 
@@ -241,7 +237,7 @@ codex plugin add claw-hwp@claw-hwp
 | **Claude Code (CLI · 터미널)** | localhost 미리보기를 클릭 링크로 → 외부 브라우저에서 |
 | **Claude Cowork** | (원격이라 localhost를 못 띄워요) → github.io 뷰어에 파일 끌어 놓기 |
 
-> 📄 **설치·로그인 없이 한글 파일을 그냥 열어 보기만** 하려면 누구나 — <https://dohyun468.github.io/claw-hwp/> 에 끌어 놓으면 브라우저에서 바로 보여요. (claude.ai 웹처럼 스킬이 안 깔리는 곳에서도 이 뷰어는 됩니다.)
+> 📄 **설치·로그인 없이 한글 파일을 그냥 열어 보기만** 하려면 누구나 — <https://aidenlim-dev.github.io/AIOFFICE-HWP/> 에 끌어 놓으면 브라우저에서 바로 보여요. (claude.ai 웹처럼 스킬이 안 깔리는 곳에서도 이 뷰어는 됩니다.)
 > 🔍 **한컴과 100% 똑같이** 검토·편집하려면 — **한컴오피스(한글) 앱이나 한컴독스**에서 여세요. 이 한글 미리보기는 "작업 중 빠른 확인"용이고, 한컴 호환성 **검증**은 위 [한컴독스 캡처](#-결과를-눈으로-확인하기--한컴독스-캡처-선택)가 맡아요.
 
 ---
