@@ -33,7 +33,7 @@
 // ── 2. rhwp WASM ──────────────────────────────────────────────────────────
 // Resolve vendor paths relative to this module so the same bundle works
 // under both the local preview-server (root host, served from /) and a
-// GitHub Pages sub-path (e.g. /claw-hwp/). Bare `/vendor/...` would break
+// GitHub Pages sub-path (e.g. /aioffice-hwp/). Bare `/vendor/...` would break
 // under any sub-path host.
 const rhwpJsUrl = new URL("vendor/rhwp/rhwp.js", import.meta.url).href;
 const rhwpWasmUrl = new URL("vendor/rhwp/rhwp_bg.wasm", import.meta.url).href;
@@ -77,6 +77,9 @@ const state = {
   // refinement.
   zoom: 1,
 };
+// preview-server가 서빙 중인지 판별한다. 포트가 아니라 hostname 기준이라
+// AIOFFICE_HWP_PREVIEW_PORT를 바꿔도 동작하고 GitHub Pages에서는 false다.
+const IS_LOCAL_SERVER = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 2;
 const ZOOM_STEP = 0.05;
@@ -209,6 +212,11 @@ async function loadFromUrl() {
     els.filename.textContent = "";
     return;
   }
+  if (!IS_LOCAL_SERVER) {
+    setStatus("정적 뷰어에서는 로컬 파일 자동 열기를 지원하지 않습니다. 파일을 드래그하거나 폴더 아이콘으로 선택하세요.");
+    els.filename.textContent = "";
+    return;
+  }
   setStatus("파일 불러오는 중…");
   try {
     const res = await fetch(`/file?path=${encodeURIComponent(p)}`);
@@ -271,7 +279,7 @@ async function render() {
   try {
     if (state.autoFix === true) {
       try { doc.reflowLinesegs(); }
-      catch (err) { console.warn("[claw-hwp] reflowLinesegs failed:", err); }
+      catch (err) { console.warn("[aioffice-hwp] reflowLinesegs failed:", err); }
     }
 
     state.pageCount = doc.pageCount();
@@ -285,7 +293,7 @@ async function render() {
         const info = JSON.parse(doc.getPageInfo(i));
         geoms.push({ width: Number(info.width) || 0, height: Number(info.height) || 0 });
       } catch (err) {
-        console.error(`[claw-hwp] getPageInfo(${i}) failed:`, err);
+        console.error(`[aioffice-hwp] getPageInfo(${i}) failed:`, err);
         geoms.push({ width: 0, height: 0 });
       }
     }
@@ -317,7 +325,7 @@ async function render() {
       try {
         doc.renderPageToCanvas(i, canvas, renderScale);
       } catch (err) {
-        console.error(`[claw-hwp] renderPageToCanvas(${i}) failed:`, err);
+        console.error(`[aioffice-hwp] renderPageToCanvas(${i}) failed:`, err);
         continue;
       }
 
@@ -427,9 +435,9 @@ syncZoomUi();
 // While this tab is open, ping the server so it knows we're alive. When the
 // tab closes the pings stop, the server's idle timer fires, and the process
 // self-kills — sparing the user from having to remember to stop it. Only
-// applies when running under preview-server (port 3737); under static
+// applies when running under preview-server by local hostname; under static
 // hosting (GitHub Pages) there's nothing on the other end of the heartbeat.
-if (location.port === "3737") {
+if (IS_LOCAL_SERVER) {
   setInterval(() => {
     fetch("/__heartbeat", { method: "GET", cache: "no-store" }).catch(() => {});
   }, 30_000);

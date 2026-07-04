@@ -1,0 +1,12 @@
+{
+  "name": "aioffice-hwp",
+  "description": "Read, create, and edit Korean Hangul Word Processor documents (.hwp / .hwpx) in Claude. Built on the rhwp WebAssembly viewer/editor — no Hancom Office, no LibreOffice, no Windows COM required.",
+  "author": {
+    "name": "Aiden Lim",
+    "url": "https://github.com/aidenlim-dev"
+  },
+  "homepage": "https://github.com/aidenlim-dev/AIOFFICE-HWP",
+  "repository": "https://github.com/aidenlim-dev/AIOFFICE-HWP.git",
+  "license": "MIT",
+  "version": "1.0.0"
+}

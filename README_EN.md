@@ -1,4 +1,4 @@
-<h1 align="center">claw-hwp</h1>
+<h1 align="center">AIOFFICE-HWP</h1>
 
 <p align="center">
   Read · create · edit Korean Hangul documents (<b>.hwp · .hwpx</b>) with <b>Claude · Codex</b><br/>
@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/DoHyun468/claw-hwp/main/.github/traffic-summary.json" alt="Clones (14-day)" />
+  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/aidenlim-dev/AIOFFICE-HWP/main/.github/traffic-summary.json" alt="Clones (14-day)" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT" /></a>
 </p>
 
@@ -20,7 +20,7 @@
 
 Korea runs on Hangul (`.hwp`) documents — reports, official letters, plans, table-heavy forms.
 
-Install `claw-hwp` and you can **just tell an AI like Claude or Codex, in plain language**, to read, create, and edit those Hangul documents for you.
+Install `AIOFFICE-HWP` and you can **just tell an AI like Claude or Codex, in plain language**, to read, create, and edit those Hangul documents for you.
 
 > - "In this report's table, change the revenue cell to 12 billion."
 > - "Make the title blue and bold, body in Malgun Gothic."
@@ -128,7 +128,7 @@ A phrase like *"government-document look,"* *"keep it modern,"* or *"warm tone"*
 
 ## ✍️ Signature · seal — drop a stamp onto the signature line, precisely
 
-For documents with a signature line or a "(signature or seal)" cell, claw-hwp places your **stamp / signature image** neatly on the line. It auto-positions whether it's a table cell or a free-text line, and **never grows the table or page.** Square stamp or a wide signature — the aspect ratio is preserved. No stamp image? It generates a **red square name seal** for you.
+For documents with a signature line or a "(signature or seal)" cell, AIOFFICE-HWP places your **stamp / signature image** neatly on the line. It auto-positions whether it's a table cell or a free-text line, and **never grows the table or page.** Square stamp or a wide signature — the aspect ratio is preserved. No stamp image? It generates a **red square name seal** for you.
 
 <table>
   <tr>
@@ -143,7 +143,7 @@ For documents with a signature line or a "(signature or seal)" cell, claw-hwp pl
 
 ## 📝 Form filling
 
-For standard forms you fill out all the time — official letters, applications, plans, résumés — claw-hwp **fills in your information.** Say "fill this application with my info" and blanks like name, address, and phone get populated.
+For standard forms you fill out all the time — official letters, applications, plans, résumés — AIOFFICE-HWP **fills in your information.** Say "fill this application with my info" and blanks like name, address, and phone get populated.
 
 ### 🔒 Personal data, kept safe
 Sensitive data like national ID or business numbers go into these forms. So it works like this:
@@ -152,7 +152,7 @@ Sensitive data like national ID or business numbers go into these forms. So it w
 - Even verification is done **with values masked** (••••).
 
 ### 🔁 It adapts to each form's shape
-The same info is shaped differently per form. A birthdate as `970605` here, `97.06.05` there; a phone as `010-1234-5678` · `01012345678` · `82)10-1234-5678` — claw-hwp **reshapes it to match that field** automatically. Write it once, and it fits any form.
+The same info is shaped differently per form. A birthdate as `970605` here, `97.06.05` there; a phone as `010-1234-5678` · `01012345678` · `82)10-1234-5678` — AIOFFICE-HWP **reshapes it to match that field** automatically. Write it once, and it fits any form.
 
 ---
 
@@ -184,7 +184,7 @@ The same info is shaped differently per form. A birthdate as `970605` here, `97.
 3. Paste this URL and click **Sync**:
 
    ```
-   https://github.com/DoHyun468/claw-hwp
+   https://github.com/aidenlim-dev/AIOFFICE-HWP
    ```
 
 **Done!** Now drop a Hangul file into chat or mention its name, and it kicks in automatically.
@@ -194,30 +194,26 @@ The same info is shaped differently per form. A birthdate as `970605` here, `97.
 
 ### Add the "see-it-with-your-eyes" helper too *(optional)*
 
-To use the Hancom Docs capture above — one line in Claude Code (CLI):
-
-```
-claude plugin install https://github.com/DoHyun468/hancomdocs-capture
-```
-
-Log in to Hancom Docs once, and you're set.
+The Hancom Docs capture described above is a separate optional add-on. In environments where that add-on is published, install it separately; after one Hancom Docs login, it can keep using the local browser session.
 
 ### Developers — Claude Code (CLI)
 
 ```bash
-claude plugin marketplace add https://github.com/DoHyun468/claw-hwp
-claude plugin install claw-hwp@claw-hwp
+claude plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
+claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 ```
 
 > After updating, open a **new session (new window)** — an open session keeps running the old version.
+>
+> Requirements: [Node.js](https://nodejs.org/) 18+ (Windows · macOS · Linux all supported). Some helper features (e.g. seal-image generation) use Python 3.9+ — reading/creating/editing documents works without it.
 
 ### Codex app — works exactly the same ✅ *(verified)*
 
-Codex uses **the same repo, as-is.** Add it via marketplace and install; the `claw-hwp:hwp` skill auto-loads, and **the preview viewer opens in the Codex in-app browser** (just like the Claude Code app).
+Codex uses **the same repo, as-is.** Add it via marketplace and install; the `aioffice-hwp:hwp` skill auto-loads, and **the preview viewer opens in the Codex in-app browser** (just like the Claude Code app).
 
 ```bash
-codex plugin marketplace add https://github.com/DoHyun468/claw-hwp
-codex plugin add claw-hwp@claw-hwp
+codex plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
+codex plugin add aioffice-hwp@aioffice-hwp-marketplace
 ```
 
 > Claude uses `claude plugin …`, Codex uses `codex plugin …` — **only the command differs; same repo, same install.**
@@ -227,7 +223,7 @@ codex plugin add claw-hwp@claw-hwp
 ## 🐞 If something's broken or not working
 
 - We'll soon add a way to **report errors straight from a GitHub issue page.** *(in progress)*
-- Until then, please write **which file and what didn't work** in [Issues](https://github.com/DoHyun468/claw-hwp/issues). Attaching the Hangul file helps us fix it fast.
+- Until then, please write **which file and what didn't work** in [Issues](https://github.com/aidenlim-dev/AIOFFICE-HWP/issues). Attaching the Hangul file helps us fix it fast.
 
 ---
 
@@ -241,7 +237,7 @@ Here, **"preview"** means **drawing your edited/created Hangul (`.hwp`) document
 | **Claude Code (CLI · terminal)** | localhost preview as a clickable link → in an external browser |
 | **Claude Cowork** | (remote, can't run localhost) → drag the file onto the github.io viewer |
 
-> 📄 **To just open and view a Hangul file with no install / login** — anyone can drag it onto <https://dohyun468.github.io/claw-hwp/> and see it in the browser. (Works even where skills can't be installed, like claude.ai web.)
+> 📄 **To just open and view a Hangul file with no install / login** — anyone can drag it onto <https://aidenlim-dev.github.io/AIOFFICE-HWP/> and see it in the browser. (Works even where skills can't be installed, like claude.ai web.)
 > 🔍 **To review/edit exactly 1:1 with Hancom** — open it in the **Hancom Office (Hangul) app or Hancom Docs.** This preview is for "quick checks while working"; Hancom-compatibility **verification** is handled by the [Hancom Docs capture](#-see-the-result-with-your-own-eyes--hancom-docs-capture-optional) above.
 
 ---
