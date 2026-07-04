@@ -1,6 +1,10 @@
 <h1 align="center">AIOFFICE-HWP</h1>
 
 <p align="center">
+  <sub>RECON Labs의 <a href="https://github.com/DoHyun468/claw-hwp">claw-hwp</a>를 포크하여 AIOFFICE 배포판으로 유지·발전시키는 프로젝트입니다. (MIT)</sub>
+</p>
+
+<p align="center">
   한글 문서(<b>.hwp · .hwpx</b>)를 <b>Claude · Codex로</b> 읽고 · 만들고 · 고치는 도구<br/>
   한컴오피스가 없어도, 코딩을 몰라도 됩니다.
 </p>
