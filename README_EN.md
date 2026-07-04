@@ -1,6 +1,10 @@
 <h1 align="center">AIOFFICE-HWP</h1>
 
 <p align="center">
+  <sub>Forked from RECON Labs' <a href="https://github.com/DoHyun468/claw-hwp">claw-hwp</a> and maintained as an AIOFFICE distribution. (MIT)</sub>
+</p>
+
+<p align="center">
   Read · create · edit Korean Hangul documents (<b>.hwp · .hwpx</b>) with <b>Claude · Codex</b><br/>
   No Hancom Office, no coding required.
 </p>
