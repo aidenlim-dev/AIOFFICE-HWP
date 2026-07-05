@@ -161,6 +161,8 @@ node scripts/extract_text.js --inspect --with-cell-text path/to/form.hwp
 
 `create.js` reads a JSON payload from stdin and writes the file to the path you supply. Output format is decided by the path extension (`.hwp` = HWP 5.0 binary, `.hwpx` = OOXML).
 
+> **⚠️ Windows/PowerShell: feed stdin without a UTF-8 BOM.** `echo '...' | node scripts/create.js` and `'...' | node ...` in PowerShell prepend a BOM, which `create.js` rejects with `bad stdin JSON: Unexpected token '﻿'`. Write the JSON to a UTF-8 (no-BOM) file and redirect: `cmd /c "node scripts\create.js < payload.json"`, or from PowerShell `[IO.File]::WriteAllText($f, $json, (New-Object System.Text.UTF8Encoding($false)))` then feed that file. `hwpx-edit.js` takes stdin the same way. (On bash/macOS/Linux the `echo '...' | node` form is fine.)
+
 ```bash
 echo '{
   "path": "report.hwp",
