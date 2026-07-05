@@ -225,6 +225,8 @@ codex plugin add aioffice-hwp@aioffice-hwp-marketplace
 ```
 
 > Claude uses `claude plugin …`, Codex uses `codex plugin …` — **only the command differs; same repo, same install.**
+>
+> A Codex-native manifest ships at `plugins/aioffice-hwp/.codex-plugin/plugin.json`. For local development straight from a clone (Windows), run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-install-local.ps1` — it junctions the repo into `~/plugins/aioffice-hwp` and registers it in `~/.agents/plugins/marketplace.json` (undo: `codex-uninstall-local.ps1`).
 
 ---
 

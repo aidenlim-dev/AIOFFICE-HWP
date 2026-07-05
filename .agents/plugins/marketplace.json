@@ -1,0 +1,20 @@
+{
+  "name": "aioffice-hwp-marketplace",
+  "interface": {
+    "displayName": "AIOFFICE-HWP"
+  },
+  "plugins": [
+    {
+      "name": "aioffice-hwp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/aioffice-hwp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Documents"
+    }
+  ]
+}

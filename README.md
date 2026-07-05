@@ -225,6 +225,8 @@ codex plugin add aioffice-hwp@aioffice-hwp-marketplace
 ```
 
 > Claude는 `claude plugin …`, Codex는 `codex plugin …` — **명령어만 다르고 같은 저장소로 똑같이 설치**됩니다. (검증: 마켓플레이스 추가 → 설치 → `aioffice-hwp:hwp` 로드 → localhost 미리보기까지 정상)
+>
+> Codex 네이티브 매니페스트는 `plugins/aioffice-hwp/.codex-plugin/plugin.json`에 동봉돼 있습니다. 클론에서 바로 쓰는 로컬 개발 설치(Windows)는 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-install-local.ps1` — 저장소를 `~/plugins/aioffice-hwp` junction으로 연결하고 `~/.agents/plugins/marketplace.json`에 등록합니다(해제: `codex-uninstall-local.ps1`).
 
 ---
 
