@@ -209,6 +209,8 @@ claude plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
 claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 ```
 
+> 🤖 **AI 에이전트에게 "이 저장소 설치해"라고 시킬 때도** 위 두 명령을 터미널에서 그대로 실행하면 됩니다 — `/plugin` 슬래시 명령은 대화형 UI 전용이라 에이전트가 실행할 수 없어요. 설정 파일을 직접 편집할 필요도 없습니다.
+>
 > 업데이트한 뒤에는 **새 세션(새 창)** 을 여세요 — 열려 있던 세션은 옛 버전으로 계속 동작합니다.
 
 ### 🤖 Codex 앱 — 똑같이 됩니다 ✅ *(검증 완료)*
