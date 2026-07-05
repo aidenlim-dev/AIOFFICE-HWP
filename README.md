@@ -209,7 +209,9 @@ claude plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
 claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 ```
 
-> 🤖 **AI 에이전트에게 "이 저장소 설치해"라고 시킬 때도** 위 두 명령을 터미널에서 그대로 실행하면 됩니다 — `/plugin` 슬래시 명령은 대화형 UI 전용이라 에이전트가 실행할 수 없어요. 설정 파일을 직접 편집할 필요도 없습니다.
+> 🤖 **AI 에이전트에게 "이 저장소 설치해"라고 시킬 때도** 위 두 명령을 터미널에서 그대로 실행하면 됩니다 — `/plugin` 슬래시 명령은 대화형 UI 전용이라 에이전트가 실행할 수 없어요. 설정 파일을 직접 편집할 필요도 없고, 저장소를 따로 클론할 필요도 없습니다.
+>
+> 설치 후 `node --version`으로 **Node.js 18+** 를 확인하세요 — 문서 읽기/만들기/편집의 필수 요건입니다. 없으면 사용자에게 알리고 **동의를 받은 뒤에만** 설치하세요(Windows: `winget install OpenJS.NodeJS.LTS`, macOS: `brew install node`). Python은 선택 사항(도장 생성 등 보조 기능)이라 없어도 보고만 하면 됩니다.
 >
 > 업데이트한 뒤에는 **새 세션(새 창)** 을 여세요 — 열려 있던 세션은 옛 버전으로 계속 동작합니다.
 

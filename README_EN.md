@@ -207,7 +207,9 @@ claude plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
 claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 ```
 
-> 🤖 **Asking an AI agent to "install this repo"?** Have it run the same two commands above in a terminal — the `/plugin` slash commands are interactive-only and unavailable to agents, and no settings files need to be edited by hand.
+> 🤖 **Asking an AI agent to "install this repo"?** Have it run the same two commands above in a terminal — the `/plugin` slash commands are interactive-only and unavailable to agents, and no settings files or extra repo clones are needed.
+>
+> After installing, check `node --version` — **Node.js 18+ is required** for reading/creating/editing documents. If it's missing, tell the user and install it **only after they agree** (Windows: `winget install OpenJS.NodeJS.LTS`, macOS: `brew install node`). Python is optional (helper features like seal generation) — just report if absent.
 >
 > After updating, open a **new session (new window)** — an open session keeps running the old version.
 >
