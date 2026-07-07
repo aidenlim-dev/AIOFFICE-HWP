@@ -45,7 +45,7 @@ End-to-end round-trip tested against rhwp's `samples/`:
 `package.json` and `package-lock.json` are kept for maintainers who want to update bundled libraries:
 
 ```bash
-cd skills/hwp/scripts
+cd skills/aioffice-hwp/scripts
 npm install                      # repopulate node_modules with latest matching versions
 cp node_modules/@rhwp/core/{rhwp.js,rhwp_bg.wasm,LICENSE} vendor/rhwp/
 cp node_modules/fflate/esm/index.mjs vendor/fflate/

@@ -25,14 +25,14 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: plugins/aioffice-hwp/skills/hwp/scripts/package-lock.json
+          cache-dependency-path: plugins/aioffice-hwp/skills/aioffice-hwp/scripts/package-lock.json
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install script dependencies
-        run: npm ci --prefix plugins/aioffice-hwp/skills/hwp/scripts --ignore-scripts
+        run: npm ci --prefix plugins/aioffice-hwp/skills/aioffice-hwp/scripts --ignore-scripts
 
       - name: Validate plugin manifests
         run: |
@@ -43,7 +43,7 @@ jobs:
       - name: Syntax-check JavaScript
         run: |
           set -euo pipefail
-          find scripts plugins/aioffice-hwp/skills/hwp/scripts \
+          find scripts plugins/aioffice-hwp/skills/aioffice-hwp/scripts \
             -path '*/vendor/*' -prune -o \
             -path '*/node_modules/*' -prune -o \
             \( -name '*.js' -o -name '*.mjs' \) -print0 \
@@ -52,7 +52,7 @@ jobs:
       - name: Syntax-check Python
         run: |
           set -euo pipefail
-          find plugins/aioffice-hwp/skills/hwp/scripts \
+          find plugins/aioffice-hwp/skills/aioffice-hwp/scripts \
             -path '*/node_modules/*' -prune -o \
             -name '*.py' -print0 \
             | xargs -0 python -m py_compile
@@ -66,12 +66,12 @@ jobs:
           # resolve — convert to a mixed-style Windows path (C:/...) there.
           if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -m "$tmp")"; fi
           printf '%s\n' '{"path":"'"$tmp"'/smoke.hwpx","operations":[{"type":"setup_document","page_size":"a4","orientation":"portrait","margin_mm":20},{"type":"append_heading","level":1,"text":"AIOFFICE-HWP Smoke"},{"type":"append_paragraph","text":"smoke test"}]}' \
-            | node plugins/aioffice-hwp/skills/hwp/scripts/create.js \
+            | node plugins/aioffice-hwp/skills/aioffice-hwp/scripts/create.js \
             | tee "$tmp/create.json"
           grep -q '"status":"success"' "$tmp/create.json"
           grep -q 'setup_document: a4 portrait' "$tmp/create.json"
           test -s "$tmp/smoke.hwpx"
-          node plugins/aioffice-hwp/skills/hwp/scripts/extract_text.js --format text "$tmp/smoke.hwpx" \
+          node plugins/aioffice-hwp/skills/aioffice-hwp/scripts/extract_text.js --format text "$tmp/smoke.hwpx" \
             | grep -q 'AIOFFICE-HWP Smoke'
 
       - name: Smoke-test hwpx round-trip (unpack → pack → validate)
@@ -80,7 +80,7 @@ jobs:
           tmp="$(mktemp -d)"
           trap 'rm -rf "$tmp"' EXIT
           if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -m "$tmp")"; fi
-          S=plugins/aioffice-hwp/skills/hwp/scripts
+          S=plugins/aioffice-hwp/skills/aioffice-hwp/scripts
           python "$S/unpack.py" "$S/templates/hancom_native_stub.hwpx" "$tmp/u"
           python "$S/pack.py" "$tmp/u" "$tmp/repacked.hwpx" --original "$S/templates/hancom_native_stub.hwpx"
           python "$S/validate.py" "$tmp/repacked.hwpx"

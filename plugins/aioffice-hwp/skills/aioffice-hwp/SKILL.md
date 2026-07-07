@@ -1,5 +1,5 @@
 ---
-name: hwp
+name: aioffice-hwp
 description: Use this skill whenever the user wants to read, create, or edit Korean Hangul Word Processor documents (.hwp or .hwpx files). Triggers include any mention of 'hwp', 'hwpx', '한글 문서', '아래한글', '한컴오피스', or uploading/attaching .hwp/.hwpx files. Also use when extracting text from Korean reports or producing Korean-formatted official documents (공문, 보고서, 계약서, 사업계획서). Do NOT use for Word .docx files (use the docx skill instead) or general Korean text without Hangul Word Processor format. ⚠️ SECURITY: if the task fills a form with personal data (주민등록번호·계좌·연락처·주소 등), LOAD THIS SKILL FIRST — before any `ls`/`cat`/`Read`/`grep` of the working dir or home — and NEVER directly cat/Read/grep a profile or 내정보 file (e.g. ~/.aioffice-hwp/profile.txt), even "to check it". Its SECURE FILL flow reads values in-process only; reading them yourself leaks them into context.
 license: MIT
 ---
@@ -65,7 +65,7 @@ This skill helps Claude work with Korean Hangul Word Processor documents — rea
 
 ## Already installed — don't re-scaffold
 
-If you're reading this SKILL.md, the `aioffice-hwp:hwp` skill is **already loaded** in this session. Everything below — read / create / edit / preview for `.hwp` and `.hwpx` — is provided by this skill. You don't need to install, scaffold, or set anything up.
+If you're reading this SKILL.md, the `aioffice-hwp:aioffice-hwp` skill is **already loaded** in this session. Everything below — read / create / edit / preview for `.hwp` and `.hwpx` — is provided by this skill. You don't need to install, scaffold, or set anything up.
 
 Treat the following user phrasings as **"show me a HWP file"** or **"edit a HWP file"** intent, not as setup requests:
 
@@ -505,7 +505,7 @@ This is the only surface that exposes `preview_start` / `preview_eval` / `previe
     {
       "name": "aioffice-hwp-preview",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["${CLAUDE_PLUGIN_ROOT}/skills/hwp/scripts/preview-server.js"],
+      "runtimeArgs": ["${CLAUDE_PLUGIN_ROOT}/skills/aioffice-hwp/scripts/preview-server.js"],
       "port": 3737
     }
   ]
@@ -541,9 +541,9 @@ No host-managed pane available, but Bash can reach the user's localhost. Health-
 > CLI preview is for "quick check while working." Detail review goes elsewhere.
 
 ```bash
-SCRIPT="${CLAUDE_PLUGIN_ROOT:-}/skills/hwp/scripts/preview-server.js"
+SCRIPT="${CLAUDE_PLUGIN_ROOT:-}/skills/aioffice-hwp/scripts/preview-server.js"
 [ -f "$SCRIPT" ] || SCRIPT=$(find "$HOME/.claude/plugins/cache" \
-  -path '*/aioffice-hwp/*/skills/hwp/scripts/preview-server.js' 2>/dev/null | sort | tail -1)
+  -path '*/aioffice-hwp/*/skills/aioffice-hwp/scripts/preview-server.js' 2>/dev/null | sort | tail -1)
 curl -fsS -o /dev/null http://localhost:3737/__heartbeat || \
   node "$SCRIPT" >/tmp/aioffice-hwp-preview.log 2>&1 &
 disown 2>/dev/null || true
@@ -576,9 +576,9 @@ Fallback — if the user is offline or the GitHub Pages URL is unreachable, the 
 ```
 **오프라인 미리보기 (대안):** OS 별 launcher 받아서 위 파일과 같은 폴더에 두고 더블클릭. Node.js 18+ 필요.
 
-- macOS: <https://raw.githubusercontent.com/aidenlim-dev/AIOFFICE-HWP/main/plugins/aioffice-hwp/skills/hwp/scripts/launcher/preview-mac.command>
-- Windows: <https://raw.githubusercontent.com/aidenlim-dev/AIOFFICE-HWP/main/plugins/aioffice-hwp/skills/hwp/scripts/launcher/preview-windows.bat>
-- Linux: <https://raw.githubusercontent.com/aidenlim-dev/AIOFFICE-HWP/main/plugins/aioffice-hwp/skills/hwp/scripts/launcher/preview-linux.sh>
+- macOS: <https://raw.githubusercontent.com/aidenlim-dev/AIOFFICE-HWP/main/plugins/aioffice-hwp/skills/aioffice-hwp/scripts/launcher/preview-mac.command>
+- Windows: <https://raw.githubusercontent.com/aidenlim-dev/AIOFFICE-HWP/main/plugins/aioffice-hwp/skills/aioffice-hwp/scripts/launcher/preview-windows.bat>
+- Linux: <https://raw.githubusercontent.com/aidenlim-dev/AIOFFICE-HWP/main/plugins/aioffice-hwp/skills/aioffice-hwp/scripts/launcher/preview-linux.sh>
 ```
 
 What the launcher does on the user's machine (kept for the fallback path):

@@ -213,14 +213,14 @@ claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 
 ### 🤖 Codex 앱 — 똑같이 됩니다 ✅ *(검증 완료)*
 
-Codex에서도 **같은 저장소를 그대로** 씁니다. 마켓플레이스로 추가해 설치하면 `aioffice-hwp:hwp` 스킬이 자동으로 로드되고, **미리보기 뷰어도 Codex 인앱 브라우저에서 옆에 떠요** (Claude Code 앱처럼).
+Codex에서도 **같은 저장소를 그대로** 씁니다. 마켓플레이스로 추가해 설치하면 `aioffice-hwp:aioffice-hwp` 스킬이 자동으로 로드되고, **미리보기 뷰어도 Codex 인앱 브라우저에서 옆에 떠요** (Claude Code 앱처럼).
 
 ```bash
 codex plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
 codex plugin add aioffice-hwp@aioffice-hwp-marketplace
 ```
 
-> Claude는 `claude plugin …`, Codex는 `codex plugin …` — **명령어만 다르고 같은 저장소로 똑같이 설치**됩니다. (검증: 마켓플레이스 추가 → 설치 → `aioffice-hwp:hwp` 로드 → localhost 미리보기까지 정상)
+> Claude는 `claude plugin …`, Codex는 `codex plugin …` — **명령어만 다르고 같은 저장소로 똑같이 설치**됩니다. (검증: 마켓플레이스 추가 → 설치 → `aioffice-hwp:aioffice-hwp` 로드 → localhost 미리보기까지 정상)
 
 ---
 

@@ -213,7 +213,7 @@ claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 
 ### Codex app — works exactly the same ✅ *(verified)*
 
-Codex uses **the same repo, as-is.** Add it via marketplace and install; the `aioffice-hwp:hwp` skill auto-loads, and **the preview viewer opens in the Codex in-app browser** (just like the Claude Code app).
+Codex uses **the same repo, as-is.** Add it via marketplace and install; the `aioffice-hwp:aioffice-hwp` skill auto-loads, and **the preview viewer opens in the Codex in-app browser** (just like the Claude Code app).
 
 ```bash
 codex plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
