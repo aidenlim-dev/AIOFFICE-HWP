@@ -20,6 +20,21 @@
         "ref": "main"
       },
       "homepage": "https://github.com/aidenlim-dev/AIOFFICE-HWP"
+    },
+    {
+      "name": "aioffice-capture",
+      "description": "Upload a .hwp / .hwpx to 한컴독스 (Hancom Docs) and capture how it actually renders — full-page screenshots, zoomed regions, find-by-text. Optional companion to aioffice-hwp for verifying Hancom compatibility. Headless Playwright; one-time Hancom Docs login required.",
+      "author": {
+        "name": "Aiden Lim"
+      },
+      "category": "documents",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/aidenlim-dev/AIOFFICE-HWP.git",
+        "path": "plugins/aioffice-capture",
+        "ref": "main"
+      },
+      "homepage": "https://github.com/aidenlim-dev/AIOFFICE-HWP"
     }
   ]
 }

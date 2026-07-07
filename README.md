@@ -31,7 +31,7 @@
 > - "이 문서 본문을 2단으로 나눠줘"
 > - "표 하나 만들고 꼬리말에 쪽번호 넣어줘"
 
-이렇게 말하면 됩니다. 결과 파일은 **한컴오피스나 한컴독스(한글 웹)에서 그대로 열립니다 — 안 깨져요.**
+이렇게 말하면 됩니다. 결과 파일은 **한컴오피스나 한컴독스(한글 웹)에서 그대로 열려요** — 원본 형식을 바꾸지 않고 고치기 때문에 표·서식이 잘 보존됩니다.
 
 한컴오피스 · LibreOffice · 윈도우 전용 프로그램 — **아무것도 필요 없습니다.**
 
@@ -164,24 +164,24 @@
 
 ## 👀 결과를 눈으로 확인하기 — 한컴독스 캡처 *(선택)*
 
-"고쳐 줬다는데, 진짜 한컴에서 잘 보이나?" — 이걸 **실제 화면 그대로 이미지로 확인**할 수 있는 도우미가 따로 있습니다: **`hancomdocs-capture`**.
+"고쳐 줬다는데, 진짜 한컴에서 잘 보이나?" — 이걸 **실제 화면 그대로 이미지로 확인**할 수 있는 **별도 플러그인**이 있습니다: **`aioffice-capture`** (같은 마켓플레이스에 함께 들어 있어요).
 
 - 동의하시면 처음 **딱 한 번** 브라우저 창이 떠서 한컴독스에 로그인합니다.
-  *(비밀번호는 저장하지 않아요. 로그인 정보는 **내 컴퓨터에만** 남습니다 — 브라우저에 한 번 로그인해 두면 다음에 안 물어보는 것과 똑같아요. 그래서 한 번 해두면 다시 로그인 없이 계속 쓸 수 있어요.)*
+  *(비밀번호는 저장하지 않아요. 세션 정보만 **내 컴퓨터에** 남습니다 — 브라우저에 한 번 로그인해 두면 다음에 안 물어보는 것과 똑같아요.)*
 - 그 다음부터는 문서를 자동으로 한컴독스에 올려서 **실제로 보이는 모습을 사진으로 찍어 옵니다.**
-- 그 사진을 **사람도 보고, Claude도 직접 보고 확인**하기 때문에 — "말로만 됐다"가 아니라 **눈으로 검증된 결과**가 나옵니다. 그래서 **결과 품질이 확 올라갑니다.**
+- 그 사진을 **사람도 보고, Claude도 직접 보고 확인**하기 때문에 — "말로만 됐다"가 아니라 **눈으로 확인된 결과**가 나옵니다.
 
 | 원하는 영역 고르기 | 확대해서 보기 |
 |:---:|:---:|
 | <img src="assets/capture_select.png" width="380"/> | <img src="assets/capture_zoom.png" width="380"/> |
 
-> 없어도 기본 기능은 다 됩니다 — 이건 "눈으로 확인"을 더해 주는 선택 도우미예요. 설치는 바로 아래를 보세요.
+> 이건 **선택 사항**이에요 — 없어도 읽기·만들기·고치기는 다 됩니다. 브라우저 자동화(Playwright)와 한컴독스 로그인이 필요해서 본체와 **분리된 별도 플러그인**으로 뒀습니다. 설치는 아래 [설치](#-설치)의 "한컴독스 캡처도 함께" 항목을 보세요.
 
 ---
 
 ## 📥 설치
 
-> **Claude와 Codex 둘 다 됩니다** (둘 다 설치·동작 검증 완료). 같은 GitHub 저장소를 쓰고, 명령어만 각자 달라요. 본인 환경에 맞는 방법을 보세요.
+> **Claude와 Codex 둘 다 됩니다.** 같은 GitHub 저장소를 쓰고, 명령어만 각자 달라요. 본인 환경에 맞는 방법을 보세요.
 
 ### 일반 사용자 — Claude 데스크톱 앱 (Mac · Windows)
 
@@ -198,10 +198,6 @@
 > 💡 **이렇게 말해 보세요:** `report.hwp 보여줘` · `이 한글 파일 열어줘` · `회의록.hwp 에 한 줄 추가해줘`
 > (추상적인 "설치해줘 / 설정해줘" 보다, **파일이나 파일명을 같이** 말하면 잘 작동해요.)
 
-### 👀 "눈으로 확인" 도우미도 같이 *(선택)*
-
-위에서 소개한 한컴독스 캡처는 본체와 분리된 선택 애드온입니다. 설치 가능한 배포본이 연결된 환경에서는 해당 애드온을 추가로 설치하고, 처음 한 번 한컴독스 로그인만 하면 계속 쓸 수 있어요.
-
 ### 🧑‍💻 코딩하시는 분 — Claude Code (CLI)
 
 ```bash
@@ -209,18 +205,37 @@ claude plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
 claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 ```
 
+> 🤖 **AI 에이전트에게 "이 저장소 설치해줘"라고 시키나요?** 위 두 명령을 터미널에서 그대로 실행하게 하세요 — `/plugin` 슬래시 명령은 대화형 전용이라 에이전트가 못 씁니다. 설정 파일이나 별도 클론은 필요 없어요.
+>
+> 설치 후 `node --version`을 확인하세요 — 문서 읽기/만들기/고치기에 **Node.js 18+가 필요**합니다. 없으면 사용자에게 알리고 **동의를 받은 뒤에만** 설치하세요 (Windows: `winget install OpenJS.NodeJS.LTS`, macOS: `brew install node`). Python은 선택 사항(도장 생성 등 보조 기능)이라 없으면 안내만 하면 됩니다.
+>
 > 업데이트한 뒤에는 **새 세션(새 창)** 을 여세요 — 열려 있던 세션은 옛 버전으로 계속 동작합니다.
 
-### 🤖 Codex 앱 — 똑같이 됩니다 ✅ *(검증 완료)*
+### 🤖 Codex 앱 — 똑같이 됩니다
 
-Codex에서도 **같은 저장소를 그대로** 씁니다. 마켓플레이스로 추가해 설치하면 `aioffice-hwp:aioffice-hwp` 스킬이 자동으로 로드되고, **미리보기 뷰어도 Codex 인앱 브라우저에서 옆에 떠요** (Claude Code 앱처럼).
+Codex에서도 **같은 저장소를 그대로** 씁니다. 마켓플레이스로 추가해 설치하면 `aioffice-hwp:aioffice-hwp` 스킬이 자동으로 로드됩니다.
 
 ```bash
 codex plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
 codex plugin add aioffice-hwp@aioffice-hwp-marketplace
 ```
 
-> Claude는 `claude plugin …`, Codex는 `codex plugin …` — **명령어만 다르고 같은 저장소로 똑같이 설치**됩니다. (검증: 마켓플레이스 추가 → 설치 → `aioffice-hwp:aioffice-hwp` 로드 → localhost 미리보기까지 정상)
+> Claude는 `claude plugin …`, Codex는 `codex plugin …` — **명령어만 다르고 같은 저장소로 똑같이 설치**됩니다.
+>
+> Codex 네이티브 매니페스트는 `plugins/aioffice-hwp/.codex-plugin/plugin.json`에 있습니다. 클론에서 바로 로컬 개발하려면(Windows) `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-install-local.ps1` — 저장소를 `~/plugins/aioffice-hwp`로 junction 걸고 `~/.agents/plugins/marketplace.json`에 등록합니다 (되돌리기: `codex-uninstall-local.ps1`).
+
+### 👀 한컴독스 캡처도 함께 *(선택)*
+
+위 "[눈으로 확인하기](#-결과를-눈으로-확인하기--한컴독스-캡처-선택)"의 `aioffice-capture`는 **같은 마켓플레이스**에 들어 있어요. 필요하면 한 줄 더 설치하면 됩니다:
+
+```bash
+# Claude Code
+claude plugin install aioffice-capture@aioffice-hwp-marketplace
+# Codex
+codex plugin add aioffice-capture@aioffice-hwp-marketplace
+```
+
+> 처음 한 번 `node login.js`로 한컴독스에 로그인하면 이후 계속 쓸 수 있어요 (세션은 내 컴퓨터에만 저장). Playwright(브라우저 자동화)를 최초 1회 자동 설치합니다 — 수백 MB.
 
 ---
 
@@ -242,7 +257,7 @@ codex plugin add aioffice-hwp@aioffice-hwp-marketplace
 | **Claude Cowork** | (원격이라 localhost를 못 띄워요) → github.io 뷰어에 파일 끌어 놓기 |
 
 > 📄 **설치·로그인 없이 한글 파일을 그냥 열어 보기만** 하려면 누구나 — <https://aidenlim-dev.github.io/AIOFFICE-HWP/> 에 끌어 놓으면 브라우저에서 바로 보여요. (claude.ai 웹처럼 스킬이 안 깔리는 곳에서도 이 뷰어는 됩니다.)
-> 🔍 **한컴과 100% 똑같이** 검토·편집하려면 — **한컴오피스(한글) 앱이나 한컴독스**에서 여세요. 이 한글 미리보기는 "작업 중 빠른 확인"용이고, 한컴 호환성 **검증**은 위 [한컴독스 캡처](#-결과를-눈으로-확인하기--한컴독스-캡처-선택)가 맡아요.
+> 🔍 **한컴에서 실제로 어떻게 보이는지** 확인·검증하려면 — **한컴오피스(한글) 앱이나 한컴독스**에서 여세요. 이 한글 미리보기는 자체 렌더러라 "작업 중 빠른 확인"용이고, 한컴 호환성 **검증**은 위 [한컴독스 캡처](#-결과를-눈으로-확인하기--한컴독스-캡처-선택)가 맡아요.
 
 ---
 

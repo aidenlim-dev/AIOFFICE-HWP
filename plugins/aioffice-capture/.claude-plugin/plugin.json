@@ -1,0 +1,12 @@
+{
+  "name": "aioffice-capture",
+  "description": "Upload a .hwp / .hwpx to 한컴독스 (Hancom Docs) and capture how it actually renders — full-page screenshots, zoomed regions, find-by-text. Optional companion to aioffice-hwp for verifying Hancom compatibility. Headless Playwright; one-time Hancom Docs login required.",
+  "author": {
+    "name": "Aiden Lim",
+    "url": "https://github.com/aidenlim-dev"
+  },
+  "homepage": "https://github.com/aidenlim-dev/AIOFFICE-HWP",
+  "repository": "https://github.com/aidenlim-dev/AIOFFICE-HWP.git",
+  "license": "MIT",
+  "version": "1.0.0"
+}
