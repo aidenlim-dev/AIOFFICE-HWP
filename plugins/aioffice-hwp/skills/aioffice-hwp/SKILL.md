@@ -161,6 +161,8 @@ node scripts/extract_text.js --inspect --with-cell-text path/to/form.hwp
 
 `create.js` reads a JSON payload from stdin and writes the file to the path you supply. Output format is decided by the path extension (`.hwp` = HWP 5.0 binary, `.hwpx` = OOXML).
 
+> **⚠️ Windows/PowerShell: feed stdin without a UTF-8 BOM.** `echo '...' | node scripts/create.js` and `'...' | node ...` in PowerShell prepend a BOM, which `create.js` rejects with `bad stdin JSON: Unexpected token '﻿'`. Write the JSON to a UTF-8 (no-BOM) file and redirect: `cmd /c "node scripts\create.js < payload.json"`, or from PowerShell `[IO.File]::WriteAllText($f, $json, (New-Object System.Text.UTF8Encoding($false)))` then feed that file. `hwpx-edit.js` takes stdin the same way. (On bash/macOS/Linux the `echo '...' | node` form is fine.)
+
 ```bash
 echo '{
   "path": "report.hwp",
@@ -539,6 +541,8 @@ No host-managed pane available, but Bash can reach the user's localhost. Health-
 > - **한컴오피스 한글 / 한컴독스** — original-fidelity rendering if the user has a license or 한컴독스 account.
 > - **PDF export via Hop** — file → PDF 내보내기. Our plugin's `.hwp → .pdf` conversion is on the v2 roadmap (LibreOffice headless / Hop CLI), not in v1.
 > CLI preview is for "quick check while working." Detail review goes elsewhere.
+
+> **`CLAUDE_PLUGIN_ROOT`가 없는 하네스(Codex 등)**: 이 SKILL.md의 위치 기준으로 플러그인 루트를 해석하라 — 이 파일은 `<PLUGIN_ROOT>/skills/aioffice-hwp/SKILL.md`에 있으므로 루트는 두 단계 위다. Codex 로컬 설치(`scripts/codex-install-local.ps1`)를 썼다면 `~/plugins/aioffice-hwp`가 그 루트다. 아래 스니펫의 find 폴백은 Claude 캐시 경로만 뒤지므로, Codex에서는 위 방법으로 찾은 경로를 `$SCRIPT`에 직접 넣으면 된다.
 
 ```bash
 SCRIPT="${CLAUDE_PLUGIN_ROOT:-}/skills/aioffice-hwp/scripts/preview-server.js"

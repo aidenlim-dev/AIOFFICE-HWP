@@ -207,6 +207,10 @@ claude plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
 claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 ```
 
+> 🤖 **Asking an AI agent to "install this repo"?** Have it run the same two commands above in a terminal — the `/plugin` slash commands are interactive-only and unavailable to agents, and no settings files or extra repo clones are needed.
+>
+> After installing, check `node --version` — **Node.js 18+ is required** for reading/creating/editing documents. If it's missing, tell the user and install it **only after they agree** (Windows: `winget install OpenJS.NodeJS.LTS`, macOS: `brew install node`). Python is optional (helper features like seal generation) — just report if absent.
+>
 > After updating, open a **new session (new window)** — an open session keeps running the old version.
 >
 > Requirements: [Node.js](https://nodejs.org/) 18+ (Windows · macOS · Linux all supported). Some helper features (e.g. seal-image generation) use Python 3.9+ — reading/creating/editing documents works without it.
@@ -221,6 +225,8 @@ codex plugin add aioffice-hwp@aioffice-hwp-marketplace
 ```
 
 > Claude uses `claude plugin …`, Codex uses `codex plugin …` — **only the command differs; same repo, same install.**
+>
+> A Codex-native manifest ships at `plugins/aioffice-hwp/.codex-plugin/plugin.json`. For local development straight from a clone (Windows), run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-install-local.ps1` — it junctions the repo into `~/plugins/aioffice-hwp` and registers it in `~/.agents/plugins/marketplace.json` (undo: `codex-uninstall-local.ps1`).
 
 ---
 

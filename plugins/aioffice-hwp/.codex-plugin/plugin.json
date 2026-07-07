@@ -1,0 +1,49 @@
+{
+  "name": "aioffice-hwp",
+  "version": "1.2.0",
+  "description": "Read, create, and edit Korean Hangul Word Processor documents (.hwp / .hwpx) in Codex. Built on the rhwp WebAssembly viewer/editor — no Hancom Office, no LibreOffice, no Windows COM required.",
+  "author": {
+    "name": "Aiden Lim",
+    "url": "https://github.com/aidenlim-dev"
+  },
+  "homepage": "https://github.com/aidenlim-dev/AIOFFICE-HWP",
+  "repository": "https://github.com/aidenlim-dev/AIOFFICE-HWP",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "hwp",
+    "hwpx",
+    "hangul",
+    "hancom",
+    "korean",
+    "documents",
+    "rhwp",
+    "wasm",
+    "aioffice"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AIOFFICE-HWP",
+    "shortDescription": "Read, create, and edit Korean .hwp / .hwpx documents — no Hancom Office needed",
+    "longDescription": "AIOFFICE-HWP lets the agent read, create, and edit Korean Hangul Word Processor documents (.hwp and .hwpx) with a local preview viewer. It is built on the rhwp WebAssembly core with byte-level in-place editing that stays compatible with Hancom Office and Hancom Docs, plus a secure form-fill flow that keeps personal data out of the model context.",
+    "developerName": "Aiden Lim",
+    "category": "Documents",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/aidenlim-dev/AIOFFICE-HWP",
+    "privacyPolicyURL": "https://github.com/aidenlim-dev/AIOFFICE-HWP/blob/main/README.md",
+    "termsOfServiceURL": "https://github.com/aidenlim-dev/AIOFFICE-HWP/blob/main/LICENSE",
+    "defaultPrompt": [
+      "Show me report.hwp",
+      "이 한글 파일 요약해줘",
+      "회의록.hwp 에 한 줄 추가해줘"
+    ],
+    "brandColor": "#2563EB",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/icon.svg",
+    "screenshots": []
+  }
+}
