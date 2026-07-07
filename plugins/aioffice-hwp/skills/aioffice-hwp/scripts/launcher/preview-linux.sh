@@ -23,7 +23,7 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-SERVER=$(find "$HOME/.claude/plugins/cache" -path '*/aioffice-hwp/*/skills/hwp/scripts/preview-server.js' 2>/dev/null | sort | tail -1)
+SERVER=$(find "$HOME/.claude/plugins/cache" -path '*/aioffice-hwp/*/skills/aioffice-hwp/scripts/preview-server.js' 2>/dev/null | sort | tail -1)
 if [ -z "$SERVER" ]; then
   CACHE="$HOME/.aioffice-hwp-launcher"
   SERVER="$CACHE/scripts/preview-server.js"
@@ -32,7 +32,7 @@ if [ -z "$SERVER" ]; then
     mkdir -p "$CACHE"
     curl -fsSL https://codeload.github.com/aidenlim-dev/AIOFFICE-HWP/tar.gz/main \
       | tar -xz -C "$CACHE" --strip-components=5 \
-        AIOFFICE-HWP-main/plugins/aioffice-hwp/skills/hwp/scripts \
+        AIOFFICE-HWP-main/plugins/aioffice-hwp/skills/aioffice-hwp/scripts \
       || { echo "❌ Download failed."; read -p "Press Enter to close..."; exit 1; }
   fi
 fi

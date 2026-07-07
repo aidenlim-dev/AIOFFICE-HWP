@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
-const src = resolve(repoRoot, "plugins/aioffice-hwp/skills/hwp/scripts");
+const src = resolve(repoRoot, "plugins/aioffice-hwp/skills/aioffice-hwp/scripts");
 const dst = resolve(repoRoot, "docs");
 
 await rm(dst, { recursive: true, force: true });

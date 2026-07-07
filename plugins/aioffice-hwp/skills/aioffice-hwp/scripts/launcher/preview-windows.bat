@@ -46,7 +46,7 @@ if "%SERVER%"=="" (
       pause
       exit /b 1
     )
-    tar -xzf "!CACHE!\src.tar.gz" -C "!CACHE!" --strip-components=5 AIOFFICE-HWP-main/plugins/aioffice-hwp/skills/hwp/scripts
+    tar -xzf "!CACHE!\src.tar.gz" -C "!CACHE!" --strip-components=5 AIOFFICE-HWP-main/plugins/aioffice-hwp/skills/aioffice-hwp/scripts
     if errorlevel 1 (
       echo Extract failed. Windows 10 1803+ required for tar support.
       pause

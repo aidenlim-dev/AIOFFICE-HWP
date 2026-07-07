@@ -209,24 +209,18 @@ claude plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
 claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 ```
 
-> 🤖 **AI 에이전트에게 "이 저장소 설치해"라고 시킬 때도** 위 두 명령을 터미널에서 그대로 실행하면 됩니다 — `/plugin` 슬래시 명령은 대화형 UI 전용이라 에이전트가 실행할 수 없어요. 설정 파일을 직접 편집할 필요도 없고, 저장소를 따로 클론할 필요도 없습니다.
->
-> 설치 후 `node --version`으로 **Node.js 18+** 를 확인하세요 — 문서 읽기/만들기/편집의 필수 요건입니다. 없으면 사용자에게 알리고 **동의를 받은 뒤에만** 설치하세요(Windows: `winget install OpenJS.NodeJS.LTS`, macOS: `brew install node`). Python은 선택 사항(도장 생성 등 보조 기능)이라 없어도 보고만 하면 됩니다.
->
 > 업데이트한 뒤에는 **새 세션(새 창)** 을 여세요 — 열려 있던 세션은 옛 버전으로 계속 동작합니다.
 
 ### 🤖 Codex 앱 — 똑같이 됩니다 ✅ *(검증 완료)*
 
-Codex에서도 **같은 저장소를 그대로** 씁니다. 마켓플레이스로 추가해 설치하면 `aioffice-hwp:hwp` 스킬이 자동으로 로드되고, **미리보기 뷰어도 Codex 인앱 브라우저에서 옆에 떠요** (Claude Code 앱처럼).
+Codex에서도 **같은 저장소를 그대로** 씁니다. 마켓플레이스로 추가해 설치하면 `aioffice-hwp:aioffice-hwp` 스킬이 자동으로 로드되고, **미리보기 뷰어도 Codex 인앱 브라우저에서 옆에 떠요** (Claude Code 앱처럼).
 
 ```bash
 codex plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
 codex plugin add aioffice-hwp@aioffice-hwp-marketplace
 ```
 
-> Claude는 `claude plugin …`, Codex는 `codex plugin …` — **명령어만 다르고 같은 저장소로 똑같이 설치**됩니다. (검증: 마켓플레이스 추가 → 설치 → `aioffice-hwp:hwp` 로드 → localhost 미리보기까지 정상)
->
-> Codex 네이티브 매니페스트는 `plugins/aioffice-hwp/.codex-plugin/plugin.json`에 동봉돼 있습니다. 클론에서 바로 쓰는 로컬 개발 설치(Windows)는 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-install-local.ps1` — 저장소를 `~/plugins/aioffice-hwp` junction으로 연결하고 `~/.agents/plugins/marketplace.json`에 등록합니다(해제: `codex-uninstall-local.ps1`).
+> Claude는 `claude plugin …`, Codex는 `codex plugin …` — **명령어만 다르고 같은 저장소로 똑같이 설치**됩니다. (검증: 마켓플레이스 추가 → 설치 → `aioffice-hwp:aioffice-hwp` 로드 → localhost 미리보기까지 정상)
 
 ---
 
