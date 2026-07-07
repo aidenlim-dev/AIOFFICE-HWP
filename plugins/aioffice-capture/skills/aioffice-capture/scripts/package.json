@@ -1,0 +1,7 @@
+{
+  "name": "@aioffice-capture/scripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "한컴독스(Hancom Docs) webhwp 자동 업로드 + 페이지 캡처/확대/검색 (Playwright headless)",
+  "dependencies": { "playwright": "^1.40.0" }
+}

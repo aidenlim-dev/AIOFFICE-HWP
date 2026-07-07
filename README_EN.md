@@ -31,7 +31,7 @@ Install `AIOFFICE-HWP` and you can **just tell an AI like Claude or Codex, in pl
 > - "Split the body into two columns."
 > - "Make a table and put a page number in the footer."
 
-That's all it takes. The result file **opens cleanly in Hancom Office and Hancom Docs (the Hangul web app) — nothing breaks.**
+That's all it takes. The result file **opens cleanly in Hancom Office and Hancom Docs (the Hangul web app)** — because edits stay in the original format, tables and formatting are preserved.
 
 Hancom Office · LibreOffice · Windows-only programs — **none required.**
 
@@ -162,24 +162,24 @@ The same info is shaped differently per form. A birthdate as `970605` here, `97.
 
 ## 👀 See the result with your own eyes — Hancom Docs capture *(optional)*
 
-"You say you fixed it — but does it actually look right in Hancom?" There's a separate helper that lets you **verify with a real on-screen image: `hancomdocs-capture`.**
+"You say you fixed it — but does it actually look right in Hancom?" There's a **separate plugin** that lets you **check with a real on-screen image: `aioffice-capture`** (it ships in the same marketplace).
 
 - With your consent, a browser window opens **just once** to log in to Hancom Docs.
-  *(Passwords are not stored. Login stays **on your computer only** — like logging into a browser once and not being asked again. So one setup, and you keep using it without logging in again.)*
+  *(Passwords are not stored. Only the session stays **on your computer** — like logging into a browser once and not being asked again.)*
 - From then on, it automatically uploads the document to Hancom Docs and **takes a photo of how it actually looks.**
-- That photo is **seen by both you and Claude** — so instead of "it works, trust me," you get **results verified with your own eyes.** Quality goes up sharply.
+- That photo is **seen by both you and Claude** — so instead of "it works, trust me," you get a result **confirmed with your own eyes.**
 
 | Pick the area you want | Zoom in |
 |:---:|:---:|
 | <img src="assets/capture_select.png" width="380"/> | <img src="assets/capture_zoom.png" width="380"/> |
 
-> Everything works without it — this is an optional helper that adds "see it with your eyes." Install instructions are just below.
+> This is **optional** — reading/creating/editing all work without it. It needs browser automation (Playwright) and a Hancom Docs login, so it's a **separate plugin** from the core. See "Add Hancom Docs capture too" under [Install](#-install).
 
 ---
 
 ## 📥 Install
 
-> **Works on both Claude and Codex** (install + operation verified on both). Same GitHub repo, only the commands differ. Find the method that matches your setup.
+> **Works on both Claude and Codex.** Same GitHub repo, only the commands differ. Find the method that matches your setup.
 
 ### Regular users — Claude desktop app (Mac · Windows)
 
@@ -196,10 +196,6 @@ The same info is shaped differently per form. A birthdate as `970605` here, `97.
 > 💡 **Try saying:** `Show me report.hwp` · `Open this Hangul file` · `Add a line to meeting-notes.hwp`
 > (Mentioning **the file or its name** works better than an abstract "install it / set it up.")
 
-### Add the "see-it-with-your-eyes" helper too *(optional)*
-
-The Hancom Docs capture described above is a separate optional add-on. In environments where that add-on is published, install it separately; after one Hancom Docs login, it can keep using the local browser session.
-
 ### Developers — Claude Code (CLI)
 
 ```bash
@@ -215,9 +211,9 @@ claude plugin install aioffice-hwp@aioffice-hwp-marketplace
 >
 > Requirements: [Node.js](https://nodejs.org/) 18+ (Windows · macOS · Linux all supported). Some helper features (e.g. seal-image generation) use Python 3.9+ — reading/creating/editing documents works without it.
 
-### Codex app — works exactly the same ✅ *(verified)*
+### Codex app — works the same way
 
-Codex uses **the same repo, as-is.** Add it via marketplace and install; the `aioffice-hwp:aioffice-hwp` skill auto-loads, and **the preview viewer opens in the Codex in-app browser** (just like the Claude Code app).
+Codex uses **the same repo, as-is.** Add it via marketplace and install; the `aioffice-hwp:aioffice-hwp` skill auto-loads.
 
 ```bash
 codex plugin marketplace add https://github.com/aidenlim-dev/AIOFFICE-HWP
@@ -227,6 +223,19 @@ codex plugin add aioffice-hwp@aioffice-hwp-marketplace
 > Claude uses `claude plugin …`, Codex uses `codex plugin …` — **only the command differs; same repo, same install.**
 >
 > A Codex-native manifest ships at `plugins/aioffice-hwp/.codex-plugin/plugin.json`. For local development straight from a clone (Windows), run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-install-local.ps1` — it junctions the repo into `~/plugins/aioffice-hwp` and registers it in `~/.agents/plugins/marketplace.json` (undo: `codex-uninstall-local.ps1`).
+
+### Add Hancom Docs capture too *(optional)*
+
+The `aioffice-capture` plugin from "[See the result with your own eyes](#-see-the-result-with-your-own-eyes--hancom-docs-capture-optional)" ships in the **same marketplace**. Install one more line if you want it:
+
+```bash
+# Claude Code
+claude plugin install aioffice-capture@aioffice-hwp-marketplace
+# Codex
+codex plugin add aioffice-capture@aioffice-hwp-marketplace
+```
+
+> Log in to Hancom Docs once via `node login.js`, then keep using it (the session stays on your computer only). Playwright (browser automation) is installed once on first use — a few hundred MB.
 
 ---
 
@@ -248,7 +257,7 @@ Here, **"preview"** means **drawing your edited/created Hangul (`.hwp`) document
 | **Claude Cowork** | (remote, can't run localhost) → drag the file onto the github.io viewer |
 
 > 📄 **To just open and view a Hangul file with no install / login** — anyone can drag it onto <https://aidenlim-dev.github.io/AIOFFICE-HWP/> and see it in the browser. (Works even where skills can't be installed, like claude.ai web.)
-> 🔍 **To review/edit exactly 1:1 with Hancom** — open it in the **Hancom Office (Hangul) app or Hancom Docs.** This preview is for "quick checks while working"; Hancom-compatibility **verification** is handled by the [Hancom Docs capture](#-see-the-result-with-your-own-eyes--hancom-docs-capture-optional) above.
+> 🔍 **To see exactly how it renders in Hancom** — open it in the **Hancom Office (Hangul) app or Hancom Docs.** This preview uses its own renderer and is for "quick checks while working"; Hancom-compatibility **verification** is handled by the [Hancom Docs capture](#-see-the-result-with-your-own-eyes--hancom-docs-capture-optional) above.
 
 ---
 

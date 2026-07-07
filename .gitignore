@@ -3,6 +3,13 @@ node_modules/
 .pnp
 .pnp.js
 
+# aioffice-capture — Hancom Docs login session & browser profile.
+# auth.json IS a live login session; pw-profile is a browser data dir.
+# NEVER commit these (per-machine, one-time login). Belt-and-suspenders on
+# top of the plugin's own patterns.
+**/auth.json
+**/pw-profile/
+
 # build
 dist/
 build/
