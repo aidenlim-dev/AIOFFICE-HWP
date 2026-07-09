@@ -1,6 +1,6 @@
 {
   "name": "aioffice-hwp",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Read, create, and edit Korean Hangul Word Processor documents (.hwp / .hwpx) in Codex. Built on the rhwp WebAssembly viewer/editor — no Hancom Office, no LibreOffice, no Windows COM required.",
   "author": {
     "name": "Aiden Lim",
