@@ -25,7 +25,7 @@ This skill helps Claude work with Korean Hangul Word Processor documents — rea
 1. `node scripts/secure-fill.mjs detect` — 환경·영구 프로필 확인.
 2. 영구 프로필 있으면(`local_proven`) 그대로 사용, 재질문 X.
 3. 없으면: 빈 서식 분석 → **`.txt`**(JSON 금지) 빈 양식을 **바탕화면**에 `secure-fill template`. 사용자가 콜론 뒤 값만 적게 안내. (값을 채팅으로 위임하면 그때만 맥락 유입을 **선고지**하고 수용 → 임시폴더 txt → 즉시 `shred`.)
-4. `secure-fill fill --profile <txt> --map <mapping.json> --out <결과.hwp|.hwpx>`. **프로필엔 숫자만**(생년월일 `970605`, 전화 `01012345678`). 서식 칸 모양이 다르면 매핑 필드 `format`에 **그 모양을 그대로** 적어라(자유 패턴, 고정 목록 아님): 날짜는 `mm dd`·`yy.mm.dd`·`yyyy년 m월 d일`(yyyy/yy/mm/dd/m/d 토큰), 숫자칸은 `#`=숫자 한 자리 마스크 `###-####-####`·`######-#######`·`###########`. 특수만 프리셋: `phone:intl-paren`·`phone:intl`·`rrn:masked`. 변환은 도구가 함 — 에이전트는 **모양만**, 값·변환값 모두 컨텍스트 안 거침.
+4. `secure-fill fill --profile <txt> --map <mapping.json> --out <결과.hwp|.hwpx>`. **프로필엔 숫자만**(생년월일 `900101`, 전화 `01012345678`). 서식 칸 모양이 다르면 매핑 필드 `format`에 **그 모양을 그대로** 적어라(자유 패턴, 고정 목록 아님): 날짜는 `mm dd`·`yy.mm.dd`·`yyyy년 m월 d일`(yyyy/yy/mm/dd/m/d 토큰), 숫자칸은 `#`=숫자 한 자리 마스크 `###-####-####`·`######-#######`·`###########`. 특수만 프리셋: `phone:intl-paren`·`phone:intl`·`rrn:masked`. 변환은 도구가 함 — 에이전트는 **모양만**, 값·변환값 모두 컨텍스트 안 거침.
 5. **기본 ephemeral**: 끝나면 `secure-fill shred`. 결과 문서는 "개인정보 문서이니 관리" 고지.
 6. 영구 저장은 사용자가 **명시**할 때만 `secure-fill stash`(→ `~/.aioffice-hwp/`, 600, 평문·중고판매 경고). git 커밋/푸시·repo 보관 금지. **`stash`/`shred`로 기존 영구 프로필을 덮어쓰거나 지울 땐 사용자 확인 먼저** — 실제 사용자 데이터일 수 있다.
 
@@ -282,6 +282,7 @@ All five themes use only render-confirmed fonts (see the **`font_family`** note 
 | `insert_table_row` | `section`, `para`, `control`, `row` | `position` | Inserts a blank row relative to `row` (0-based). `position` = `"below"` (default) or `"above"`. Cells below shift down (renumbered); the new row's cells are cloned from an existing empty 1×1 cell in each column (so they inherit that column's width/border). Requires each column to have an empty 1×1 cell to clone. Section 0 only. Hancom-Docs render verified. |
 | `insert_table_col` | `section`, `para`, `control`, `col` | `position` | Inserts a blank column relative to `col` (0-based). `position` = `"right"` (default) or `"left"`. Cells to the right shift over (renumbered), a cell spanning across the new column grows (colSpan), and each remaining row gets a blank cell cloned from an empty 1×1 cell in the reference column (inheriting a sensible width). Requires an empty 1×1 cell to clone. Section 0 only. Hancom-Docs render verified. |
 | `split_cell` | `section`, `para`, `control`, `row`, `col` | `into_rows` | Splits one plain 1×1 cell into `into_rows` (default 2) stacked rows. The cell keeps its content as the top piece; blank cells appear below it in the same column; the other cells in the row grow rowSpan to keep the grid rectangular (= Hancom's 셀 나누기, which splits vertically). Section 0 only. Hancom-Docs render verified. |
+| `unmerge_cells` | `section`, `para`, `control`, `row`, `col` | — | Unmerges a merged cell (target the merge's top-left `(row,col)`): its span drops to 1×1 and a fresh blank cell fills every grid slot the merge used to cover. Row/column counts stay the same (those slots already existed). Inverse of `merge_cells` (= Hancom's 병합 해제 / 셀 나누기 on a merged cell). Fill the freed cells afterward with `set_cell_text` in a separate step. Section 0 only. Hancom-Docs render verified. |
 | `insert_para_line` | — | `anchor` | Inserts a horizontal divider line (문단 띠 / 가로 구분선) as a new paragraph — a thin full-width rule, the width of the text column. With `anchor` (any text in the document, including table-cell text), the line is placed right after the paragraph/table that contains it; without `anchor`, after the last simple body paragraph. Self-contained in Section 0 (no DocInfo change); the line width auto-fits the page's text column. Section 0 only. Hancom-Docs render verified. |
 | `insert_field` | `anchor` | `guide`, `field_name` | Inserts a 누름틀 / form-input field right after `anchor` text — the HWP field mechanism (inline field markers + a field command). `guide` is the placeholder text shown inside the field (default `"입력"`), rendered as Hancom's red-italic guide text. `anchor` must be plain text in a top-level body paragraph (not a table cell). Self-contained in Section 0 (no DocInfo change). Section 0 only. Hancom-Docs render verified. |
 | `insert_hyperlink` | `anchor`, `url` | — | Turns existing `anchor` text into a clickable hyperlink to `url` (the same HWP field mechanism, wrapping the text). `anchor` must be plain text in a top-level body paragraph (not a table cell). The link is functional but **not** auto-recolored blue/underlined — to style it, also run `apply_text_style` (e.g. `color` + `underline`) on the same text. Self-contained in Section 0 (no DocInfo change). Section 0 only. Hancom-Docs render verified. |
@@ -388,12 +389,30 @@ exist yet.
 
 | Input | Use | What's available |
 |-------|-----|------------------|
-| `.hwpx` | **`hwpx-edit.js`** | full in-place op set — text · paragraph · table (`insert_table`, cell content/background/border/diagonal/align/size/margin, row/column, merge, split (셀 나누기), distribute (높이·너비 같게), table size/margin/property/auto-split border) · in-cell objects (image·shape·chart·equation) · objects (image·chart·shape·textbox: insert + property edit (position·size·border·fill·wrap) + delete) · **seal/signature (`place_seal`)** · char & paragraph styling · header/footer · page break · bullet/number lists (korean/decimal, custom glyph) · footnote/endnote · hyperlink · equation (math formula) · columns (다단) · page setup (편집 용지) · page number (쪽 번호) · caption (캡션) · named style (스타일 적용) · paragraph band (문단 띠). Full op list in `references/hwpx-edit-ops.md`. |
+| `.hwpx` | **`hwpx-edit.js`** | full in-place op set — text · paragraph · table (`insert_table`, cell content/background/border/diagonal/align/size/margin, row/column, merge/unmerge (셀 병합·병합해제), split (셀 나누기), distribute (높이·너비 같게), table size/margin/property/auto-split border) · in-cell objects (image·shape·chart·equation) · objects (image·chart·shape·textbox: insert + property edit (position·size·border·fill·wrap) + delete) · **seal/signature (`place_seal`)** · char & paragraph styling · header/footer · page break · bullet/number lists (korean/decimal, custom glyph) · footnote/endnote · hyperlink · equation (math formula) · columns (다단) · page setup (편집 용지) · page number (쪽 번호) · caption (캡션) · named style (스타일 적용) · paragraph band (문단 띠). Full op list in `references/hwpx-edit-ops.md`. |
 | `.hwp` | **`create.js`** (raw-patch via `cell-patch.js`) | full in-place op set — text/cell edits · tables (content·fill·border·diagonal·property, row/col, merge, split, equalize) · styling (char·paragraph·named style·lists) · objects (image·chart·shape·textbox·equation·seal: insert + property edit + delete) · page setup (header/footer·page number·columns·footnote/endnote·divider) · hyperlink·bookmark·field. Full list in the op tables above. |
 
 Detect format by reading the first two bytes — `PK` = HWPX (treat as `.hwpx` regardless of extension).
 
 There is no `.hwp ↔ .hwpx` conversion — it was removed. Editing always stays in the input's original format (`.hwp` → `create.js` in place, `.hwpx` → `hwpx-edit.js` in place).
+
+#### Font check — 기존 문서 첫 편집 전 (`.hwpx`)
+
+Before the FIRST edit of an existing `.hwpx`, run the font inventory once:
+
+```bash
+node scripts/font-inventory.js 문서.hwpx --json
+# → { fonts: [{ name, langs, runs, class }], primaryFont, hasMissing }
+# class: "aset" (한컴독스·어디서나 렌더 OK) / "installed" (이 컴퓨터엔 있음) / "missing"
+```
+
+**Only fonts with `runs > 0` matter** — declared-but-unused faces are noise; ignore them. If every used font is `aset` or `installed`, say nothing and proceed. If a used font is `missing` (weigh by `runs`; `primaryFont` missing = always surface), tell the user **once** which fonts won't render as-designed here, and offer three ways forward:
+
+1. **그대로 진행 (default)** — the file keeps its original font references and new/edited runs inherit the surrounding run's font, so readers who *have* the font (e.g. 한글 사용자의 함초롬바탕) still see the document exactly as designed. Caveat to state: 이 컴퓨터의 미리보기와 한컴독스에서는 대체 글꼴로 보일 수 있음. Pick this silently if the user doesn't care about pixel-exact preview.
+2. **폰트 설치** — if the font is freely distributed (함초롬체 = 한컴 무료 배포, 나눔·Pretendard 등), point to the download or install it with consent; local preview then matches the design.
+3. **A-set 폰트로 교체** — rewrite the document's font to a metric-similar A-set face (명조 계열 → `함초롬바탕`, 고딕 계열 → `맑은 고딕`) via the normal styling ops, when the user needs identical rendering everywhere (받는 쪽도 그 폰트가 없을 때, 한컴독스 공유가 최종 목적일 때).
+
+Remember the choice for the rest of the session — never re-ask per edit. `.hwp` binary is not supported by the inventory (exit 2): skip the check and follow the **`font_family`** A-set guidance above when adding styled text.
 
 #### `.hwpx` editing — `hwpx-edit.js`
 
@@ -404,7 +423,7 @@ echo '{
   "path": "path/to/file.hwpx",
   "output": "out.hwpx",
   "operations": [
-    {"type": "fill_template", "values": {"{{이름}}": "남대현", "{{회사}}": "AIOFFICE"}},
+    {"type": "fill_template", "values": {"{{이름}}": "홍길동", "{{회사}}": "AIOFFICE"}},
     {"type": "set_cell_text", "table": 2, "row": 1, "col": 1, "text": "100만원"},
     {"type": "append_paragraph", "text": "새 문단"}
   ]
@@ -430,7 +449,7 @@ Notes:
 
 #### `.hwp` editing — `create.js` (raw-patch via `cell-patch.js`)
 
-For `.hwp` input, route through `create.js`. When the path already exists and the first op is NOT `setup_document`, `create.js` loads the file and dispatches `RAW_PATCH_OPS` (set_cell_text · set_cell_background · set_cell_border · set_cell_diagonal · set_cell_property · set_table_property · set_object_property · merge_cells · delete_table_row · delete_table_col · insert_table_row · insert_table_col · split_cell · insert_para_line · insert_field · insert_hyperlink · insert_footnote · insert_endnote · insert_page_number · set_columns · apply_style · insert_header_text · insert_footer_text · equalize_table_columns · equalize_table_rows · insert_shape · insert_textbox · insert_bookmark · insert_image · insert_chart · place_seal · delete_object · insert_equation · set_numbered_list · set_bullet_list · replace_text · append_paragraph/heading/table/list/break · setup_document · apply_text_style · apply_paragraph_style) through `cell-patch.js` for **byte-level in-place editing** — the original bytes stay intact, only the modified records are patched, and the output is Hancom-Docs compatible (verified). No `.hwp → .hwpx` conversion involved, so tables are preserved end-to-end.
+For `.hwp` input, route through `create.js`. When the path already exists and the first op is NOT `setup_document`, `create.js` loads the file and dispatches `RAW_PATCH_OPS` (set_cell_text · set_cell_background · set_cell_border · set_cell_diagonal · set_cell_property · set_table_property · set_object_property · merge_cells · delete_table_row · delete_table_col · insert_table_row · insert_table_col · split_cell · unmerge_cells · insert_para_line · insert_field · insert_hyperlink · insert_footnote · insert_endnote · insert_page_number · set_columns · apply_style · insert_header_text · insert_footer_text · equalize_table_columns · equalize_table_rows · insert_shape · insert_textbox · insert_bookmark · insert_image · insert_chart · place_seal · delete_object · insert_equation · set_numbered_list · set_bullet_list · replace_text · append_paragraph/heading/table/list/break · setup_document · apply_text_style · apply_paragraph_style) through `cell-patch.js` for **byte-level in-place editing** — the original bytes stay intact, only the modified records are patched, and the output is Hancom-Docs compatible (verified). No `.hwp → .hwpx` conversion involved, so tables are preserved end-to-end.
 
 1. Write a JSON op script and pipe it into `create.js`. Because the path already exists and the first op is NOT `setup_document`, create.js loads the existing file:
    ```bash
@@ -640,6 +659,7 @@ Otherwise: don't push verification — user can invoke the companion skill thems
 | `scripts/extract_text.js` | Node | Read text, markdown, or metadata from .hwp/.hwpx via rhwp WASM |
 | `scripts/create.js` | Node | Generate a new .hwp / .hwpx from a stdin JSON op script via rhwp |
 | `scripts/hwpx-edit.js` | Node | Edit an existing **.hwpx** via stdin JSON ops (text/table/style/image) — direct OWPML XML, no rhwp. See `references/hwpx-edit-ops.md` |
+| `scripts/font-inventory.js` | Node | List a `.hwpx`'s declared fonts + per-font run usage, classified `aset`/`installed`/`missing` (data: `scripts/aset-fonts.json`). Drives the pre-edit font check |
 | `scripts/unpack.py` | Python | Unzip .hwpx → directory of pretty-printed XML |
 | `scripts/pack.py` | Python | Repack directory → .hwpx with auto-repair |
 | `scripts/validate.py` | Python | HWPX schema and structural validation |
