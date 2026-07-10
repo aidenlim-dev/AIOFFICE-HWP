@@ -395,6 +395,24 @@ Detect format by reading the first two bytes — `PK` = HWPX (treat as `.hwpx` r
 
 There is no `.hwp ↔ .hwpx` conversion — it was removed. Editing always stays in the input's original format (`.hwp` → `create.js` in place, `.hwpx` → `hwpx-edit.js` in place).
 
+#### Font check — 기존 문서 첫 편집 전 (`.hwpx`)
+
+Before the FIRST edit of an existing `.hwpx`, run the font inventory once:
+
+```bash
+node scripts/font-inventory.js 문서.hwpx --json
+# → { fonts: [{ name, langs, runs, class }], primaryFont, hasMissing }
+# class: "aset" (한컴독스·어디서나 렌더 OK) / "installed" (이 컴퓨터엔 있음) / "missing"
+```
+
+**Only fonts with `runs > 0` matter** — declared-but-unused faces are noise; ignore them. If every used font is `aset` or `installed`, say nothing and proceed. If a used font is `missing` (weigh by `runs`; `primaryFont` missing = always surface), tell the user **once** which fonts won't render as-designed here, and offer three ways forward:
+
+1. **그대로 진행 (default)** — the file keeps its original font references and new/edited runs inherit the surrounding run's font, so readers who *have* the font (e.g. 한글 사용자의 함초롬바탕) still see the document exactly as designed. Caveat to state: 이 컴퓨터의 미리보기와 한컴독스에서는 대체 글꼴로 보일 수 있음. Pick this silently if the user doesn't care about pixel-exact preview.
+2. **폰트 설치** — if the font is freely distributed (함초롬체 = 한컴 무료 배포, 나눔·Pretendard 등), point to the download or install it with consent; local preview then matches the design.
+3. **A-set 폰트로 교체** — rewrite the document's font to a metric-similar A-set face (명조 계열 → `함초롬바탕`, 고딕 계열 → `맑은 고딕`) via the normal styling ops, when the user needs identical rendering everywhere (받는 쪽도 그 폰트가 없을 때, 한컴독스 공유가 최종 목적일 때).
+
+Remember the choice for the rest of the session — never re-ask per edit. `.hwp` binary is not supported by the inventory (exit 2): skip the check and follow the **`font_family`** A-set guidance above when adding styled text.
+
 #### `.hwpx` editing — `hwpx-edit.js`
 
 `scripts/hwpx-edit.js` applies deterministic, named operations to a `.hwpx` directly on its OWPML XML — no hand-editing. Pipe a JSON payload to stdin: one ZIP load, N ops applied in order, one save. It mirrors `create.js`'s stdin-JSON shape.
@@ -640,6 +658,7 @@ Otherwise: don't push verification — user can invoke the companion skill thems
 | `scripts/extract_text.js` | Node | Read text, markdown, or metadata from .hwp/.hwpx via rhwp WASM |
 | `scripts/create.js` | Node | Generate a new .hwp / .hwpx from a stdin JSON op script via rhwp |
 | `scripts/hwpx-edit.js` | Node | Edit an existing **.hwpx** via stdin JSON ops (text/table/style/image) — direct OWPML XML, no rhwp. See `references/hwpx-edit-ops.md` |
+| `scripts/font-inventory.js` | Node | List a `.hwpx`'s declared fonts + per-font run usage, classified `aset`/`installed`/`missing` (data: `scripts/aset-fonts.json`). Drives the pre-edit font check |
 | `scripts/unpack.py` | Python | Unzip .hwpx → directory of pretty-printed XML |
 | `scripts/pack.py` | Python | Repack directory → .hwpx with auto-repair |
 | `scripts/validate.py` | Python | HWPX schema and structural validation |
