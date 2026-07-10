@@ -1,7 +1,7 @@
 <h1 align="center">AIOFFICE-HWP</h1>
 
 <p align="center">
-  <sub>Forked from RECON Labs' <a href="https://github.com/DoHyun468/claw-hwp">claw-hwp</a> and maintained as an AIOFFICE distribution. (MIT)</sub>
+  <sub>Forked from DoHyun468's <a href="https://github.com/DoHyun468/claw-hwp">claw-hwp</a> and maintained as an AIOFFICE distribution. (MIT)</sub>
 </p>
 
 <p align="center">
@@ -156,7 +156,7 @@ Sensitive data like national ID or business numbers go into these forms. So it w
 - Even verification is done **with values masked** (••••).
 
 ### 🔁 It adapts to each form's shape
-The same info is shaped differently per form. A birthdate as `970605` here, `97.06.05` there; a phone as `010-1234-5678` · `01012345678` · `82)10-1234-5678` — AIOFFICE-HWP **reshapes it to match that field** automatically. Write it once, and it fits any form.
+The same info is shaped differently per form. A birthdate as `900101` here, `90.01.01` there; a phone as `010-1234-5678` · `01012345678` · `82)10-1234-5678` — AIOFFICE-HWP **reshapes it to match that field** automatically. Write it once, and it fits any form.
 
 ---
 
