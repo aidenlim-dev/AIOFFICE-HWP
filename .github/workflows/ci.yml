@@ -39,6 +39,17 @@ jobs:
           set -euo pipefail
           node -e 'JSON.parse(require("fs").readFileSync(".claude-plugin/marketplace.json", "utf8"))'
           node -e 'JSON.parse(require("fs").readFileSync("plugins/aioffice-hwp/.claude-plugin/plugin.json", "utf8"))'
+          node -e 'JSON.parse(require("fs").readFileSync("plugins/aioffice-hwp/.codex-plugin/plugin.json", "utf8"))'
+
+      - name: ZIP64 security regression
+        run: node --test scripts/test-zip64.mjs
+
+      - name: Verify bundled ZIP dependency
+        if: runner.os == 'Linux'
+        run: |
+          S=plugins/aioffice-hwp/skills/aioffice-hwp/scripts
+          cmp "$S/node_modules/fflate/esm/index.mjs" "$S/vendor/fflate/index.mjs"
+          cmp "$S/node_modules/fflate/LICENSE" "$S/vendor/fflate/LICENSE"
 
       - name: Syntax-check JavaScript
         run: |
