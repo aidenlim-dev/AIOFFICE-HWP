@@ -11,7 +11,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
-import { unzipSync, strFromU8 } from './vendor/fflate/index.mjs';
+import { strFromU8 } from './vendor/fflate/index.mjs';
+import { safeUnzip } from './lib/safe-unzip.js';
 import { dumpTables } from './cell-inspect.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
@@ -116,7 +117,13 @@ if (isHwpxZip) {
   hwpxBytes = await convertHwpToHwpx(inputBytes);
 }
 
-const files = unzipSync(hwpxBytes);
+let files;
+try {
+  files = safeUnzip(hwpxBytes);
+} catch (e) {
+  process.stderr.write(`error: cannot open document: ${e.message}\n`);
+  process.exit(2);
+}
 const sectionXmls = Object.entries(files)
   .filter(([n]) => /^Contents\/section\d+\.xml$/.test(n))
   .sort(([a], [b]) => sectionIndex(a) - sectionIndex(b))
@@ -322,16 +329,17 @@ function collectText(xml) {
   const matches = xml.match(/<hp:t[^>]*>[\s\S]*?<\/hp:t>/g) || [];
   return matches
     .map((s) => s.replace(/^<hp:t[^>]*>|<\/hp:t>$/g, ''))
-    .map((s) => s.replace(/<[^>]+>/g, ''))
+    .map((s) => s.replace(/<hp:tab\b[^>]*>/g, '\t').replace(/<hp:lineBreak\b[^>]*>/g, '\n').replace(/<[^>]+>/g, ''))
     .map(decodeXmlEntities)
     .join('');
 }
 
+// Single pass, so &amp;lt; stays &lt; (no double decode); numeric refs included.
 function decodeXmlEntities(s) {
-  return s
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'");
+  const named = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" }; // local: main runs before module consts init
+  return s.replace(/&(lt|gt|amp|quot|apos|#\d+|#x[0-9a-f]+);/gi, (e, k) => {
+    if (named[k.toLowerCase()]) return named[k.toLowerCase()];
+    const cp = /^#x/i.test(k) ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10);
+    return cp <= 0x10FFFF ? String.fromCodePoint(cp) : e; // out-of-range ref in a malformed file: keep as-is
+  });
 }

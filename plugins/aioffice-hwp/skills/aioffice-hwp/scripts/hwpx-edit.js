@@ -15,8 +15,8 @@
 //   }
 //
 // Supported operation types (all .hwpx):
-//   replace_text          { find, replace }
-//   fill_template         { values: { "{{k}}": "v", ... } }
+//   replace_text          { find, replace, expected_count?, section? }   // count mismatch -> AMBIGUOUS_TARGET / TARGET_NOT_FOUND, nothing saved
+//   fill_template         { values: { "{{k}}": "v", ... }, require_unique? }
 //   set_paragraph_text    { index, text }
 //   append_paragraph      { text }
 //   delete_paragraph      { index }
@@ -72,8 +72,8 @@
 //   insert_chart          { chart_type?, cat?, series? }  // chart: col/bar/line/area/pie (or 0-19); series=[{name,values:[]}], cat=[labels]
 //   insert_shape          { shape, index?, width_mm?, height_mm?, fill_color?, line_color? }  // 도형: rect | ellipse | line
 //   set_column_break      { index, on? }    // 단 나누기 (column break before paragraph index)
-//   insert_table_row      { table, row, where?, cells? }  // 줄 추가 — before/after row index (renumbers rowAddr)
-//   insert_table_column   { table, col, where?, cells? }  // 칸 추가 — before/after col index (renumbers colAddr)
+//   insert_table_row      { table, row, where?, cells? }  // 줄 추가, before/after row; merge-aware (spans grow, addrs shift)
+//   insert_table_column   { table, col, where?, cells? }  // 칸 추가, before/after colAddr; merge-aware
 //   distribute_table      { table, mode? }    // 높이/너비 같게 — mode: width | height | both
 //   insert_textbox        { text, index?, width_mm?, height_mm?, fill_color?, line_color? }  // 글상자 (rect + drawText)
 //   set_page_number       { where?, align? }   // 쪽 번호 — where: footer|header, align: LEFT|CENTER|RIGHT
@@ -88,13 +88,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import { unzipSync, zipSync, strFromU8, strToU8 } from './vendor/fflate/index.mjs';
+import { safeUnzip } from './lib/safe-unzip.js';
+import { buildHyperlinkCommand, replaceCountError, textHits, xmlEscape, xmlText } from './cell-patch.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 // ── small utils ─────────────────────────────────────────────────────────────
 
-function xmlEscape(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// Visible text of every <hp:t> in `xml`, inline controls included: <hp:tab/> and
+// <hp:lineBreak/> read back as \t / \n (inverse of xmlText), other tags dropped.
+function hpText(xml) {
+  return decodeXmlText((xml.match(/<hp:t(?:\s[^>]*[^/>])?>[\s\S]*?<\/hp:t>/g) || [])
+    .map((t) => t.replace(/<hp:tab\b[^>]*>/g, '\t').replace(/<hp:lineBreak\b[^>]*>/g, '\n').replace(/<[^>]+>/g, '')).join(''));
 }
 function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -280,7 +285,7 @@ function spliceTokenList(toks, find, replace) {
       if (te <= s || ts >= e) { out.push(x); continue; } // text token outside the match
       const before = ts < s ? x.raw.slice(0, s - ts) : '';
       const after = te > e ? x.raw.slice(e - ts) : '';
-      const merged = before + (inserted ? '' : xmlEscape(replace)) + after;
+      const merged = before + (inserted ? '' : xmlText(replace)) + after;
       inserted = true;
       if (merged) out.push({ ...x, raw: merged });
     }
@@ -307,7 +312,12 @@ function spliceNodeTokens(content, find, replace) {
 function replaceTextAcrossRuns(xml, find, replace) {
   const RUN = /<hp:run\b[^>]*>(?:(?!<\/?hp:run\b)[\s\S])*?<\/hp:run>/g;
   const OBJ = /<hp:(?:pic|chart|tbl|ellipse|rect|line|arc|polygon|curve|equation|container|ole|video|textart|connectLine|compose|dutmal|drawText)\b/;
-  const isText = (r) => r.includes('<hp:t') && !OBJ.test(r);
+  // Only runs made of nothing but <hp:t> nodes: the rebuild below keeps just the
+  // text, so a run with <hp:ctrl> (hyperlink fieldBegin params), <hp:secPr> etc.
+  // would get its URL rewritten and its controls pushed inside <hp:t>.
+  const isText = (r) => r.includes('<hp:t') && !OBJ.test(r) &&
+    !r.replace(/^<hp:run\b[^>]*>|<\/hp:run>$/g, '')
+      .replace(/<hp:t(?:\s[^>]*)?\/>|<hp:t(?:\s[^>]*)?>[\s\S]*?<\/hp:t>/g, '').trim();
   const runs = []; let m;
   while ((m = RUN.exec(xml))) runs.push({ start: m.index, end: m.index + m[0].length, raw: m[0] });
   if (!runs.length) return { xml, count: 0 };
@@ -340,34 +350,96 @@ function replaceTextAcrossRuns(xml, find, replace) {
   return { xml: out, count };
 }
 
-function opReplaceText(doc, find, replace) {
+// Section names an op works on: all, or just the 0-based `section` index.
+function sectionsFor(doc, section, label) {
+  const names = doc.sectionNames();
+  if (section == null) return names;
+  if (!Number.isInteger(section) || section < 0 || section >= names.length) {
+    throw new Error(`${label}: section ${section} out of range (0..${names.length - 1})`);
+  }
+  return [names[section]];
+}
+
+// Plain text of each top-level <hp:p> (cell text included), as
+// [{section, para, text}] with section-local paragraph indices. Hint source.
+function paraTexts(doc, names) {
+  const all = doc.sectionNames();
+  return names.flatMap((name) => scanTopLevel(doc.read(name), 'hp:p').map((el, para) => ({
+    section: all.indexOf(name), para,
+    text: decodeXmlText((el.inner.match(/<hp:t(?:\s[^>]*[^/>])?>[\s\S]*?<\/hp:t>/g) || [])
+      .map((t) => t.replace(/<[^>]+>/g, '')).join('')),
+  })));
+}
+
+// Stand-in for the replacement while both passes run (a Unicode
+// noncharacter), swapped for the real text at the end. Without it a
+// replacement containing `find` ('A' -> 'AB') was re-matched by the splice
+// loop and again by pass 2, inflating the count into the thousands.
+const REPLACE_STANDIN = '\uFDD0';
+
+// opts: expected_count (exact doc-wide match count, else throw before any
+// write), section (0-based index to scope the op), dry (count only).
+function opReplaceText(doc, find, replace, opts = {}) {
   if (!find) throw new Error('replace_text: "find" is required and non-empty');
+  const { expected_count: expected, section, dry } = opts;
+  if (expected != null && !(Number.isInteger(expected) && expected >= 1)) {
+    throw new Error('replace_text: "expected_count" must be a positive integer');
+  }
+  const names = sectionsFor(doc, section, 'replace_text');
   // Capture the WHOLE <hp:t> body ([\s\S]*?, not [^<]*) so inline controls inside
   // it are visible to the splicer; spliceNodeTokens then matches THROUGH them
   // (<hp:fwSpace/> etc. are zero-width for matching), so a natural `find` like
   // "2017. 3. 28(금)" fills even though it's stored "2017.<hp:fwSpace/> 3. 28(금)".
   const nodeRe = /(<hp:t(?:\s[^>]*)?>)([\s\S]*?)(<\/hp:t>)/g;
   let total = 0;
-  for (const name of doc.sectionNames()) {
+  const pending = [];
+  for (const name of names) {
     let changed = false;
+    const src = doc.read(name);
+    const standIn = !find.includes(REPLACE_STANDIN) && !src.includes(REPLACE_STANDIN);
+    const rep = standIn ? REPLACE_STANDIN : replace;
     // Pass 1 — within a single text node (control-aware).
-    let xml = doc.read(name).replace(nodeRe, (m, open, text, close) => {
-      const r = spliceNodeTokens(text, find, replace);
+    let xml = src.replace(nodeRe, (m, open, text, close) => {
+      const r = spliceNodeTokens(text, find, rep);
       if (!r.count) return m;
       total += r.count;
       changed = true;
       return open + r.content + close;
     });
     // Pass 2 — match across adjacent text-runs (placeholder split by formatting).
-    const cross = replaceTextAcrossRuns(xml, find, replace);
+    const cross = replaceTextAcrossRuns(xml, find, rep);
     if (cross.count) { xml = cross.xml; total += cross.count; changed = true; }
-    if (changed) doc.write(name, dropLinesegs(xml));
+    if (changed) pending.push([name, standIn ? xml.split(REPLACE_STANDIN).join(xmlText(replace)) : xml]);
   }
+  if (expected != null && total !== expected) {
+    throw replaceCountError('replace_text', find, total, paraTexts(doc, names), { expected });
+  }
+  if (!dry) for (const [name, xml] of pending) doc.write(name, dropLinesegs(xml));
   return { replaced: total };
 }
 
 function opFillTemplate(doc, values, requireUnique) {
   if (!values || typeof values !== 'object') throw new Error('fill_template: "values" object required');
+  // Ambiguity guard (opt-in — secure-fill sets it for PII safety). fill_template's replace is
+  // GLOBAL, so a placeholder that matches MORE THAN ONE spot fills several cells with the same
+  // value; in a multi-person / parallel form (참여인력 5명, 비영리·기업 병렬표) that silently
+  // writes one person's data into another's block. Refuse so the caller retargets the exact
+  // cell with {table,row,col}. Counted dry on the untouched doc (same counter as
+  // replace_text expected_count) and thrown before any write. Positions only, no context
+  // text: secure-fill relays this message and earlier values must not leak. (Mirrors the
+  // .hwp track's set_cell_text_by_label require_occurrence guard.)
+  if (requireUnique) {
+    const ambiguous = Object.keys(values)
+      .map((k) => [k, opReplaceText(doc, k, '', { dry: true }).replaced])
+      .filter(([, n]) => n > 1);
+    if (ambiguous.length) {
+      const paras = paraTexts(doc, doc.sectionNames());
+      const where = (k) => textHits(paras, k).map((h) => `section ${h.section} para ${h.para}`).join(', ');
+      const e = new Error(`fill_template: require_unique - ${ambiguous.map(([k, n]) => `"${k}" matched ${n} spots (${where(k)})`).join(', ')}. A repeated placeholder fills multiple cells (multi-person / parallel form), which would cross-contaminate blocks. Target the exact cell with {table,row,col} instead.`);
+      e.code = 'AMBIGUOUS_TARGET';
+      throw e;
+    }
+  }
   const perKey = {};
   let total = 0;
   for (const [k, v] of Object.entries(values)) {
@@ -375,25 +447,12 @@ function opFillTemplate(doc, values, requireUnique) {
     perKey[k] = r.replaced;
     total += r.replaced;
   }
-  // Ambiguity guard (opt-in — secure-fill sets it for PII safety). fill_template's replace is
-  // GLOBAL, so a placeholder that matches MORE THAN ONE spot fills several cells with the same
-  // value; in a multi-person / parallel form (참여인력 5명, 비영리·기업 병렬표) that silently
-  // writes one person's data into another's block. Refuse so the caller retargets the exact
-  // cell with {table,row,col}. Thrown before main()'s save() and the batch is atomic, so the
-  // in-memory edits are discarded and nothing is written. (Mirrors the .hwp track's
-  // set_cell_text_by_label require_occurrence guard.)
-  if (requireUnique) {
-    const ambiguous = Object.entries(perKey).filter(([, n]) => n > 1);
-    if (ambiguous.length) {
-      throw new Error(`fill_template: require_unique — ${ambiguous.map(([k, n]) => `"${k}" matched ${n} spots`).join(', ')}. A repeated placeholder fills multiple cells (multi-person / parallel form), which would cross-contaminate blocks. Target the exact cell with {table,row,col} instead.`);
-    }
-  }
   return { total, perKey };
 }
 
 // Build a minimal run that carries `text` with the given charPrIDRef.
 function runWithText(charPrId, text) {
-  return `<hp:run charPrIDRef="${charPrId}"><hp:t>${xmlEscape(text)}</hp:t></hp:run>`;
+  return `<hp:run charPrIDRef="${charPrId}"><hp:t>${xmlText(text)}</hp:t></hp:run>`;
 }
 
 function opSetParagraphText(doc, index, text) {
@@ -402,7 +461,13 @@ function opSetParagraphText(doc, index, text) {
   const { section, el } = paras[index];
   const open = el.attrs;
   const charPrId = (el.inner.match(/charPrIDRef="(\d+)"/) || [, '0'])[1];
-  const rebuilt = `<hp:p${open}>${runWithText(charPrId, text)}</hp:p>`;
+  // A section's first paragraph carries <hp:secPr> (page size, margins) and
+  // <hp:ctrl> (columns, page numbers). Dropping them collapses the page layout,
+  // so keep them in their own leading run.
+  const secRun = (el.inner.match(/<hp:run\b[^>]*>(?:(?!<\/hp:run>)[\s\S])*?<hp:secPr\b[\s\S]*?<\/hp:run>/) || [''])[0];
+  const keep = (secRun.match(/<hp:secPr\b[\s\S]*?<\/hp:secPr>|<hp:ctrl\b[\s\S]*?<\/hp:ctrl>/g) || []).join('');
+  const keepRun = keep ? `<hp:run charPrIDRef="${charPrId}">${keep}</hp:run>` : '';
+  const rebuilt = `<hp:p${open}>${keepRun}${runWithText(charPrId, text)}</hp:p>`;
   doc.write(section, spliceEl(doc.read(section), el, rebuilt));
   return { index, set: true };
 }
@@ -462,7 +527,7 @@ function dumpCells(doc) {
         const am = tc.inner.match(/<hp:cellAddr [^>]*colAddr="(\d+)"[^>]*rowAddr="(\d+)"|<hp:cellAddr [^>]*rowAddr="(\d+)"[^>]*colAddr="(\d+)"/);
         const col = am ? (am[1] !== undefined ? Number(am[1]) : Number(am[4])) : cells.filter((c) => c.row === ri).length;
         const sm = tc.inner.match(/<hp:cellSpan [^>]*colSpan="(\d+)"[^>]*rowSpan="(\d+)"/);
-        const text = xmlUnescape((tc.inner.match(/<hp:t>([^<]*)<\/hp:t>/g) || []).map((x) => x.replace(/<\/?hp:t>/g, '')).join(''));
+        const text = hpText(tc.inner);
         cells.push({ row: ri, col, colSpan: sm ? Number(sm[1]) : 1, rowSpan: sm ? Number(sm[2]) : 1, text });
       }
     });
@@ -472,9 +537,6 @@ function dumpCells(doc) {
 
 // Set the inner text of one <hp:tc>, collapsing its first paragraph to a single
 // run. Preserves the <hp:subList> wrapper and trailing cell metadata.
-function xmlUnescape(s) {
-  return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-}
 // Length-preserving fill for a positioning-layout cell ("라벨   (마커)" — label +
 // padding spaces + a marker pinned at a fixed column). Whole-cell overwrite would
 // shift the marker / wrap the line if the new string differs in length, so when
@@ -509,7 +571,7 @@ function setCellInner(tcInner, text, fit) {
   if (fit) {
     const hasInline = /<hp:(ctrl|pic|tbl|chart|equation|rect|ellipse|line|arc|polygon|curve|connectLine|drawText)\b/.test(p.inner);
     if (!hasInline) {
-      const orig = xmlUnescape((p.inner.match(/<hp:t>([^<]*)<\/hp:t>/g) || []).map((t) => t.replace(/<\/?hp:t>/g, '')).join(''));
+      const orig = hpText(p.inner);
       text = fitValueIntoLayout(orig, text);
     }
   }
@@ -598,44 +660,151 @@ function opAppendTableRow(doc, tableIndex, cells) {
   return { table: tableIndex, appendedCols: tcs.length };
 }
 
-// Insert a row at a position (줄 추가 — 위/아래). Clones row `row` for shape,
-// fills `cells`, inserts before (default) or after it, then normalizes every
-// cell's rowAddr to its row index so the cellAddr grid stays consistent.
-function opInsertTableRow(doc, tableIndex, row, where, cells) {
+// ── merge-aware row/column insert/delete (shared grid shift) ──────────────
+// A tc's own cellAddr/cellSpan/cellSz sit after its subList; reading only that
+// tail keeps the tags of a table nested inside the cell out of the way.
+function tcSplit(inner) {
+  const subs = scanTopLevel(inner, 'hp:subList');
+  const cut = subs.length ? subs[subs.length - 1].end : 0;
+  return [inner.slice(0, cut), inner.slice(cut)];
+}
+
+// Insert (delta +1) or delete (delta -1) one grid line of table `tableIndex`.
+// axis 'row' | 'col'. Same rules as the .hwp track (cell-patch.js) and
+// daema-docs insert_shift/delete_shift (MIT):
+//   delete line at: cells past it shift back; a merge that crosses it (a < at < a+s)
+//     loses one span and its size is re-summed from the remaining lines; a merge whose origin sits on the
+//     line and spans along the axis is refused (unmerge_cells first).
+//   insert line at: cells at/after it shift; a merge that crosses it grows one span
+//     and is re-summed with the new line; new 1x1 cells (cloned from line `ref`) fill only the
+//     slots no merge covers. `texts[k]` = text for the new cell at index k on the
+//     other axis.
+// Then rowCnt/colCnt, the table hp:sz, cellzones and linesegs are fixed, and the
+// grid must cover every slot exactly once, else throw (the whole batch aborts:
+// Hancom crashes on a span that overruns the table, 0x800706BE).
+function shiftGrid(doc, tableIndex, axis, delta, { line, after, texts, opName }) {
   const { section, el } = getTable(doc, tableIndex);
-  let tbl = el.inner;
-  const rows = scanTopLevel(tbl, 'hp:tr');
-  if (!rows.length) throw new Error('insert_table_row: table has no rows');
-  const refIdx = Math.max(0, Math.min(row != null ? Number(row) : rows.length - 1, rows.length - 1));
-  const ref = rows[refIdx];
-  const tcs = scanTopLevel(ref.inner, 'hp:tc');
-  let acc = '';
-  for (let ci = 0; ci < tcs.length; ci++) {
-    const cellInner = setCellInner(tcs[ci].inner, (cells && cells[ci] != null) ? cells[ci] : '');
-    acc += freshenIds(`<hp:tc${tcs[ci].attrs}>${cellInner}</hp:tc>`);
+  const R = axis === 'row';
+  const [P, S, Z, Q, T] = R ? ['ra', 'rs', 'h', 'ca', 'cs'] : ['ca', 'cs', 'w', 'ra', 'rs'];
+  const trs = scanTopLevel(el.inner, 'hp:tr');
+  if (!trs.length) throw new Error(`${opName}: table has no rows`);
+  const head = el.inner.slice(0, trs[0].start), foot = el.inner.slice(trs[trs.length - 1].end);
+  const trAttrs = trs.map((t) => t.attrs);
+  let cells = [];
+  trs.forEach((tr, ti) => {
+    scanTopLevel(tr.inner, 'hp:tc').forEach((tc, pos) => {
+      const [body, tail] = tcSplit(tc.inner);
+      const g = (tag, n, d) => tcTagAttr(tail, tag, n) ?? d;
+      cells.push({ attrs: tc.attrs, body, tail, ra: g('cellAddr', 'rowAddr', ti), ca: g('cellAddr', 'colAddr', pos),
+        rs: g('cellSpan', 'rowSpan', 1) || 1, cs: g('cellSpan', 'colSpan', 1) || 1, w: g('cellSz', 'width', 0), h: g('cellSz', 'height', 0) });
+    });
+  });
+  const nRows = Number(getAttr(el.attrs, 'rowCnt')) || trs.length;
+  const nCols = Number(getAttr(el.attrs, 'colCnt')) || Math.max(...cells.map((c) => c.ca + c.cs));
+  const n = R ? nRows : nCols, nOther = R ? nCols : nRows;
+  // Size of grid line k on an axis: a single-span cell on it, else a covering merge's share.
+  const lineSize = (p, s, z, k) => {
+    const one = cells.filter((c) => c[p] === k && c[s] === 1).map((c) => c[z]);
+    if (one.length) return Math.max(...one);
+    const cov = cells.find((c) => c[p] <= k && k < c[p] + c[s]);
+    return cov ? Math.round(cov[z] / cov[s]) : 0;
+  };
+  const where = (c) => `(row ${c.ra}, col ${c.ca})`;
+  // A merge's cellSz is not trusted (merge_cells keeps the single-cell size), so a
+  // merge whose span changes gets its size re-summed from these per-line sizes.
+  const sizes = Array.from({ length: n }, (_, k) => lineSize(P, S, Z, k));
+  const resized = [];
+  let at, size, changed = 0;
+  if (delta < 0) {
+    at = line == null ? NaN : Number(line);
+    if (!Number.isInteger(at) || at < 0 || at >= n) throw new Error(`${opName}: ${axis} ${line} out of range (0..${n - 1})`);
+    if (n < 2) throw new Error(`${opName}: cannot delete the only ${axis} (delete the table instead)`);
+    const origin = cells.find((c) => c[P] === at && c[S] > 1);
+    if (origin) throw new Error(`${opName}: cell ${where(origin)} is merged across ${axis} ${at} (${R ? 'rowSpan' : 'colSpan'} ${origin[S]}) - unmerge_cells first`);
+    size = lineSize(P, S, Z, at);
+    const before = cells.length;
+    cells = cells.filter((c) => c[P] !== at);
+    changed = before - cells.length;
+    for (const c of cells) {
+      if (c[P] > at) c[P]--;
+      else if (c[P] + c[S] > at) { c[S]--; resized.push(c); }
+    }
+    sizes.splice(at, 1);
+    if (R) trAttrs.splice(at, 1);
+  } else {
+    if (line != null && !Number.isInteger(Number(line))) throw new Error(`${opName}: ${axis} must be an integer`);
+    const ref = Math.max(0, Math.min(line != null ? Number(line) : n - 1, n - 1));
+    at = after ? ref + 1 : ref;
+    size = lineSize(P, S, Z, ref);
+    // Templates and other-axis sizes come from the grid before any shift.
+    const tmpl = [], otherSize = [];
+    for (let k = 0; k < nOther; k++) {
+      tmpl[k] = cells.find((c) => c[P] <= ref && ref < c[P] + c[S] && c[Q] <= k && k < c[Q] + c[T]);
+      otherSize[k] = lineSize(Q, T, R ? 'w' : 'h', k);
+    }
+    const covered = new Set();
+    for (const c of cells) {
+      if (c[P] < at && at < c[P] + c[S]) {
+        c[S]++; resized.push(c);
+        for (let k = c[Q]; k < c[Q] + c[T]; k++) covered.add(k);
+      } else if (c[P] >= at) c[P]++;
+    }
+    for (let k = 0; k < nOther; k++) {
+      if (covered.has(k)) continue;
+      const t = tmpl[k];
+      if (!t) throw new Error(`${opName}: no cell covers ${axis} ${ref} at ${R ? 'col' : 'row'} ${k} to clone`);
+      const body = freshenIds(setCellInner(t.body, (texts && texts[k] != null) ? String(texts[k]) : ''));
+      cells.push({ attrs: t.attrs, body, tail: t.tail, [P]: at, [Q]: k, rs: 1, cs: 1, [Z]: size, [R ? 'w' : 'h']: otherSize[k] });
+      changed++;
+    }
+    sizes.splice(at, 0, size);
+    if (R) trAttrs.splice(at, 0, trAttrs[ref]);
   }
-  const newRow = `<hp:tr${ref.attrs}>${acc}</hp:tr>`;
-  const refFull = `<hp:tr${ref.attrs}>${ref.inner}</hp:tr>`;
-  tbl = spliceEl(tbl, ref, where === 'after' ? refFull + newRow : newRow + refFull);
-  // Normalize rowAddr = row index (splice high→low so offsets stay valid).
-  const all = scanTopLevel(tbl, 'hp:tr');
-  for (let r = all.length - 1; r >= 0; r--) {
-    const fixed = all[r].inner.replace(/(<hp:cellAddr\b[^>]*\browAddr=")\d+(")/g, (m, a, b) => a + r + b);
-    if (fixed !== all[r].inner) tbl = spliceEl(tbl, all[r], `<hp:tr${all[r].attrs}>${fixed}</hp:tr>`);
+  for (const c of resized) c[Z] = Math.max(1, sizes.slice(c[P], c[P] + c[S]).reduce((a, b) => a + b, 0));
+  const rows1 = R ? nRows + delta : nRows, cols1 = R ? nCols : nCols + delta;
+  // Coverage: every slot of the new grid covered exactly once.
+  const seen = new Uint8Array(rows1 * cols1);
+  for (const c of cells) {
+    for (let r = c.ra; r < c.ra + c.rs; r++) for (let k = c.ca; k < c.ca + c.cs; k++) {
+      if (r >= rows1 || k >= cols1 || seen[r * cols1 + k]++) throw new Error(`${opName}: grid check failed at (row ${r}, col ${k}) from cell ${where(c)} - table left unchanged`);
+    }
   }
-  doc.write(section, spliceEl(doc.read(section), el, `<hp:tbl${bumpRowCnt(el.attrs, +1)}>${tbl}</hp:tbl>`));
-  return { table: tableIndex, insertedAt: where === 'after' ? refIdx + 1 : refIdx, rows: all.length };
+  const hole = seen.indexOf(0);
+  if (hole !== -1) throw new Error(`${opName}: grid check failed, slot (row ${Math.floor(hole / cols1)}, col ${hole % cols1}) uncovered - table left unchanged`);
+  // Serialize rows in rowAddr order, cells in colAddr order.
+  const byRow = Array.from({ length: rows1 }, () => []);
+  for (const c of cells) byRow[c.ra].push(c);
+  const tcXml = (c) => {
+    let tl = setTcTagAttr(setTcTagAttr(c.tail, 'cellAddr', 'colAddr', c.ca), 'cellAddr', 'rowAddr', c.ra);
+    tl = setTcTagAttr(setTcTagAttr(tl, 'cellSpan', 'colSpan', c.cs), 'cellSpan', 'rowSpan', c.rs);
+    tl = setTcTagAttr(setTcTagAttr(tl, 'cellSz', 'width', c.w), 'cellSz', 'height', c.h);
+    return `<hp:tc${c.attrs}>${c.body}${tl}</hp:tc>`;
+  };
+  const body = byRow.map((rc, r) => `<hp:tr${trAttrs[r] ?? ''}>${rc.sort((a, b) => a.ca - b.ca).map(tcXml).join('')}</hp:tr>`).join('');
+  // Table box size and cellzones (both live in the head, before the rows).
+  const zA = R ? 'RowAddr' : 'ColAddr';
+  let newHead = head.replace(/<hp:sz\b[^>]*>/, (tag) => tag.replace(new RegExp(`\\b${R ? 'height' : 'width'}="(\\d+)"`),
+    (m, v) => `${R ? 'height' : 'width'}="${Math.max(0, Number(v) + delta * size)}"`));
+  newHead = newHead.replace(/<hp:cellzone\b[^>]*\/>/g, (tag) => {
+    let s = Number(getAttr(tag, `start${zA}`)), e = Number(getAttr(tag, `end${zA}`));
+    if (delta < 0) { if (s === at && e === at) return ''; if (s > at) s--; if (e >= at) e--; }
+    else { if (s >= at) s++; if (e >= at) e++; }
+    return setTagAttr(setTagAttr(tag, `start${zA}`, s), `end${zA}`, e);
+  }).replace(/<hp:cellzoneList>\s*<\/hp:cellzoneList>/, '');
+  const attrs = R ? bumpRowCnt(el.attrs, delta) : bumpColCnt(el.attrs, delta);
+  doc.write(section, spliceEl(doc.read(section), el, `<hp:tbl${attrs}>${dropLinesegs(newHead + body + foot)}</hp:tbl>`));
+  return { at, rows: rows1, cols: cols1, changed };
+}
+
+// Insert a row (줄 추가) before (default) or after row `row`, merge-aware.
+function opInsertTableRow(doc, tableIndex, row, where, cells) {
+  const r = shiftGrid(doc, tableIndex, 'row', +1, { line: row, after: where === 'after', texts: cells, opName: 'insert_table_row' });
+  return { table: tableIndex, insertedAt: r.at, rows: r.rows, cellsAdded: r.changed };
 }
 
 function opDeleteTableRow(doc, tableIndex, row) {
-  const { section, el } = getTable(doc, tableIndex);
-  const tbl = el.inner;
-  const rows = scanTopLevel(tbl, 'hp:tr');
-  if (row < 0 || row >= rows.length) throw new Error(`delete_table_row: row ${row} out of range (0..${rows.length - 1})`);
-  const newInner = spliceEl(tbl, rows[row], '');
-  const newTbl = `<hp:tbl${bumpRowCnt(el.attrs, -1)}>${newInner}</hp:tbl>`;
-  doc.write(section, spliceEl(doc.read(section), el, newTbl));
-  return { table: tableIndex, row, deleted: true, remaining: rows.length - 1 };
+  const r = shiftGrid(doc, tableIndex, 'row', -1, { line: row, opName: 'delete_table_row' });
+  return { table: tableIndex, row, deleted: true, remaining: r.rows };
 }
 
 function opAppendTableColumn(doc, tableIndex, cells) {
@@ -666,50 +835,24 @@ function opAppendTableColumn(doc, tableIndex, cells) {
   return { table: tableIndex, rows: rows.length };
 }
 
-// Insert a column at a position (칸 추가 — 왼/오른쪽). For each row clones cell
-// `col`, fills `cells[r]`, inserts before/after it, then normalizes colAddr.
+// Insert a column (칸 추가) before (default) or after grid column `col`, merge-aware.
+// `cells[r]` = text for the new cell in grid row r (top to bottom).
 function opInsertTableColumn(doc, tableIndex, col, where, cells) {
+  const r = shiftGrid(doc, tableIndex, 'col', +1, { line: col, after: where === 'after', texts: cells, opName: 'insert_table_column' });
+  // The new column widens the table; if it now runs past the right margin
+  // (verified in Hancom), scale the columns back to the text width.
   const { section, el } = getTable(doc, tableIndex);
-  let tbl = el.inner;
-  const rows = scanTopLevel(tbl, 'hp:tr');
-  for (let r = rows.length - 1; r >= 0; r--) {
-    const rowEl = rows[r];
-    const tcs = scanTopLevel(rowEl.inner, 'hp:tc');
-    if (!tcs.length) continue;
-    const refIdx = Math.max(0, Math.min(col != null ? Number(col) : tcs.length - 1, tcs.length - 1));
-    const ref = tcs[refIdx];
-    const cellInner = setCellInner(ref.inner, (cells && cells[r] != null) ? cells[r] : '');
-    const newTc = freshenIds(`<hp:tc${ref.attrs}>${cellInner}</hp:tc>`);
-    const refFull = `<hp:tc${ref.attrs}>${ref.inner}</hp:tc>`;
-    let rowInner = spliceEl(rowEl.inner, ref, where === 'after' ? refFull + newTc : newTc + refFull);
-    const cells2 = scanTopLevel(rowInner, 'hp:tc');
-    for (let c = cells2.length - 1; c >= 0; c--) {
-      const fixedInner = cells2[c].inner.replace(/(<hp:cellAddr\b[^>]*\bcolAddr=")\d+(")/, (m, a, b) => a + c + b);
-      rowInner = spliceEl(rowInner, cells2[c], `<hp:tc${cells2[c].attrs}>${fixedInner}</hp:tc>`);
-    }
-    tbl = spliceEl(tbl, rowEl, `<hp:tr${rowEl.attrs}>${rowInner}</hp:tr>`);
-  }
-  doc.write(section, spliceEl(doc.read(section), el, `<hp:tbl${bumpColCnt(el.attrs, +1)}>${tbl}</hp:tbl>`));
-  return { table: tableIndex, rows: rows.length };
+  const w = tableGridWidth(el);
+  const maxW = pageTextWidth(doc, section);
+  const fitted = w > maxW;
+  if (fitted) opSetTableSize(doc, tableIndex, maxW / HU_PER_MM, null);
+  return { table: tableIndex, insertedAt: r.at, rows: r.rows, cols: r.cols, cellsAdded: r.changed, ...(fitted && { fittedToPage: true }) };
 }
 
+// Delete grid column `col` (addressed by colAddr, not by position in the row).
 function opDeleteTableColumn(doc, tableIndex, col) {
-  const { section, el } = getTable(doc, tableIndex);
-  let tbl = el.inner;
-  const rows = scanTopLevel(tbl, 'hp:tr');
-  let affected = 0;
-  for (let r = rows.length - 1; r >= 0; r--) {
-    const rowEl = rows[r];
-    const tcs = scanTopLevel(rowEl.inner, 'hp:tc');
-    if (col < 0 || col >= tcs.length) continue;
-    const newRowInner = spliceEl(rowEl.inner, tcs[col], '');
-    const newRow = `<hp:tr${rowEl.attrs}>${newRowInner}</hp:tr>`;
-    tbl = spliceEl(tbl, rowEl, newRow);
-    affected++;
-  }
-  const newTbl = `<hp:tbl${bumpColCnt(el.attrs, -1)}>${tbl}</hp:tbl>`;
-  doc.write(section, spliceEl(doc.read(section), el, newTbl));
-  return { table: tableIndex, col, rowsAffected: affected };
+  const r = shiftGrid(doc, tableIndex, 'col', -1, { line: col, opName: 'delete_table_column' });
+  return { table: tableIndex, col, rowsAffected: r.changed, remaining: r.cols };
 }
 
 function opMergeCells(doc, tableIndex, mode, opts) {
@@ -953,7 +1096,7 @@ function opSetCaption(doc, target, index, text, side, gapMm) {
       const caption =
         `<hp:caption side="${sd}" fullSz="0" width="${capW}" gap="${gap}" lastWidth="0">` +
           `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
-            `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>${xmlEscape(text)}</hp:t></hp:run></hp:p>` +
+            `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>${xmlText(text)}</hp:t></hp:run></hp:p>` +
           `</hp:subList></hp:caption>`;
       let inner = el.inner.replace(/<hp:caption\b[\s\S]*?<\/hp:caption>/, ''); // replace any existing caption
       let newInner;
@@ -2202,13 +2345,21 @@ function opSetTableInnerMargin(doc, tableIndex, opts) {
 // resize, scale every cell's <hp:cellSz> proportionally to hit the target, then
 // update <hp:sz> to match. Rectangular tables resize exactly; merged cells are
 // approximate (same caveat as distribute_table).
+// Real table width = widest row's cellSz sum. Not rows[0] or <hp:sz>: a row
+// under a rowSpan has fewer cells, and merge_cells leaves a colSpan cell at one
+// column's width, so both under-report.
+// ponytail: wrong if every row has a horizontal merge, sum per colAddr if that bites.
+function tableGridWidth(el) {
+  return Math.max(0, ...scanTopLevel(el.inner, 'hp:tr').map((r) => scanTopLevel(r.inner, 'hp:tc')
+    .reduce((a, tc) => a + Number((tc.inner.match(/<hp:cellSz width="(\d+)"/) || [, 0])[1]), 0)));
+}
+
 function opSetTableSize(doc, tableIndex, widthMm, heightMm) {
   if (widthMm == null && heightMm == null) throw new Error('set_table_size: need width_mm and/or height_mm');
   const { section, el } = getTable(doc, tableIndex);
   const rows = scanTopLevel(el.inner, 'hp:tr');
   if (!rows.length) throw new Error('set_table_size: table has no rows');
-  const curW = scanTopLevel(rows[0].inner, 'hp:tc')
-    .reduce((a, tc) => a + Number((tc.inner.match(/<hp:cellSz width="(\d+)"/) || [, 0])[1]), 0);
+  const curW = tableGridWidth(el);
   const curH = rows.reduce((a, r) => {
     const c = scanTopLevel(r.inner, 'hp:tc')[0];
     return a + Number((c && c.inner.match(/<hp:cellSz width="\d+" height="(\d+)"/) || [, 0])[1]);
@@ -2834,8 +2985,7 @@ function opParaLine(doc, index, opts) {
   const paras = doc.paragraphs();
   if (index < 0 || index >= paras.length) throw new Error(`para_line: index ${index} out of range (0..${paras.length - 1})`);
   // 1. Extract the paragraph's visible text (its <hp:t> runs, un-escaped).
-  const text = [...paras[index].el.inner.matchAll(/<hp:t>([\s\S]*?)<\/hp:t>/g)].map((m) => m[1]).join('')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+  const text = hpText(paras[index].el.inner);
   // 2. Remove the original paragraph, then 3. drop a 1×1 table into its slot
   //    (insert_table inserts AFTER its index, so index-1; -1 prepends).
   opDeleteParagraph(doc, index);
@@ -2944,11 +3094,48 @@ function findBinEntry(doc, target) {
   }) || null;
 }
 
+// Manifest item id bound to a BinData entry (= hc:img binaryItemIDRef), or null.
+function binItemId(doc, entry) {
+  const hpf = doc.hpfName();
+  if (!hpf) return null;
+  const im = doc.read(hpf).match(new RegExp(`<opf:item [^>]*id="([^"]+)"[^>]*href="${escapeRegex(entry)}"[^>]*/>|<opf:item [^>]*href="${escapeRegex(entry)}"[^>]*id="([^"]+)"[^>]*/>`));
+  return im ? (im[1] || im[2]) : null;
+}
+
+// Swap the bytes, then re-fit every <hp:pic> showing this binary: natural size
+// from the new bitmap, display width kept, display height from the new aspect.
+// Without this the old imgDim/imgClip crop or stretch the new image in Hancom.
 function opReplaceImage(doc, target, sourcePath) {
   const entry = findBinEntry(doc, target);
   if (!entry) throw new Error(`replace_image: target not found in BinData/: ${target}`);
   doc.files[entry] = new Uint8Array(fs.readFileSync(sourcePath));
-  return { entry, bytes: doc.files[entry].byteLength };
+  const px = imagePixelSize(sourcePath);
+  const itemId = binItemId(doc, entry);
+  let picsResized = 0;
+  if (px && itemId) {
+    const ref = new RegExp(`binaryItemIDRef="${escapeRegex(itemId)}"`);
+    for (const name of doc.sectionNames()) {
+      let xml = doc.read(name);
+      const pics = scanTopLevel(xml, 'hp:pic');
+      let touched = false;
+      for (let i = pics.length - 1; i >= 0; i--) { // from the end: ranges stay valid
+        const pic = xml.slice(pics[i].start, pics[i].end);
+        const cap = scanTopLevel(pic, 'hp:caption')[0];
+        if (!ref.test(cap ? pic.slice(0, cap.start) + pic.slice(cap.end) : pic)) continue;
+        const cur = pic.match(/<hp:curSz\b[^>]*\bwidth="(\d+)"/);
+        const sz = pic.match(/<hp:sz\b[^>]*\bwidth="(\d+)"/);
+        const dw = Number(cur && cur[1] !== '0' ? cur[1] : sz ? sz[1] : 0) || px.w * 75;
+        // Width kept, height by the new aspect, then shrunk to the page body so a
+        // wide-to-tall swap cannot push the picture past the page.
+        const [fw, fh] = fitPageBody(doc, name, dw, Math.round(dw * px.h / px.w));
+        xml = spliceEl(xml, pics[i], setPicGeometry(pic, px, fw, fh));
+        picsResized++;
+        touched = true;
+      }
+      if (touched) doc.write(name, dropLinesegs(xml));
+    }
+  }
+  return { entry, bytes: doc.files[entry].byteLength, itemId, px, picsResized };
 }
 
 function opDeleteImage(doc, target) {
@@ -2957,12 +3144,10 @@ function opDeleteImage(doc, target) {
   // Resolve the manifest item id bound to this entry so we can also remove the
   // inline <hp:pic> that references it — otherwise the doc keeps a dangling
   // image reference (the bug in treesoop's delete: bytes gone, ref left).
-  let itemId = null;
+  const itemId = binItemId(doc, entry);
   const hpf = doc.hpfName();
   if (hpf) {
     let s = doc.read(hpf);
-    const im = s.match(new RegExp(`<opf:item [^>]*id="([^"]+)"[^>]*href="${escapeRegex(entry)}"[^>]*/>|<opf:item [^>]*href="${escapeRegex(entry)}"[^>]*id="([^"]+)"[^>]*/>`));
-    if (im) itemId = im[1] || im[2];
     s = s.replace(new RegExp(`<opf:item [^>]*href="${escapeRegex(entry)}"[^>]*/>`), '');
     doc.write(hpf, s);
   }
@@ -3093,7 +3278,7 @@ function opInsertImage(doc, sourcePath, ext, width, height, index) {
       doc.write(hpf, s);
     }
   }
-  const pic = buildPic(doc, itemId, width, height);
+  const pic = buildPic(doc, itemId, width, height, imagePixelSize(sourcePath));
   const plainAttrs = ` id="${freshId()}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"`;
   // `index` optional: place the image's paragraph AFTER top-level paragraph
   // `index` (so an image lands next to its reference text, like insert_chart)
@@ -3182,32 +3367,67 @@ function charPrFontPt(doc, charPrId) {
   }
   return 10;
 }
-// Natural aspect ratio (width / height) of an image file, so a non-square
-// signature (e.g. a wide handwritten "홍 길 동") keeps its shape instead of
-// being squashed into a square. PNG/JPEG/BMP headers; defaults to 1 (square).
-function imageAspectWH(p) {
+// Natural pixel size {w, h} of an image file (PNG/JPEG/BMP/GIF header), or
+// null when unknown. DPI metadata (PNG pHYs, JPEG JFIF) is ignored on purpose:
+// Hancom's imgDim/imgClip are always px * 75 HWPUNIT (96 DPI).
+function imagePixelSize(p) {
   try {
     const b = fs.readFileSync(p);
+    let w = 0, h = 0;
     if (b.length > 24 && b[0] === 0x89 && b[1] === 0x50) { // PNG: IHDR w@16 h@20
-      const w = b.readUInt32BE(16), h = b.readUInt32BE(20);
-      if (w && h) return w / h;
+      w = b.readUInt32BE(16); h = b.readUInt32BE(20);
     } else if (b[0] === 0xff && b[1] === 0xd8) { // JPEG: scan SOFn markers
       let i = 2;
       while (i + 9 < b.length) {
         if (b[i] !== 0xff) { i++; continue; }
         const m = b[i + 1];
         if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
-          const h = b.readUInt16BE(i + 5), w = b.readUInt16BE(i + 7);
-          if (w && h) return w / h;
+          h = b.readUInt16BE(i + 5); w = b.readUInt16BE(i + 7);
+          break;
         }
         i += 2 + b.readUInt16BE(i + 2);
       }
     } else if (b[0] === 0x42 && b[1] === 0x4d && b.length > 26) { // BMP
-      const w = Math.abs(b.readInt32LE(18)), h = Math.abs(b.readInt32LE(22));
-      if (w && h) return w / h;
+      w = Math.abs(b.readInt32LE(18)); h = Math.abs(b.readInt32LE(22));
+    } else if (b.length > 10 && b.toString('latin1', 0, 4) === 'GIF8') { // GIF: LE w@6 h@8
+      w = b.readUInt16LE(6); h = b.readUInt16LE(8);
     }
+    if (w && h) return { w, h };
   } catch { /* fall through */ }
-  return 1;
+  return null;
+}
+// Natural aspect ratio (width / height), so a non-square signature (e.g. a wide
+// handwritten "홍 길 동") keeps its shape instead of being squashed into a
+// square. Defaults to 1 (square).
+function imageAspectWH(p) {
+  const px = imagePixelSize(p);
+  return px ? px.w / px.h : 1;
+}
+
+// Rewrite every size field of an <hp:pic> string so they agree. Natural size
+// (orgSz, imgDim, imgClip, imgRect) = px * 75; display size (curSz, sz) =
+// dispW x dispH; scaMatrix = display / natural. A stale imgDim makes Hancom crop
+// the new bitmap, which no structure check can see. The caption subtree is
+// masked so its own sz/objects stay untouched. Field set follows the
+// Hancom-verified replace_image of kangdacool/hwpx-editing-skill (MIT).
+function setPicGeometry(pic, px, dispW, dispH) {
+  const ow = Math.round(px.w * 75), oh = Math.round(px.h * 75);
+  const dw = Math.round(dispW), dh = Math.round(dispH);
+  const cap = scanTopLevel(pic, 'hp:caption')[0];
+  const MASK = '\u0000caption\u0000';
+  let s = cap ? pic.slice(0, cap.start) + MASK + pic.slice(cap.end) : pic;
+  // These are all self-closing tags, so setTagAttr does the per-attr rewrite.
+  const attrs = (tag, kv) => Object.entries(kv).reduce((t, [k, v]) => setTagAttr(t, k, v), tag);
+  const r6 = (x) => Number(x.toFixed(6));
+  s = s
+    .replace(/<hp:orgSz\b[^>]*>/, (t) => attrs(t, { width: ow, height: oh }))
+    .replace(/<hp:curSz\b[^>]*>/, (t) => attrs(t, { width: dw, height: dh }))
+    .replace(/<hp:sz\b[^>]*>/, (t) => attrs(t, { width: dw, height: dh }))
+    .replace(/<hp:imgDim\b[^>]*>/, (t) => attrs(t, { dimwidth: ow, dimheight: oh }))
+    .replace(/<hp:imgClip\b[^>]*>/, (t) => attrs(t, { left: 0, right: ow, top: 0, bottom: oh }))
+    .replace(/<hp:imgRect\b[^>]*>[\s\S]*?<\/hp:imgRect>/, `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${ow}" y="0"/><hc:pt2 x="${ow}" y="${oh}"/><hc:pt3 x="0" y="${oh}"/></hp:imgRect>`)
+    .replace(/<hc:scaMatrix\b[^>]*>/, (t) => attrs(t, { e1: r6(dw / ow), e5: r6(dh / oh) }));
+  return cap ? s.replace(MASK, () => pic.slice(cap.start, cap.end)) : s;
 }
 
 // Read a paraPr's line-spacing % and 위/아래 문단여백 (mm) for height estimation.
@@ -3254,7 +3474,7 @@ function sealParaAlign(doc, paraPrId) {
 function sealParaAdvanceMm(doc, pInner, pAttrs, pageTextWmm) {
   const pt = charPrFontPt(doc, (pInner.match(/charPrIDRef="(\d+)"/) || [, null])[1]);
   const m = sealParaPrMetrics(doc, (pAttrs.match(/paraPrIDRef="(\d+)"/) || [, null])[1]);
-  const txt = (pInner.match(/<hp:t>([^<]*)<\/hp:t>/g) || []).map((s) => s.replace(/<\/?hp:t>/g, '')).join('');
+  const txt = hpText(pInner);
   const lines = Math.max(1, Math.ceil(estTextWidthMm(txt, pt) / Math.max(10, pageTextWmm)));
   return m.prevMm + lines * (pt * PT2MM * (m.pct / 100)) + m.nextMm;
 }
@@ -3292,7 +3512,7 @@ function sealTableAdvanceMm(doc, tblInner) {
 // fix the nested-cell-width bug (a signature cell inside a nested table once matched
 // the OUTER cell and stamped the wrong row). `topRC` is internal (null at the top call).
 function sealDescend(doc, tblInner, anchor, accX, accY, H, out, topRC) {
-  const ptxt = (inner) => (inner.match(/<hp:t>([^<]*)<\/hp:t>/g) || []).map((s) => s.replace(/<\/?hp:t>/g, '')).join('');
+  const ptxt = hpText;
   // A cell's OWN cellAddr/cellSpan/cellSz/cellMargin come AFTER its <hp:subList>.
   // If the cell holds a NESTED table, that table's cellAddr/Sz/... sit inside the
   // subList and would be matched first by a plain .match() — reading the inner
@@ -3403,7 +3623,7 @@ function opPlaceSeal(doc, op) {
   // table is tall, no clamp), PAGE for free body text (so it aligns ON the line
   // instead of being clamped low). op.frame overrides.
   const userFrame = op.frame ? String(op.frame).toUpperCase() : null;
-  const paraText = (inner) => (inner.match(/<hp:t>([^<]*)<\/hp:t>/g) || []).map((s) => s.replace(/<\/?hp:t>/g, '')).join('');
+  const paraText = hpText;
   const H = 283.46; // HWPUNIT per mm
   // Sense a sensible seal size from the spot it lands in, unless size_mm is
   // given. A name seal reads well at ~1.8× the anchor text's line height, so a
@@ -3432,7 +3652,7 @@ function opPlaceSeal(doc, op) {
     // cell to contain it — only flowWithText="0" stops that. A seal taller than
     // the line then just peeks out above/below, by design, instead of stretching
     // the cell. allowOverlap lets it sit on top of the text.
-    const pic = buildPic(doc, itemId, wHwp, hHwp)
+    const pic = buildPic(doc, itemId, wHwp, hHwp, imagePixelSize(op.source))
       .replace(/treatAsChar="[^"]*"/, 'treatAsChar="0"')
       .replace(/flowWithText="[^"]*"/, 'flowWithText="0"')
       .replace(/allowOverlap="[^"]*"/, 'allowOverlap="1"')
@@ -3678,7 +3898,7 @@ function opSetCellImage(doc, tableIndex, row, col, sourcePath, ext, width, heigh
   width = width || Math.round(30 * 283.46);
   height = height || Math.round(20 * 283.46);
   [width, height] = fitToCell(doc, tableIndex, row, col, width, height);
-  let pic = buildPic(doc, itemId, width, height).replace(/treatAsChar="[^"]*"/, 'treatAsChar="1"');
+  let pic = buildPic(doc, itemId, width, height, imagePixelSize(sourcePath)).replace(/treatAsChar="[^"]*"/, 'treatAsChar="1"');
   pic = withCellMargin(pic, CELL_OBJ_MARGIN); // 상하 여백
   placeObjectInCell(doc, tableIndex, row, col, pic, 'set_cell_image');
   opSetCellAlign(doc, tableIndex, row, col, 'CENTER', 'CENTER'); // 셀 안에서 가운데
@@ -3718,6 +3938,23 @@ function pageTextWidth(doc, section) {
     const R = Number((mg.match(/\bright="(\d+)"/) || [, 8504])[1]);
     return Math.max(10000, W - L - R);
   } catch { return 48188; }
+}
+
+// Shrink (w, h) to fit the page body (text width x page height minus top/bottom
+// margins and header/footer), keeping aspect. Never enlarges. A4 stub body is
+// 48520 x 65762 HWPUNIT.
+function fitPageBody(doc, section, w, h) {
+  let H = 65762;
+  try {
+    const xml = doc.read(section);
+    const pp = (xml.match(/<hp:pagePr\b[^>]*>/) || [''])[0];
+    const mg = (xml.match(/<hp:margin\b[^>]*\/?>/) || [''])[0];
+    const g = (re, d) => Number((mg.match(re) || [, d])[1]);
+    H = Math.max(10000, Number((pp.match(/\bheight="(\d+)"/) || [, 84186])[1])
+      - g(/\btop="(\d+)"/, 5668) - g(/\bbottom="(\d+)"/, 4252) - g(/\bheader="(\d+)"/, 4252) - g(/\bfooter="(\d+)"/, 4252));
+  } catch { /* keep A4 default */ }
+  const k = Math.min(1, pageTextWidth(doc, section) / w, H / h);
+  return k < 1 ? [Math.round(w * k), Math.round(h * k)] : [w, h];
 }
 
 // For chart/equation cells: these objects are sized by Hancom itself (a chart
@@ -3801,7 +4038,17 @@ function opSetCellEquation(doc, op) {
 // stray hp:caption), so we CLONE an existing pic from the document when one is
 // present — guaranteed-valid structure — and only repoint its binary ref + ids.
 // Falls back to a schema-complete template when the doc has no images yet.
-function buildPic(doc, itemId, width, height) {
+// `px` = the bitmap's pixel size (imagePixelSize). Both paths finish with
+// setPicGeometry, so neither inherits the cloned pic's numbers. A missing
+// display side follows the bitmap's aspect (default width ~100mm), and that
+// derived size is shrunk to the page body so a tall image cannot overflow it.
+function buildPic(doc, itemId, width, height, px) {
+  const ar = px ? px.h / px.w : 1;
+  let dw = width || (height ? Math.round(height / ar) : 28350);
+  let dh = height || Math.round(dw * ar);
+  // ponytail: last section's page (where append lands); pass the target section if sections differ.
+  if (!(width && height)) [dw, dh] = fitPageBody(doc, doc.sectionNames().slice(-1)[0], dw, dh);
+  px = px || { w: dw / 75, h: dh / 75 }; // unknown format: natural = display
   for (const name of doc.sectionNames()) {
     const pics = scanTopLevel(doc.read(name), 'hp:pic');
     if (pics.length) {
@@ -3814,28 +4061,11 @@ function buildPic(doc, itemId, width, height) {
         // Don't inherit the template pic's caption — a fresh image has none, and
         // Hancom Docs rejects a stray caption cloned onto a new pic.
         .replace(/<hp:caption\b[\s\S]*?<\/hp:caption>/, '');
-      // Heal orgSz/imgDim=0 (rhwp/external pics ship 0 → Hancom renders nothing).
-      // Natural size from the cloned pic's imgClip, else its curSz.
-      const clip = pic.match(/<hp:imgClip\b[^>]*\bright="(\d+)"[^>]*\bbottom="(\d+)"/);
-      const cur = pic.match(/<hp:curSz\b[^>]*\bwidth="(\d+)"[^>]*\bheight="(\d+)"/);
-      const natW = clip ? clip[1] : (cur && cur[1] !== '0' ? cur[1] : (width || 28350));
-      const natH = clip ? clip[2] : (cur && cur[2] !== '0' ? cur[2] : (height || 28350));
-      pic = pic
-        .replace(/<hp:orgSz\s+width="0"\s+height="0"\s*\/>/, `<hp:orgSz width="${natW}" height="${natH}"/>`)
-        .replace(/<hp:imgDim\s+dimwidth="0"\s+dimheight="0"\s*\/>/, `<hp:imgDim dimwidth="${natW}" dimheight="${natH}"/>`);
-      // Honor the requested display size (the cloned source's curSz/sz would
-      // otherwise win, ignoring the caller's width/height).
-      if (width && height) {
-        pic = pic
-          .replace(/<hp:curSz\b[^>]*\/>/, `<hp:curSz width="${width}" height="${height}"/>`)
-          .replace(/<hp:imgRect>[\s\S]*?<\/hp:imgRect>/, `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${width}" y="0"/><hc:pt2 x="${width}" y="${height}"/><hc:pt3 x="0" y="${height}"/></hp:imgRect>`)
-          .replace(/(<hp:sz\b[^>]*\bwidth=")\d+("[^>]*\bheight=")\d+/, `$1${width}$2${height}`);
-      }
-      return pic;
+      return setPicGeometry(pic, px, dw, dh);
     }
   }
-  const w = width || 28350, h = height || 28350; // ~100mm fallback
-  return `<hp:pic id="${freshId()}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${freshId()}" reverse="0">`
+  const w = dw, h = dh;
+  return setPicGeometry(`<hp:pic id="${freshId()}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${freshId()}" reverse="0">`
     + `<hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/>`
     + `<hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="0" centerY="0" rotateimage="1"/>`
     + `<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo>`
@@ -3846,7 +4076,7 @@ function buildPic(doc, itemId, width, height) {
     + `<hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/>`
     + `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>`
     + `<hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:shapeComment>inserted image</hp:shapeComment>`
-    + `</hp:pic>`;
+    + `</hp:pic>`, px, dw, dh);
 }
 
 // ── header / footer operations ───────────────────────────────────────────────
@@ -3917,7 +4147,7 @@ function opSetHeaderFooter(doc, kind, text, applyPageType, align) {
           `<${tag} id="0" applyPageType="${apply}">` +
             `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
               `<hp:p id="0" paraPrIDRef="${innerRef}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
-                `<hp:run charPrIDRef="0"><hp:t>${xmlEscape(text)}</hp:t></hp:run>` +
+                `<hp:run charPrIDRef="0"><hp:t>${xmlText(text)}</hp:t></hp:run>` +
               `</hp:p>` +
             `</hp:subList>` +
           `</${tag}>` +
@@ -4008,7 +4238,7 @@ function opInsertNote(doc, kind, paragraphIndex, text) {
         `<${tag} id="0">` +
           `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
             `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
-              `<hp:run charPrIDRef="0"><hp:t>${xmlEscape(text)}</hp:t></hp:run>` +
+              `<hp:run charPrIDRef="0"><hp:t>${xmlText(text)}</hp:t></hp:run>` +
             `</hp:p>` +
           `</hp:subList>` +
         `</${tag}>` +
@@ -4118,7 +4348,7 @@ function opInsertHyperlink(doc, paragraphIndex, url, text) {
         `<hp:fieldBegin id="${beginId}" type="HYPERLINK" name="" editable="0" dirty="1" zorder="-1" fieldid="${fieldid}">` +
           `<hp:parameters cnt="6" name="">` +
             `<hp:integerParam name="Prop">0</hp:integerParam>` +
-            `<hp:stringParam name="Command">${u};1;0;0;</hp:stringParam>` +
+            `<hp:stringParam name="Command">${xmlEscape(buildHyperlinkCommand(url))}</hp:stringParam>` +
             `<hp:stringParam name="Path">${u}</hp:stringParam>` +
             `<hp:stringParam name="Category">HWPHYPERLINK_TYPE_URL</hp:stringParam>` +
             `<hp:stringParam name="TargetType">HWPHYPERLINK_TARGET_BOOKMARK</hp:stringParam>` +
@@ -4126,7 +4356,7 @@ function opInsertHyperlink(doc, paragraphIndex, url, text) {
           `</hp:parameters>` +
         `</hp:fieldBegin>` +
       `</hp:ctrl>` +
-      `<hp:t>${xmlEscape(text)}</hp:t>` +
+      `<hp:t>${xmlText(text)}</hp:t>` +
       `<hp:ctrl><hp:fieldEnd beginIDRef="${beginId}" fieldid="${fieldid}"/></hp:ctrl>` +
     `</hp:run>`;
   // If the paragraph already has a single plain-text run, replace it — that
@@ -4160,7 +4390,7 @@ function opSetFieldValue(doc, name, value) {
     const endRe = /<hp:fldEnd[^>]*\/?>/g; endRe.lastIndex = after;
     const em = endRe.exec(xml);
     if (!em) continue;
-    const between = xml.slice(after, em.index).replace(/<hp:t>[^<]*<\/hp:t>/, `<hp:t>${xmlEscape(value)}</hp:t>`);
+    const between = xml.slice(after, em.index).replace(/<hp:t>[\s\S]*?<\/hp:t>/, `<hp:t>${xmlText(value)}</hp:t>`);
     doc.write(sec, xml.slice(0, after) + between + xml.slice(em.index));
     done = 1;
   }
@@ -4641,7 +4871,7 @@ function opInsertTextbox(doc, op) {
   const h = op.height_mm != null ? toHu(op.height_mm) : 10000;
   const fill = op.fill_color ? normHex(op.fill_color) : '#FFFFFF';
   const line = op.line_color ? normHex(op.line_color) : '#000000';
-  const drawText = `<hp:drawText lastWidth="4294967295" name="" editable="0"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0"><hp:p id="${freshId()}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>${xmlEscape(text)}</hp:t></hp:run></hp:p></hp:subList></hp:drawText>`;
+  const drawText = `<hp:drawText lastWidth="4294967295" name="" editable="0"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0"><hp:p id="${freshId()}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>${xmlText(text)}</hp:t></hp:run></hp:p></hp:subList></hp:drawText>`;
   const lw = op.line_width_mm != null ? Math.round(Number(op.line_width_mm) * 283.46) : undefined;
   const mm = (v) => Number(v) * 283.46;
   const el = buildShape('rect', w, h, fill, line, lw, wrapVal(op.wrap, 'SQUARE'),
@@ -4669,7 +4899,9 @@ function opInsertTextbox(doc, op) {
 
 function applyOp(doc, op) {
   switch (op.type) {
-    case 'replace_text': return opReplaceText(doc, op.find, op.replace);
+    case 'replace_text':
+      if (op.occurrence != null) throw new Error('replace_text: "occurrence" is .hwp only; on .hwpx scope with "section" plus "expected_count": 1');
+      return opReplaceText(doc, op.find, op.replace, { expected_count: op.expected_count, section: op.section });
     case 'fill_template': return opFillTemplate(doc, op.values, op.require_unique);
     case 'set_paragraph_text': return opSetParagraphText(doc, op.index, op.text);
     case 'append_paragraph': return opAppendParagraph(doc, op.text);
@@ -4747,7 +4979,65 @@ function applyOp(doc, op) {
   }
 }
 
+// Preview/PrvText.txt is the plain-text preview shown by Explorer, Finder and
+// search indexers. Left stale after an edit it leaks text the user deleted, so
+// rebuild it from the sections: one line per paragraph ending in \r\n, hp:tab
+// as a space, cut at 1022 chars (Hancom measured cap). Idea from
+// jun-Bridge/hwpx-mcp packaging._preview (MIT).
+// ponytail: table cells are emitted as plain lines after the host paragraph,
+// not Hancom's <cell> form; add the <..> wrapping if a consumer needs it.
+const PRVTEXT_LIMIT = 1022;
+const XML_NAMED = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
+function decodeXmlText(s) {
+  return s.replace(/&(lt|gt|amp|quot|apos|#\d+|#x[0-9a-f]+);/gi, (e, k) => XML_NAMED[k.toLowerCase()]
+    || String.fromCodePoint(/^#x/i.test(k) ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10)));
+}
+// Text the reader never sees in the body: hidden comments (숨은 설명) and the
+// memo body a MEMO field keeps inside <hp:fieldBegin>. The field's visible
+// text sits after fieldBegin, so dropping the element itself is safe.
+const PRV_HIDDEN = /<hp:(hiddenComment|fieldBegin)\b[^>]*?(?:\/>|>[\s\S]*?<\/hp:\1>)/g;
+function buildPrvText(doc) {
+  let out = '';
+  const stack = [];
+  const tok = /<hp:p(?=[\s>/])[^>]*?(\/?)>|<\/hp:p>|<hp:t(?:\s[^>]*[^/>])?>([\s\S]*?)<\/hp:t>/g;
+  for (const name of doc.sectionNames()) {
+    const xml = doc.read(name).replace(PRV_HIDDEN, '');
+    let m;
+    tok.lastIndex = 0;
+    while ((m = tok.exec(xml)) && out.length < PRVTEXT_LIMIT) {
+      if (m[0] === '</hp:p>') {
+        // Nested paragraphs (cells, footnotes) follow their host paragraph's line.
+        const p = stack.pop() || { text: '', tail: '' };
+        const line = p.text + '\r\n' + p.tail;
+        if (stack.length) stack[stack.length - 1].tail += line;
+        else out += line;
+      } else if (m[2] !== undefined) {
+        if (stack.length) stack[stack.length - 1].text += decodeXmlText(m[2].replace(/<hp:tab\b[^>]*\/>|<hp:tab\b[^>]*>[\s\S]*?<\/hp:tab>/g, ' ').replace(/<[^>]+>/g, ''));
+      } else if (m[1]) {
+        if (stack.length) stack[stack.length - 1].tail += '\r\n'; // self-closing <hp:p/>
+        else out += '\r\n';
+      } else stack.push({ text: '', tail: '' });
+    }
+  }
+  out = out.slice(0, PRVTEXT_LIMIT);
+  return /[\uD800-\uDBFF]$/.test(out) ? out.slice(0, -1) : out;
+}
+
+// Refresh an existing PrvText only when a section changed. Never creates the
+// entry, keeps a UTF-8 BOM if the original had one, and skips identical bytes.
+// PrvImage is left alone (we cannot render it here).
+function refreshPrvText(doc) {
+  const name = Object.keys(doc.files).find((n) => /^Preview\/PrvText\.txt$/i.test(n));
+  if (!name || ![...doc.dirty].some((n) => /^Contents\/section\d+\.xml$/i.test(n))) return;
+  const old = doc.files[name];
+  const bom = old.length >= 3 && old[0] === 0xef && old[1] === 0xbb && old[2] === 0xbf ? '\uFEFF' : '';
+  const next = strToU8(bom + buildPrvText(doc));
+  if (next.length === old.length && next.every((b, i) => b === old[i])) return;
+  doc.files[name] = next;
+}
+
 function save(doc, outputPath) {
+  refreshPrvText(doc);
   // Write dirty text files back into the byte map, then zip.
   for (const name of doc.dirty) doc.files[name] = strToU8(doc.text[name]);
   // mimetype must be the first entry and STORED (uncompressed) per HWPX spec.
@@ -4776,7 +5066,9 @@ async function main() {
     ? payload.output
     : inputPath.replace(/\.hwpx$/i, '_edited.hwpx');
 
-  const doc = new Hwpx(unzipSync(bytes));
+  let files;
+  try { files = safeUnzip(bytes); } catch (e) { fail(`cannot open .hwpx: ${e.message}`); }
+  const doc = new Hwpx(files);
   // Read-only inspect: dump the cell inventory and exit without touching/saving the file.
   if (payload.inspect === 'cells') {
     process.stdout.write(JSON.stringify({ ok: true, tables: dumpCells(doc) }, null, 2) + '\n');
@@ -4788,7 +5080,8 @@ async function main() {
     try {
       results.push({ type: ops[i].type, ...applyOp(doc, ops[i]) });
     } catch (e) {
-      fail(`operation ${i} (${ops[i] && ops[i].type}) failed: ${e && e.message ? e.message : String(e)}`, { results });
+      fail(`operation ${i} (${ops[i] && ops[i].type}) failed: ${e && e.message ? e.message : String(e)}`,
+        { results, ...(e && e.code ? { code: e.code, candidates: e.candidates, near: e.near } : {}) });
     }
   }
   save(doc, outputPath);

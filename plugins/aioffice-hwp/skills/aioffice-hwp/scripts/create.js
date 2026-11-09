@@ -1653,6 +1653,12 @@ const HANDLERS = {
     if (/[\n\r\u2028\u2029]/.test(replacement)) {
       throw new Error("replace_text: replacement cannot contain paragraph-break characters");
     }
+    // The count guard lives in the raw-patch path only (replaceTextInPlace).
+    // Here replaceOne would silently replace the first match, so refuse.
+    const guard = ['expected_count', 'occurrence', 'all', 'section'].filter((k) => op[k] != null && op[k] !== false);
+    if (guard.length) {
+      throw new Error(`replace_text: ${guard.join(', ')} is only honoured on the .hwp raw-patch path. This batch has an op that path does not cover (or FORCE_RHWP_EMIT=1), so nothing was written. Send replace_text in its own create.js call (.hwp) or use hwpx-edit.js (.hwpx).`);
+    }
     // replaceOne returns {ok, replaced_count}. NOTE: rhwp's searchText (and
     // therefore replaceOne) does NOT walk into table cells — anchor text
     // inside a <hp:tbl> is invisible to this op. Use `set_cell_text` /
@@ -3694,6 +3700,10 @@ async function readStdin() {
   const forceRhwpEmit = process.env.FORCE_RHWP_EMIT === '1';
   const allRawPatch = !forceRhwpEmit && ops.length > 0 && ops.every((o) => RAW_PATCH_OPS.has(o.type));
   if (ext === '.hwp' && fs.existsSync(outPath) && allRawPatch) {
+    // Sub-steps (cells, replace, ...) each write outPath in turn, so a later
+    // step failing (e.g. a replace_text count mismatch) would leave earlier
+    // edits on disk. Keep the original bytes and put them back on error.
+    const rawPatchBackup = fs.readFileSync(outPath);
     try {
       const cellOps = ops.filter((o) => CELL_OPS.has(o.type));
       const replaceOps = ops.filter((o) => REPLACE_TEXT_OPS.has(o.type));
@@ -4201,8 +4211,10 @@ async function readStdin() {
       process.stdout.write(JSON.stringify(response) + "\n");
       return;
     } catch (err) {
+      try { fs.writeFileSync(outPath, rawPatchBackup); } catch {}
       process.stdout.write(JSON.stringify({
         status: 'error', message: `raw-patch failed: ${err.message}`,
+        ...(err.code ? { code: err.code, candidates: err.candidates, near: err.near } : {}),
       }) + "\n");
       process.exit(1);
     }

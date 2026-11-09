@@ -9,15 +9,18 @@ End-to-end create + edit pipeline working, **zero-config** (deps vendored).
 | Script | Status | Notes |
 |--------|--------|-------|
 | `extract_text.js` | ✅ | Default plaintext, `--format markdown` (skips empty layout tables), `--inspect` for JSON metadata. Handles both `.hwp` and `.hwpx` (in-memory rhwp conversion for binary) |
-| `unpack.py` | ✅ | `zipfile` + `xml.dom.minidom` pretty-print. `--no-pretty` flag for raw mode. Zip-Slip guarded |
+| `unpack.py` | ✅ | `zipfile` + `xml.dom.minidom` pretty-print. `--no-pretty` flag for raw mode. Zip-Slip guarded, refuses > 10000 entries or > 256 MiB |
 | `pack.py` | ✅ | mimetype-first uncompressed entry per OPF spec. Sorted file order for reproducibility |
-| `validate.py` | ✅ | Zip integrity + mimetype + required files + XML well-formedness |
+| `validate.py` | ✅ | Zip integrity + mimetype + required files + XML well-formedness. Refuses > 10000 entries or > 256 MiB |
+| `lib/safe-unzip.js` | ✅ | Guarded unzip for user `.hwpx` (used by `hwpx-edit.js`, `extract_text.js`, `font-inventory.js`): entry count, entry/total size, compression ratio, declared vs actual size (deflate stops at the declared size), entries sharing one data blob, and DOCTYPE/ENTITY rejection |
 | `create.js` | ✅ | stdin-JSON op runner for `.hwp` create/edit (raw-patch in place via `cell-patch.js`). Op vocabulary in `SKILL.md` |
 | `hwpx-edit.js` | ✅ | stdin-JSON op runner for `.hwpx` in-place XML editing — the `.hwpx` counterpart of `create.js` |
 | `cell-patch.js` | ✅ | Byte-level `.hwp` record patcher (tables, cells, objects). Library used by `create.js`; not invoked directly |
 | `cell-inspect.js` | ✅ | Per-table cell layout / cell text dump for `.hwp` — used to target cells before `set_cell_text` |
 | `secure-fill.mjs` | ✅ | PII-safe form filling: profile values are read in-process and never printed. Subcommands: detect / keys / template / fill / verify / stash / shred / handoff |
 | `make_seal.py` | ✅ | 4-char square seal (날인) PNG generator, transparent background. Requires Pillow |
+| `render.js` | ✅ | Headless page render for agent self-check: rhwp SVG per page (`pNN.svg`), then PNG via Chrome/Edge/Chromium `--screenshot`, `rsvg-convert`, or `magick` (first that works). `--pages 1,3-5`, `--out dir`, `--scale 2`, `--svg-only`. Prints a JSON manifest |
+| `lib/rhwp-node.js` | ✅ | `loadRhwp()`: loads vendored rhwp WASM in Node with the CJK-aware `measureTextWidth` stub (used by `render.js`) |
 | `preview-server.js` | ✅ | Loopback-only static + `/file` passthrough server backing the preview pane (port 3737). Host-header validated, idle auto-shutdown |
 | `preview-viewer.js` / `preview-viewer.html` | ✅ | Browser viewer (rhwp WASM rendering). Also published to GitHub Pages via `scripts/build-viewer.mjs` at the repo root |
 | `launcher/` | ✅ | Double-clickable preview launchers for macOS / Linux / Windows |

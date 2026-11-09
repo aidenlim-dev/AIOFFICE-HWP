@@ -9,6 +9,7 @@ Checks performed:
 - ``header.xml`` ``secCnt`` matches the number of ``Contents/sectionN.xml``
   files (Hancom Docs trusts secCnt and rejects the file on mismatch)
 - ``content.hpf`` manifest has no ``<opf:item>`` href pointing at a missing file
+- No raw tab inside ``<hp:t>`` (Hancom refuses it; write ``<hp:tab/>``)
 
 Exits 0 if all checks pass, 1 otherwise. Issues are printed to stderr.
 """
@@ -20,6 +21,9 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+
+MAX_ENTRIES = 10000
+MAX_TOTAL_BYTES = 256 * 1024 * 1024
 
 REQUIRED_FILES = [
     "mimetype",
@@ -33,6 +37,7 @@ XML_SUFFIXES = (".xml", ".hpf", ".rdf")
 SECTION_FILE_RE = re.compile(r"Contents/section\d+\.xml")
 SECCNT_RE = re.compile(rb'<(?:\w+:)?head\b[^>]*?secCnt="(\d+)"')
 OPF_HREF_RE = re.compile(rb'<opf:item\b[^>]*?href="([^"]*)"')
+HP_T_RE = re.compile(rb"<hp:t(?:\s[^>]*)?(?<!/)>(.*?)</hp:t>", re.S)
 
 
 def validate(hwpx_path: Path) -> list[str]:
@@ -41,6 +46,11 @@ def validate(hwpx_path: Path) -> list[str]:
 
     issues: list[str] = []
     with zipfile.ZipFile(hwpx_path, "r") as zf:
+        # Zip-bomb guard, same limits as lib/safe-unzip.js.
+        infos = zf.infolist()
+        total = sum(i.file_size for i in infos)
+        if len(infos) > MAX_ENTRIES or total > MAX_TOTAL_BYTES:
+            return [f"zip too large to inspect: {len(infos)} entries, {total} bytes"]
         names = zf.namelist()
         if not names:
             return ["zip is empty"]
@@ -64,6 +74,9 @@ def validate(hwpx_path: Path) -> list[str]:
                 ET.fromstring(zf.read(name))
             except ET.ParseError as e:
                 issues.append(f"malformed XML in {name}: {e}")
+            if SECTION_FILE_RE.fullmatch(name) and any(
+                    b"\t" in t for t in HP_T_RE.findall(zf.read(name))):
+                issues.append(f"raw tab inside <hp:t> in {name} (use <hp:tab/>)")
 
         # secCnt must match the number of body sections — Hancom Docs trusts
         # secCnt over the actual file set and refuses to open on mismatch.
