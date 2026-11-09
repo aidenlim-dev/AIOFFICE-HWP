@@ -461,7 +461,13 @@ function opSetParagraphText(doc, index, text) {
   const { section, el } = paras[index];
   const open = el.attrs;
   const charPrId = (el.inner.match(/charPrIDRef="(\d+)"/) || [, '0'])[1];
-  const rebuilt = `<hp:p${open}>${runWithText(charPrId, text)}</hp:p>`;
+  // A section's first paragraph carries <hp:secPr> (page size, margins) and
+  // <hp:ctrl> (columns, page numbers). Dropping them collapses the page layout,
+  // so keep them in their own leading run.
+  const secRun = (el.inner.match(/<hp:run\b[^>]*>(?:(?!<\/hp:run>)[\s\S])*?<hp:secPr\b[\s\S]*?<\/hp:run>/) || [''])[0];
+  const keep = (secRun.match(/<hp:secPr\b[\s\S]*?<\/hp:secPr>|<hp:ctrl\b[\s\S]*?<\/hp:ctrl>/g) || []).join('');
+  const keepRun = keep ? `<hp:run charPrIDRef="${charPrId}">${keep}</hp:run>` : '';
+  const rebuilt = `<hp:p${open}>${keepRun}${runWithText(charPrId, text)}</hp:p>`;
   doc.write(section, spliceEl(doc.read(section), el, rebuilt));
   return { index, set: true };
 }
