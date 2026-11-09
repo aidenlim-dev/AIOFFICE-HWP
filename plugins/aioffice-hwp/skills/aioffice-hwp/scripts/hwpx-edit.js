@@ -3034,11 +3034,48 @@ function findBinEntry(doc, target) {
   }) || null;
 }
 
+// Manifest item id bound to a BinData entry (= hc:img binaryItemIDRef), or null.
+function binItemId(doc, entry) {
+  const hpf = doc.hpfName();
+  if (!hpf) return null;
+  const im = doc.read(hpf).match(new RegExp(`<opf:item [^>]*id="([^"]+)"[^>]*href="${escapeRegex(entry)}"[^>]*/>|<opf:item [^>]*href="${escapeRegex(entry)}"[^>]*id="([^"]+)"[^>]*/>`));
+  return im ? (im[1] || im[2]) : null;
+}
+
+// Swap the bytes, then re-fit every <hp:pic> showing this binary: natural size
+// from the new bitmap, display width kept, display height from the new aspect.
+// Without this the old imgDim/imgClip crop or stretch the new image in Hancom.
 function opReplaceImage(doc, target, sourcePath) {
   const entry = findBinEntry(doc, target);
   if (!entry) throw new Error(`replace_image: target not found in BinData/: ${target}`);
   doc.files[entry] = new Uint8Array(fs.readFileSync(sourcePath));
-  return { entry, bytes: doc.files[entry].byteLength };
+  const px = imagePixelSize(sourcePath);
+  const itemId = binItemId(doc, entry);
+  let picsResized = 0;
+  if (px && itemId) {
+    const ref = new RegExp(`binaryItemIDRef="${escapeRegex(itemId)}"`);
+    for (const name of doc.sectionNames()) {
+      let xml = doc.read(name);
+      const pics = scanTopLevel(xml, 'hp:pic');
+      let touched = false;
+      for (let i = pics.length - 1; i >= 0; i--) { // from the end: ranges stay valid
+        const pic = xml.slice(pics[i].start, pics[i].end);
+        const cap = scanTopLevel(pic, 'hp:caption')[0];
+        if (!ref.test(cap ? pic.slice(0, cap.start) + pic.slice(cap.end) : pic)) continue;
+        const cur = pic.match(/<hp:curSz\b[^>]*\bwidth="(\d+)"/);
+        const sz = pic.match(/<hp:sz\b[^>]*\bwidth="(\d+)"/);
+        const dw = Number(cur && cur[1] !== '0' ? cur[1] : sz ? sz[1] : 0) || px.w * 75;
+        // Width kept, height by the new aspect, then shrunk to the page body so a
+        // wide-to-tall swap cannot push the picture past the page.
+        const [fw, fh] = fitPageBody(doc, name, dw, Math.round(dw * px.h / px.w));
+        xml = spliceEl(xml, pics[i], setPicGeometry(pic, px, fw, fh));
+        picsResized++;
+        touched = true;
+      }
+      if (touched) doc.write(name, dropLinesegs(xml));
+    }
+  }
+  return { entry, bytes: doc.files[entry].byteLength, itemId, px, picsResized };
 }
 
 function opDeleteImage(doc, target) {
@@ -3047,12 +3084,10 @@ function opDeleteImage(doc, target) {
   // Resolve the manifest item id bound to this entry so we can also remove the
   // inline <hp:pic> that references it — otherwise the doc keeps a dangling
   // image reference (the bug in treesoop's delete: bytes gone, ref left).
-  let itemId = null;
+  const itemId = binItemId(doc, entry);
   const hpf = doc.hpfName();
   if (hpf) {
     let s = doc.read(hpf);
-    const im = s.match(new RegExp(`<opf:item [^>]*id="([^"]+)"[^>]*href="${escapeRegex(entry)}"[^>]*/>|<opf:item [^>]*href="${escapeRegex(entry)}"[^>]*id="([^"]+)"[^>]*/>`));
-    if (im) itemId = im[1] || im[2];
     s = s.replace(new RegExp(`<opf:item [^>]*href="${escapeRegex(entry)}"[^>]*/>`), '');
     doc.write(hpf, s);
   }
@@ -3183,7 +3218,7 @@ function opInsertImage(doc, sourcePath, ext, width, height, index) {
       doc.write(hpf, s);
     }
   }
-  const pic = buildPic(doc, itemId, width, height);
+  const pic = buildPic(doc, itemId, width, height, imagePixelSize(sourcePath));
   const plainAttrs = ` id="${freshId()}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"`;
   // `index` optional: place the image's paragraph AFTER top-level paragraph
   // `index` (so an image lands next to its reference text, like insert_chart)
@@ -3272,32 +3307,67 @@ function charPrFontPt(doc, charPrId) {
   }
   return 10;
 }
-// Natural aspect ratio (width / height) of an image file, so a non-square
-// signature (e.g. a wide handwritten "홍 길 동") keeps its shape instead of
-// being squashed into a square. PNG/JPEG/BMP headers; defaults to 1 (square).
-function imageAspectWH(p) {
+// Natural pixel size {w, h} of an image file (PNG/JPEG/BMP/GIF header), or
+// null when unknown. DPI metadata (PNG pHYs, JPEG JFIF) is ignored on purpose:
+// Hancom's imgDim/imgClip are always px * 75 HWPUNIT (96 DPI).
+function imagePixelSize(p) {
   try {
     const b = fs.readFileSync(p);
+    let w = 0, h = 0;
     if (b.length > 24 && b[0] === 0x89 && b[1] === 0x50) { // PNG: IHDR w@16 h@20
-      const w = b.readUInt32BE(16), h = b.readUInt32BE(20);
-      if (w && h) return w / h;
+      w = b.readUInt32BE(16); h = b.readUInt32BE(20);
     } else if (b[0] === 0xff && b[1] === 0xd8) { // JPEG: scan SOFn markers
       let i = 2;
       while (i + 9 < b.length) {
         if (b[i] !== 0xff) { i++; continue; }
         const m = b[i + 1];
         if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
-          const h = b.readUInt16BE(i + 5), w = b.readUInt16BE(i + 7);
-          if (w && h) return w / h;
+          h = b.readUInt16BE(i + 5); w = b.readUInt16BE(i + 7);
+          break;
         }
         i += 2 + b.readUInt16BE(i + 2);
       }
     } else if (b[0] === 0x42 && b[1] === 0x4d && b.length > 26) { // BMP
-      const w = Math.abs(b.readInt32LE(18)), h = Math.abs(b.readInt32LE(22));
-      if (w && h) return w / h;
+      w = Math.abs(b.readInt32LE(18)); h = Math.abs(b.readInt32LE(22));
+    } else if (b.length > 10 && b.toString('latin1', 0, 4) === 'GIF8') { // GIF: LE w@6 h@8
+      w = b.readUInt16LE(6); h = b.readUInt16LE(8);
     }
+    if (w && h) return { w, h };
   } catch { /* fall through */ }
-  return 1;
+  return null;
+}
+// Natural aspect ratio (width / height), so a non-square signature (e.g. a wide
+// handwritten "홍 길 동") keeps its shape instead of being squashed into a
+// square. Defaults to 1 (square).
+function imageAspectWH(p) {
+  const px = imagePixelSize(p);
+  return px ? px.w / px.h : 1;
+}
+
+// Rewrite every size field of an <hp:pic> string so they agree. Natural size
+// (orgSz, imgDim, imgClip, imgRect) = px * 75; display size (curSz, sz) =
+// dispW x dispH; scaMatrix = display / natural. A stale imgDim makes Hancom crop
+// the new bitmap, which no structure check can see. The caption subtree is
+// masked so its own sz/objects stay untouched. Field set follows the
+// Hancom-verified replace_image of kangdacool/hwpx-editing-skill (MIT).
+function setPicGeometry(pic, px, dispW, dispH) {
+  const ow = Math.round(px.w * 75), oh = Math.round(px.h * 75);
+  const dw = Math.round(dispW), dh = Math.round(dispH);
+  const cap = scanTopLevel(pic, 'hp:caption')[0];
+  const MASK = '\u0000caption\u0000';
+  let s = cap ? pic.slice(0, cap.start) + MASK + pic.slice(cap.end) : pic;
+  // These are all self-closing tags, so setTagAttr does the per-attr rewrite.
+  const attrs = (tag, kv) => Object.entries(kv).reduce((t, [k, v]) => setTagAttr(t, k, v), tag);
+  const r6 = (x) => Number(x.toFixed(6));
+  s = s
+    .replace(/<hp:orgSz\b[^>]*>/, (t) => attrs(t, { width: ow, height: oh }))
+    .replace(/<hp:curSz\b[^>]*>/, (t) => attrs(t, { width: dw, height: dh }))
+    .replace(/<hp:sz\b[^>]*>/, (t) => attrs(t, { width: dw, height: dh }))
+    .replace(/<hp:imgDim\b[^>]*>/, (t) => attrs(t, { dimwidth: ow, dimheight: oh }))
+    .replace(/<hp:imgClip\b[^>]*>/, (t) => attrs(t, { left: 0, right: ow, top: 0, bottom: oh }))
+    .replace(/<hp:imgRect\b[^>]*>[\s\S]*?<\/hp:imgRect>/, `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${ow}" y="0"/><hc:pt2 x="${ow}" y="${oh}"/><hc:pt3 x="0" y="${oh}"/></hp:imgRect>`)
+    .replace(/<hc:scaMatrix\b[^>]*>/, (t) => attrs(t, { e1: r6(dw / ow), e5: r6(dh / oh) }));
+  return cap ? s.replace(MASK, () => pic.slice(cap.start, cap.end)) : s;
 }
 
 // Read a paraPr's line-spacing % and 위/아래 문단여백 (mm) for height estimation.
@@ -3522,7 +3592,7 @@ function opPlaceSeal(doc, op) {
     // cell to contain it — only flowWithText="0" stops that. A seal taller than
     // the line then just peeks out above/below, by design, instead of stretching
     // the cell. allowOverlap lets it sit on top of the text.
-    const pic = buildPic(doc, itemId, wHwp, hHwp)
+    const pic = buildPic(doc, itemId, wHwp, hHwp, imagePixelSize(op.source))
       .replace(/treatAsChar="[^"]*"/, 'treatAsChar="0"')
       .replace(/flowWithText="[^"]*"/, 'flowWithText="0"')
       .replace(/allowOverlap="[^"]*"/, 'allowOverlap="1"')
@@ -3768,7 +3838,7 @@ function opSetCellImage(doc, tableIndex, row, col, sourcePath, ext, width, heigh
   width = width || Math.round(30 * 283.46);
   height = height || Math.round(20 * 283.46);
   [width, height] = fitToCell(doc, tableIndex, row, col, width, height);
-  let pic = buildPic(doc, itemId, width, height).replace(/treatAsChar="[^"]*"/, 'treatAsChar="1"');
+  let pic = buildPic(doc, itemId, width, height, imagePixelSize(sourcePath)).replace(/treatAsChar="[^"]*"/, 'treatAsChar="1"');
   pic = withCellMargin(pic, CELL_OBJ_MARGIN); // 상하 여백
   placeObjectInCell(doc, tableIndex, row, col, pic, 'set_cell_image');
   opSetCellAlign(doc, tableIndex, row, col, 'CENTER', 'CENTER'); // 셀 안에서 가운데
@@ -3808,6 +3878,23 @@ function pageTextWidth(doc, section) {
     const R = Number((mg.match(/\bright="(\d+)"/) || [, 8504])[1]);
     return Math.max(10000, W - L - R);
   } catch { return 48188; }
+}
+
+// Shrink (w, h) to fit the page body (text width x page height minus top/bottom
+// margins and header/footer), keeping aspect. Never enlarges. A4 stub body is
+// 48520 x 65762 HWPUNIT.
+function fitPageBody(doc, section, w, h) {
+  let H = 65762;
+  try {
+    const xml = doc.read(section);
+    const pp = (xml.match(/<hp:pagePr\b[^>]*>/) || [''])[0];
+    const mg = (xml.match(/<hp:margin\b[^>]*\/?>/) || [''])[0];
+    const g = (re, d) => Number((mg.match(re) || [, d])[1]);
+    H = Math.max(10000, Number((pp.match(/\bheight="(\d+)"/) || [, 84186])[1])
+      - g(/\btop="(\d+)"/, 5668) - g(/\bbottom="(\d+)"/, 4252) - g(/\bheader="(\d+)"/, 4252) - g(/\bfooter="(\d+)"/, 4252));
+  } catch { /* keep A4 default */ }
+  const k = Math.min(1, pageTextWidth(doc, section) / w, H / h);
+  return k < 1 ? [Math.round(w * k), Math.round(h * k)] : [w, h];
 }
 
 // For chart/equation cells: these objects are sized by Hancom itself (a chart
@@ -3891,7 +3978,17 @@ function opSetCellEquation(doc, op) {
 // stray hp:caption), so we CLONE an existing pic from the document when one is
 // present — guaranteed-valid structure — and only repoint its binary ref + ids.
 // Falls back to a schema-complete template when the doc has no images yet.
-function buildPic(doc, itemId, width, height) {
+// `px` = the bitmap's pixel size (imagePixelSize). Both paths finish with
+// setPicGeometry, so neither inherits the cloned pic's numbers. A missing
+// display side follows the bitmap's aspect (default width ~100mm), and that
+// derived size is shrunk to the page body so a tall image cannot overflow it.
+function buildPic(doc, itemId, width, height, px) {
+  const ar = px ? px.h / px.w : 1;
+  let dw = width || (height ? Math.round(height / ar) : 28350);
+  let dh = height || Math.round(dw * ar);
+  // ponytail: last section's page (where append lands); pass the target section if sections differ.
+  if (!(width && height)) [dw, dh] = fitPageBody(doc, doc.sectionNames().slice(-1)[0], dw, dh);
+  px = px || { w: dw / 75, h: dh / 75 }; // unknown format: natural = display
   for (const name of doc.sectionNames()) {
     const pics = scanTopLevel(doc.read(name), 'hp:pic');
     if (pics.length) {
@@ -3904,28 +4001,11 @@ function buildPic(doc, itemId, width, height) {
         // Don't inherit the template pic's caption — a fresh image has none, and
         // Hancom Docs rejects a stray caption cloned onto a new pic.
         .replace(/<hp:caption\b[\s\S]*?<\/hp:caption>/, '');
-      // Heal orgSz/imgDim=0 (rhwp/external pics ship 0 → Hancom renders nothing).
-      // Natural size from the cloned pic's imgClip, else its curSz.
-      const clip = pic.match(/<hp:imgClip\b[^>]*\bright="(\d+)"[^>]*\bbottom="(\d+)"/);
-      const cur = pic.match(/<hp:curSz\b[^>]*\bwidth="(\d+)"[^>]*\bheight="(\d+)"/);
-      const natW = clip ? clip[1] : (cur && cur[1] !== '0' ? cur[1] : (width || 28350));
-      const natH = clip ? clip[2] : (cur && cur[2] !== '0' ? cur[2] : (height || 28350));
-      pic = pic
-        .replace(/<hp:orgSz\s+width="0"\s+height="0"\s*\/>/, `<hp:orgSz width="${natW}" height="${natH}"/>`)
-        .replace(/<hp:imgDim\s+dimwidth="0"\s+dimheight="0"\s*\/>/, `<hp:imgDim dimwidth="${natW}" dimheight="${natH}"/>`);
-      // Honor the requested display size (the cloned source's curSz/sz would
-      // otherwise win, ignoring the caller's width/height).
-      if (width && height) {
-        pic = pic
-          .replace(/<hp:curSz\b[^>]*\/>/, `<hp:curSz width="${width}" height="${height}"/>`)
-          .replace(/<hp:imgRect>[\s\S]*?<\/hp:imgRect>/, `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${width}" y="0"/><hc:pt2 x="${width}" y="${height}"/><hc:pt3 x="0" y="${height}"/></hp:imgRect>`)
-          .replace(/(<hp:sz\b[^>]*\bwidth=")\d+("[^>]*\bheight=")\d+/, `$1${width}$2${height}`);
-      }
-      return pic;
+      return setPicGeometry(pic, px, dw, dh);
     }
   }
-  const w = width || 28350, h = height || 28350; // ~100mm fallback
-  return `<hp:pic id="${freshId()}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${freshId()}" reverse="0">`
+  const w = dw, h = dh;
+  return setPicGeometry(`<hp:pic id="${freshId()}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${freshId()}" reverse="0">`
     + `<hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/>`
     + `<hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="0" centerY="0" rotateimage="1"/>`
     + `<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo>`
@@ -3936,7 +4016,7 @@ function buildPic(doc, itemId, width, height) {
     + `<hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/>`
     + `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>`
     + `<hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:shapeComment>inserted image</hp:shapeComment>`
-    + `</hp:pic>`;
+    + `</hp:pic>`, px, dw, dh);
 }
 
 // ── header / footer operations ───────────────────────────────────────────────
