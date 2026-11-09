@@ -88,7 +88,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import { unzipSync, zipSync, strFromU8, strToU8 } from './vendor/fflate/index.mjs';
-import { xmlEscape, xmlText } from './cell-patch.js';
+import { buildHyperlinkCommand, xmlEscape, xmlText } from './cell-patch.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
@@ -4118,7 +4118,7 @@ function opInsertHyperlink(doc, paragraphIndex, url, text) {
         `<hp:fieldBegin id="${beginId}" type="HYPERLINK" name="" editable="0" dirty="1" zorder="-1" fieldid="${fieldid}">` +
           `<hp:parameters cnt="6" name="">` +
             `<hp:integerParam name="Prop">0</hp:integerParam>` +
-            `<hp:stringParam name="Command">${u};1;0;0;</hp:stringParam>` +
+            `<hp:stringParam name="Command">${xmlEscape(buildHyperlinkCommand(url))}</hp:stringParam>` +
             `<hp:stringParam name="Path">${u}</hp:stringParam>` +
             `<hp:stringParam name="Category">HWPHYPERLINK_TYPE_URL</hp:stringParam>` +
             `<hp:stringParam name="TargetType">HWPHYPERLINK_TARGET_BOOKMARK</hp:stringParam>` +

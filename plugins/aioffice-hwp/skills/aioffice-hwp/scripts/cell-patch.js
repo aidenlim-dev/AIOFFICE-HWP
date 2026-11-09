@@ -3356,9 +3356,16 @@ const HLINK_CTRL_ID   = Buffer.from('6b6c6825', 'hex');      // 'klh%' (= '%hlk'
 // 5-byte property prefix between ctrlId and the command length (GT verbatim).
 const HLINK_CTRL_PREFIX = Buffer.from([0x00, 0x28, 0x00, 0x00, 0x00]);
 
-function buildHyperlinkCommand(url) {
-  // Hancom escapes ':' as '\:' in the field command (':' is its separator).
-  return `${String(url).replace(/:/g, '\\:')};1;0;0;`;
+// Hancom backslash-escapes ':', '?', ';' and '#' (its separators) in a
+// hyperlink field command, plus '\' itself so the escape stays reversible.
+// One pass, so nothing is escaped twice. hwpx-edit.js reuses this for the
+// HWPX Command parameter; Path keeps the raw URL.
+export function escapeHyperlinkCommand(url) {
+  return String(url).replace(/[\\:?;#]/g, (c) => '\\' + c);
+}
+
+export function buildHyperlinkCommand(url) {
+  return `${escapeHyperlinkCommand(url)};1;0;0;`;
 }
 
 function buildHyperlinkCtrlRecord(url, instanceId) {
