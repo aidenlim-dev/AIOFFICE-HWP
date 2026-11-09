@@ -88,13 +88,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import { unzipSync, zipSync, strFromU8, strToU8 } from './vendor/fflate/index.mjs';
+import { xmlEscape, xmlText } from './cell-patch.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 // ── small utils ─────────────────────────────────────────────────────────────
 
-function xmlEscape(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// Visible text of every <hp:t> in `xml`, inline controls included: <hp:tab/> and
+// <hp:lineBreak/> read back as \t / \n (inverse of xmlText), other tags dropped.
+function hpText(xml) {
+  return decodeXmlText((xml.match(/<hp:t(?:\s[^>]*[^/>])?>[\s\S]*?<\/hp:t>/g) || [])
+    .map((t) => t.replace(/<hp:tab\b[^>]*>/g, '\t').replace(/<hp:lineBreak\b[^>]*>/g, '\n').replace(/<[^>]+>/g, '')).join(''));
 }
 function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -280,7 +284,7 @@ function spliceTokenList(toks, find, replace) {
       if (te <= s || ts >= e) { out.push(x); continue; } // text token outside the match
       const before = ts < s ? x.raw.slice(0, s - ts) : '';
       const after = te > e ? x.raw.slice(e - ts) : '';
-      const merged = before + (inserted ? '' : xmlEscape(replace)) + after;
+      const merged = before + (inserted ? '' : xmlText(replace)) + after;
       inserted = true;
       if (merged) out.push({ ...x, raw: merged });
     }
@@ -393,7 +397,7 @@ function opFillTemplate(doc, values, requireUnique) {
 
 // Build a minimal run that carries `text` with the given charPrIDRef.
 function runWithText(charPrId, text) {
-  return `<hp:run charPrIDRef="${charPrId}"><hp:t>${xmlEscape(text)}</hp:t></hp:run>`;
+  return `<hp:run charPrIDRef="${charPrId}"><hp:t>${xmlText(text)}</hp:t></hp:run>`;
 }
 
 function opSetParagraphText(doc, index, text) {
@@ -462,7 +466,7 @@ function dumpCells(doc) {
         const am = tc.inner.match(/<hp:cellAddr [^>]*colAddr="(\d+)"[^>]*rowAddr="(\d+)"|<hp:cellAddr [^>]*rowAddr="(\d+)"[^>]*colAddr="(\d+)"/);
         const col = am ? (am[1] !== undefined ? Number(am[1]) : Number(am[4])) : cells.filter((c) => c.row === ri).length;
         const sm = tc.inner.match(/<hp:cellSpan [^>]*colSpan="(\d+)"[^>]*rowSpan="(\d+)"/);
-        const text = xmlUnescape((tc.inner.match(/<hp:t>([^<]*)<\/hp:t>/g) || []).map((x) => x.replace(/<\/?hp:t>/g, '')).join(''));
+        const text = hpText(tc.inner);
         cells.push({ row: ri, col, colSpan: sm ? Number(sm[1]) : 1, rowSpan: sm ? Number(sm[2]) : 1, text });
       }
     });
@@ -472,9 +476,6 @@ function dumpCells(doc) {
 
 // Set the inner text of one <hp:tc>, collapsing its first paragraph to a single
 // run. Preserves the <hp:subList> wrapper and trailing cell metadata.
-function xmlUnescape(s) {
-  return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-}
 // Length-preserving fill for a positioning-layout cell ("라벨   (마커)" — label +
 // padding spaces + a marker pinned at a fixed column). Whole-cell overwrite would
 // shift the marker / wrap the line if the new string differs in length, so when
@@ -509,7 +510,7 @@ function setCellInner(tcInner, text, fit) {
   if (fit) {
     const hasInline = /<hp:(ctrl|pic|tbl|chart|equation|rect|ellipse|line|arc|polygon|curve|connectLine|drawText)\b/.test(p.inner);
     if (!hasInline) {
-      const orig = xmlUnescape((p.inner.match(/<hp:t>([^<]*)<\/hp:t>/g) || []).map((t) => t.replace(/<\/?hp:t>/g, '')).join(''));
+      const orig = hpText(p.inner);
       text = fitValueIntoLayout(orig, text);
     }
   }
@@ -953,7 +954,7 @@ function opSetCaption(doc, target, index, text, side, gapMm) {
       const caption =
         `<hp:caption side="${sd}" fullSz="0" width="${capW}" gap="${gap}" lastWidth="0">` +
           `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
-            `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>${xmlEscape(text)}</hp:t></hp:run></hp:p>` +
+            `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>${xmlText(text)}</hp:t></hp:run></hp:p>` +
           `</hp:subList></hp:caption>`;
       let inner = el.inner.replace(/<hp:caption\b[\s\S]*?<\/hp:caption>/, ''); // replace any existing caption
       let newInner;
@@ -2834,8 +2835,7 @@ function opParaLine(doc, index, opts) {
   const paras = doc.paragraphs();
   if (index < 0 || index >= paras.length) throw new Error(`para_line: index ${index} out of range (0..${paras.length - 1})`);
   // 1. Extract the paragraph's visible text (its <hp:t> runs, un-escaped).
-  const text = [...paras[index].el.inner.matchAll(/<hp:t>([\s\S]*?)<\/hp:t>/g)].map((m) => m[1]).join('')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+  const text = hpText(paras[index].el.inner);
   // 2. Remove the original paragraph, then 3. drop a 1×1 table into its slot
   //    (insert_table inserts AFTER its index, so index-1; -1 prepends).
   opDeleteParagraph(doc, index);
@@ -3254,7 +3254,7 @@ function sealParaAlign(doc, paraPrId) {
 function sealParaAdvanceMm(doc, pInner, pAttrs, pageTextWmm) {
   const pt = charPrFontPt(doc, (pInner.match(/charPrIDRef="(\d+)"/) || [, null])[1]);
   const m = sealParaPrMetrics(doc, (pAttrs.match(/paraPrIDRef="(\d+)"/) || [, null])[1]);
-  const txt = (pInner.match(/<hp:t>([^<]*)<\/hp:t>/g) || []).map((s) => s.replace(/<\/?hp:t>/g, '')).join('');
+  const txt = hpText(pInner);
   const lines = Math.max(1, Math.ceil(estTextWidthMm(txt, pt) / Math.max(10, pageTextWmm)));
   return m.prevMm + lines * (pt * PT2MM * (m.pct / 100)) + m.nextMm;
 }
@@ -3292,7 +3292,7 @@ function sealTableAdvanceMm(doc, tblInner) {
 // fix the nested-cell-width bug (a signature cell inside a nested table once matched
 // the OUTER cell and stamped the wrong row). `topRC` is internal (null at the top call).
 function sealDescend(doc, tblInner, anchor, accX, accY, H, out, topRC) {
-  const ptxt = (inner) => (inner.match(/<hp:t>([^<]*)<\/hp:t>/g) || []).map((s) => s.replace(/<\/?hp:t>/g, '')).join('');
+  const ptxt = hpText;
   // A cell's OWN cellAddr/cellSpan/cellSz/cellMargin come AFTER its <hp:subList>.
   // If the cell holds a NESTED table, that table's cellAddr/Sz/... sit inside the
   // subList and would be matched first by a plain .match() — reading the inner
@@ -3403,7 +3403,7 @@ function opPlaceSeal(doc, op) {
   // table is tall, no clamp), PAGE for free body text (so it aligns ON the line
   // instead of being clamped low). op.frame overrides.
   const userFrame = op.frame ? String(op.frame).toUpperCase() : null;
-  const paraText = (inner) => (inner.match(/<hp:t>([^<]*)<\/hp:t>/g) || []).map((s) => s.replace(/<\/?hp:t>/g, '')).join('');
+  const paraText = hpText;
   const H = 283.46; // HWPUNIT per mm
   // Sense a sensible seal size from the spot it lands in, unless size_mm is
   // given. A name seal reads well at ~1.8× the anchor text's line height, so a
@@ -3917,7 +3917,7 @@ function opSetHeaderFooter(doc, kind, text, applyPageType, align) {
           `<${tag} id="0" applyPageType="${apply}">` +
             `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
               `<hp:p id="0" paraPrIDRef="${innerRef}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
-                `<hp:run charPrIDRef="0"><hp:t>${xmlEscape(text)}</hp:t></hp:run>` +
+                `<hp:run charPrIDRef="0"><hp:t>${xmlText(text)}</hp:t></hp:run>` +
               `</hp:p>` +
             `</hp:subList>` +
           `</${tag}>` +
@@ -4008,7 +4008,7 @@ function opInsertNote(doc, kind, paragraphIndex, text) {
         `<${tag} id="0">` +
           `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
             `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
-              `<hp:run charPrIDRef="0"><hp:t>${xmlEscape(text)}</hp:t></hp:run>` +
+              `<hp:run charPrIDRef="0"><hp:t>${xmlText(text)}</hp:t></hp:run>` +
             `</hp:p>` +
           `</hp:subList>` +
         `</${tag}>` +
@@ -4126,7 +4126,7 @@ function opInsertHyperlink(doc, paragraphIndex, url, text) {
           `</hp:parameters>` +
         `</hp:fieldBegin>` +
       `</hp:ctrl>` +
-      `<hp:t>${xmlEscape(text)}</hp:t>` +
+      `<hp:t>${xmlText(text)}</hp:t>` +
       `<hp:ctrl><hp:fieldEnd beginIDRef="${beginId}" fieldid="${fieldid}"/></hp:ctrl>` +
     `</hp:run>`;
   // If the paragraph already has a single plain-text run, replace it — that
@@ -4160,7 +4160,7 @@ function opSetFieldValue(doc, name, value) {
     const endRe = /<hp:fldEnd[^>]*\/?>/g; endRe.lastIndex = after;
     const em = endRe.exec(xml);
     if (!em) continue;
-    const between = xml.slice(after, em.index).replace(/<hp:t>[^<]*<\/hp:t>/, `<hp:t>${xmlEscape(value)}</hp:t>`);
+    const between = xml.slice(after, em.index).replace(/<hp:t>[\s\S]*?<\/hp:t>/, `<hp:t>${xmlText(value)}</hp:t>`);
     doc.write(sec, xml.slice(0, after) + between + xml.slice(em.index));
     done = 1;
   }
@@ -4641,7 +4641,7 @@ function opInsertTextbox(doc, op) {
   const h = op.height_mm != null ? toHu(op.height_mm) : 10000;
   const fill = op.fill_color ? normHex(op.fill_color) : '#FFFFFF';
   const line = op.line_color ? normHex(op.line_color) : '#000000';
-  const drawText = `<hp:drawText lastWidth="4294967295" name="" editable="0"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0"><hp:p id="${freshId()}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>${xmlEscape(text)}</hp:t></hp:run></hp:p></hp:subList></hp:drawText>`;
+  const drawText = `<hp:drawText lastWidth="4294967295" name="" editable="0"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0"><hp:p id="${freshId()}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>${xmlText(text)}</hp:t></hp:run></hp:p></hp:subList></hp:drawText>`;
   const lw = op.line_width_mm != null ? Math.round(Number(op.line_width_mm) * 283.46) : undefined;
   const mm = (v) => Number(v) * 283.46;
   const el = buildShape('rect', w, h, fill, line, lw, wrapVal(op.wrap, 'SQUARE'),
@@ -4747,6 +4747,11 @@ function applyOp(doc, op) {
   }
 }
 
+const XML_NAMED = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
+function decodeXmlText(s) {
+  return s.replace(/&(lt|gt|amp|quot|apos|#\d+|#x[0-9a-f]+);/gi, (e, k) => XML_NAMED[k.toLowerCase()]
+    || String.fromCodePoint(/^#x/i.test(k) ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10)));
+}
 function save(doc, outputPath) {
   // Write dirty text files back into the byte map, then zip.
   for (const name of doc.dirty) doc.files[name] = strToU8(doc.text[name]);

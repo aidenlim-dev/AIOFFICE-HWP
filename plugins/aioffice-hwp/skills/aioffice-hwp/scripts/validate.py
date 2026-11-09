@@ -9,6 +9,7 @@ Checks performed:
 - ``header.xml`` ``secCnt`` matches the number of ``Contents/sectionN.xml``
   files (Hancom Docs trusts secCnt and rejects the file on mismatch)
 - ``content.hpf`` manifest has no ``<opf:item>`` href pointing at a missing file
+- No raw tab inside ``<hp:t>`` (Hancom refuses it; write ``<hp:tab/>``)
 
 Exits 0 if all checks pass, 1 otherwise. Issues are printed to stderr.
 """
@@ -33,6 +34,7 @@ XML_SUFFIXES = (".xml", ".hpf", ".rdf")
 SECTION_FILE_RE = re.compile(r"Contents/section\d+\.xml")
 SECCNT_RE = re.compile(rb'<(?:\w+:)?head\b[^>]*?secCnt="(\d+)"')
 OPF_HREF_RE = re.compile(rb'<opf:item\b[^>]*?href="([^"]*)"')
+HP_T_RE = re.compile(rb"<hp:t(?:\s[^>]*)?(?<!/)>(.*?)</hp:t>", re.S)
 
 
 def validate(hwpx_path: Path) -> list[str]:
@@ -64,6 +66,9 @@ def validate(hwpx_path: Path) -> list[str]:
                 ET.fromstring(zf.read(name))
             except ET.ParseError as e:
                 issues.append(f"malformed XML in {name}: {e}")
+            if SECTION_FILE_RE.fullmatch(name) and any(
+                    b"\t" in t for t in HP_T_RE.findall(zf.read(name))):
+                issues.append(f"raw tab inside <hp:t> in {name} (use <hp:tab/>)")
 
         # secCnt must match the number of body sections — Hancom Docs trusts
         # secCnt over the actual file set and refuses to open on mismatch.

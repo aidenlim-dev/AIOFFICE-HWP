@@ -60,6 +60,35 @@ const TAG_LIST_HEADER = 0x48;
 
 const PARA_TEXT_EOP = '\r'; // HWP paragraph terminator char (U+000D)
 
+// PARA_TEXT code units below 0x20 are HWP control chars (a stray one desyncs
+// text_count / control parsing and Hancom rejects the file). Keep only \n, which
+// Hancom renders as a forced line break. Run this BEFORE computing text_count.
+// ponytail: tab -> space; a real HWP tab is an 8-unit inline control, write that if tab stops matter.
+export function sanitizeHwpText(s) {
+  return String(s ?? '').replace(/\r\n?/g, '\n').replace(/\t/g, ' ').replace(/[\x00-\x08\x0B-\x1F]/g, '');
+}
+
+// .hwpx writers share these (hwpx-edit.js imports them). XML 1.0 forbids C0
+// controls other than \t \n \r, U+FFFE/FFFF and unpaired surrogates, so they are
+// dropped; xmlEscape also escapes quotes so it is safe inside attributes.
+// Ideas from koorukuroo/hwpx-toolkit core/text.py (MIT) and CoreDotToday/coredotdocs
+// textrules.py (Apache-2.0), reimplemented.
+const XML_BAD = /[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+const xmlEscapeBody = (s) => String(s).replace(/\r\n?/g, '\n').replace(XML_BAD, '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+export function xmlEscape(s) {
+  return xmlEscapeBody(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+// <hp:t> body: quotes stay raw like Hancom writes them, since replace_text matches
+// `find` against the stored text. A raw tab makes Hancom refuse the file, so \t / \n become the inline
+// <hp:tab .../> / <hp:lineBreak/> controls (same paragraph, no split). rhwp draws a
+// bare <hp:tab/> with zero width, so the tab carries Hancom's own attribute set.
+// ponytail: fixed width = the default 4000 HWPUNIT tab stop; Hancom relayouts it on open.
+export const HP_TAB = '<hp:tab width="4000" leader="0" type="1"/>';
+export function xmlText(s) {
+  return xmlEscapeBody(s).replace(/\t/g, HP_TAB).replace(/\n/g, '<hp:lineBreak/>');
+}
+
 // CFB sentinel sector values
 const ENDOFCHAIN = -2;   // 0xFFFFFFFE
 const FREESECT = -1;     // 0xFFFFFFFF
@@ -270,7 +299,7 @@ function applyCellText(raw, records, sectionParaIdx, controlIdx, cellIndex, text
   // paragraph EOP appended by makeParaTextRecord and must never sit inside the value),
   // and strip leading/trailing breaks so a value carrying a stray trailing newline
   // (common when it comes straight from a spreadsheet cell) doesn't leave a blank line.
-  if (text) text = text.replace(/\r\n?/g, '\n').replace(/^\n+|\n+$/g, '');
+  if (text) text = sanitizeHwpText(text).replace(/^\n+|\n+$/g, '');
   const loc = locateCell(records, sectionParaIdx, controlIdx, cellIndex, cellPara, nested);
   // Length-preserving fill: rebuild `text` from the cell's current layout so the row
   // width / trailing marker survive. Only for pure-text paragraphs — if the original
@@ -1612,6 +1641,7 @@ export async function replaceTextInPlace(filePath, ops) {
       throw new Error("replace_text: replacement cannot contain paragraph-break characters");
     }
   }
+  ops = ops.map((op) => ({ ...op, replacement: sanitizeHwpText(op.replacement) }));
 
   // buf/fat/minifat/minifatStart/rootChain are all `let` so Phase 3 /
   // Phase 3b expansion paths can replace them.
@@ -2532,6 +2562,7 @@ export async function appendParagraphInPlace(filePath, ops) {
     if (/[\n\r]/.test(op.text) || op.text.indexOf('\u2028') !== -1 || op.text.indexOf('\u2029') !== -1) {
       throw new Error("append_paragraph: 'text' cannot contain paragraph-break characters (one op = one paragraph; use multiple ops)");
     }
+    op.text = sanitizeHwpText(op.text);
   }
 
   // Load the file and the CFB structures we need.
@@ -3742,7 +3773,7 @@ async function insertNoteInPlace(filePath, ops, kind) {
   const summary = [];
   for (const op of ops) {
     if (!op.anchor || typeof op.anchor !== 'string') throw new Error(`${kind.styleName}: an "anchor" string is required`);
-    const text = (typeof op.text === 'string') ? op.text : '';
+    const text = sanitizeHwpText(typeof op.text === 'string' ? op.text : '');
     const records = parseRecords(raw);
 
     const clusters = findClusterBoundaries(records);
@@ -4235,7 +4266,7 @@ export async function insertHeaderFooterTextInPlace(filePath, ops) {
   for (const op of ops) {
     const where = (op.where === 'header') ? 'header' : 'footer';
     const kind = HF_KINDS[where];
-    const text = (typeof op.text === 'string') ? op.text : '';
+    const text = sanitizeHwpText(typeof op.text === 'string' ? op.text : '');
     if (!text) throw new Error(`${where}_text: a "text" string is required`);
     const records = parseRecords(raw);
     const textWidth = readTextWidthFromPageDef(records, raw);
@@ -6100,7 +6131,7 @@ export async function insertTextboxInPlace(filePath, ops) {
 
   const summary = [];
   for (const op of ops) {
-    const text = (typeof op.text === 'string') ? op.text : '';
+    const text = sanitizeHwpText(typeof op.text === 'string' ? op.text : '');
     const records = parseRecords(raw);
     const clusters = findClusterBoundaries(records);
     let cluster = null, ptRec = null;
