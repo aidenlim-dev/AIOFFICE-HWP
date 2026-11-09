@@ -72,8 +72,8 @@
 //   insert_chart          { chart_type?, cat?, series? }  // chart: col/bar/line/area/pie (or 0-19); series=[{name,values:[]}], cat=[labels]
 //   insert_shape          { shape, index?, width_mm?, height_mm?, fill_color?, line_color? }  // 도형: rect | ellipse | line
 //   set_column_break      { index, on? }    // 단 나누기 (column break before paragraph index)
-//   insert_table_row      { table, row, where?, cells? }  // 줄 추가 — before/after row index (renumbers rowAddr)
-//   insert_table_column   { table, col, where?, cells? }  // 칸 추가 — before/after col index (renumbers colAddr)
+//   insert_table_row      { table, row, where?, cells? }  // 줄 추가, before/after row; merge-aware (spans grow, addrs shift)
+//   insert_table_column   { table, col, where?, cells? }  // 칸 추가, before/after colAddr; merge-aware
 //   distribute_table      { table, mode? }    // 높이/너비 같게 — mode: width | height | both
 //   insert_textbox        { text, index?, width_mm?, height_mm?, fill_color?, line_color? }  // 글상자 (rect + drawText)
 //   set_page_number       { where?, align? }   // 쪽 번호 — where: footer|header, align: LEFT|CENTER|RIGHT
@@ -600,44 +600,151 @@ function opAppendTableRow(doc, tableIndex, cells) {
   return { table: tableIndex, appendedCols: tcs.length };
 }
 
-// Insert a row at a position (줄 추가 — 위/아래). Clones row `row` for shape,
-// fills `cells`, inserts before (default) or after it, then normalizes every
-// cell's rowAddr to its row index so the cellAddr grid stays consistent.
-function opInsertTableRow(doc, tableIndex, row, where, cells) {
+// ── merge-aware row/column insert/delete (shared grid shift) ──────────────
+// A tc's own cellAddr/cellSpan/cellSz sit after its subList; reading only that
+// tail keeps the tags of a table nested inside the cell out of the way.
+function tcSplit(inner) {
+  const subs = scanTopLevel(inner, 'hp:subList');
+  const cut = subs.length ? subs[subs.length - 1].end : 0;
+  return [inner.slice(0, cut), inner.slice(cut)];
+}
+
+// Insert (delta +1) or delete (delta -1) one grid line of table `tableIndex`.
+// axis 'row' | 'col'. Same rules as the .hwp track (cell-patch.js) and
+// daema-docs insert_shift/delete_shift (MIT):
+//   delete line at: cells past it shift back; a merge that crosses it (a < at < a+s)
+//     loses one span and its size is re-summed from the remaining lines; a merge whose origin sits on the
+//     line and spans along the axis is refused (unmerge_cells first).
+//   insert line at: cells at/after it shift; a merge that crosses it grows one span
+//     and is re-summed with the new line; new 1x1 cells (cloned from line `ref`) fill only the
+//     slots no merge covers. `texts[k]` = text for the new cell at index k on the
+//     other axis.
+// Then rowCnt/colCnt, the table hp:sz, cellzones and linesegs are fixed, and the
+// grid must cover every slot exactly once, else throw (the whole batch aborts:
+// Hancom crashes on a span that overruns the table, 0x800706BE).
+function shiftGrid(doc, tableIndex, axis, delta, { line, after, texts, opName }) {
   const { section, el } = getTable(doc, tableIndex);
-  let tbl = el.inner;
-  const rows = scanTopLevel(tbl, 'hp:tr');
-  if (!rows.length) throw new Error('insert_table_row: table has no rows');
-  const refIdx = Math.max(0, Math.min(row != null ? Number(row) : rows.length - 1, rows.length - 1));
-  const ref = rows[refIdx];
-  const tcs = scanTopLevel(ref.inner, 'hp:tc');
-  let acc = '';
-  for (let ci = 0; ci < tcs.length; ci++) {
-    const cellInner = setCellInner(tcs[ci].inner, (cells && cells[ci] != null) ? cells[ci] : '');
-    acc += freshenIds(`<hp:tc${tcs[ci].attrs}>${cellInner}</hp:tc>`);
+  const R = axis === 'row';
+  const [P, S, Z, Q, T] = R ? ['ra', 'rs', 'h', 'ca', 'cs'] : ['ca', 'cs', 'w', 'ra', 'rs'];
+  const trs = scanTopLevel(el.inner, 'hp:tr');
+  if (!trs.length) throw new Error(`${opName}: table has no rows`);
+  const head = el.inner.slice(0, trs[0].start), foot = el.inner.slice(trs[trs.length - 1].end);
+  const trAttrs = trs.map((t) => t.attrs);
+  let cells = [];
+  trs.forEach((tr, ti) => {
+    scanTopLevel(tr.inner, 'hp:tc').forEach((tc, pos) => {
+      const [body, tail] = tcSplit(tc.inner);
+      const g = (tag, n, d) => tcTagAttr(tail, tag, n) ?? d;
+      cells.push({ attrs: tc.attrs, body, tail, ra: g('cellAddr', 'rowAddr', ti), ca: g('cellAddr', 'colAddr', pos),
+        rs: g('cellSpan', 'rowSpan', 1) || 1, cs: g('cellSpan', 'colSpan', 1) || 1, w: g('cellSz', 'width', 0), h: g('cellSz', 'height', 0) });
+    });
+  });
+  const nRows = Number(getAttr(el.attrs, 'rowCnt')) || trs.length;
+  const nCols = Number(getAttr(el.attrs, 'colCnt')) || Math.max(...cells.map((c) => c.ca + c.cs));
+  const n = R ? nRows : nCols, nOther = R ? nCols : nRows;
+  // Size of grid line k on an axis: a single-span cell on it, else a covering merge's share.
+  const lineSize = (p, s, z, k) => {
+    const one = cells.filter((c) => c[p] === k && c[s] === 1).map((c) => c[z]);
+    if (one.length) return Math.max(...one);
+    const cov = cells.find((c) => c[p] <= k && k < c[p] + c[s]);
+    return cov ? Math.round(cov[z] / cov[s]) : 0;
+  };
+  const where = (c) => `(row ${c.ra}, col ${c.ca})`;
+  // A merge's cellSz is not trusted (merge_cells keeps the single-cell size), so a
+  // merge whose span changes gets its size re-summed from these per-line sizes.
+  const sizes = Array.from({ length: n }, (_, k) => lineSize(P, S, Z, k));
+  const resized = [];
+  let at, size, changed = 0;
+  if (delta < 0) {
+    at = line == null ? NaN : Number(line);
+    if (!Number.isInteger(at) || at < 0 || at >= n) throw new Error(`${opName}: ${axis} ${line} out of range (0..${n - 1})`);
+    if (n < 2) throw new Error(`${opName}: cannot delete the only ${axis} (delete the table instead)`);
+    const origin = cells.find((c) => c[P] === at && c[S] > 1);
+    if (origin) throw new Error(`${opName}: cell ${where(origin)} is merged across ${axis} ${at} (${R ? 'rowSpan' : 'colSpan'} ${origin[S]}) - unmerge_cells first`);
+    size = lineSize(P, S, Z, at);
+    const before = cells.length;
+    cells = cells.filter((c) => c[P] !== at);
+    changed = before - cells.length;
+    for (const c of cells) {
+      if (c[P] > at) c[P]--;
+      else if (c[P] + c[S] > at) { c[S]--; resized.push(c); }
+    }
+    sizes.splice(at, 1);
+    if (R) trAttrs.splice(at, 1);
+  } else {
+    if (line != null && !Number.isInteger(Number(line))) throw new Error(`${opName}: ${axis} must be an integer`);
+    const ref = Math.max(0, Math.min(line != null ? Number(line) : n - 1, n - 1));
+    at = after ? ref + 1 : ref;
+    size = lineSize(P, S, Z, ref);
+    // Templates and other-axis sizes come from the grid before any shift.
+    const tmpl = [], otherSize = [];
+    for (let k = 0; k < nOther; k++) {
+      tmpl[k] = cells.find((c) => c[P] <= ref && ref < c[P] + c[S] && c[Q] <= k && k < c[Q] + c[T]);
+      otherSize[k] = lineSize(Q, T, R ? 'w' : 'h', k);
+    }
+    const covered = new Set();
+    for (const c of cells) {
+      if (c[P] < at && at < c[P] + c[S]) {
+        c[S]++; resized.push(c);
+        for (let k = c[Q]; k < c[Q] + c[T]; k++) covered.add(k);
+      } else if (c[P] >= at) c[P]++;
+    }
+    for (let k = 0; k < nOther; k++) {
+      if (covered.has(k)) continue;
+      const t = tmpl[k];
+      if (!t) throw new Error(`${opName}: no cell covers ${axis} ${ref} at ${R ? 'col' : 'row'} ${k} to clone`);
+      const body = freshenIds(setCellInner(t.body, (texts && texts[k] != null) ? String(texts[k]) : ''));
+      cells.push({ attrs: t.attrs, body, tail: t.tail, [P]: at, [Q]: k, rs: 1, cs: 1, [Z]: size, [R ? 'w' : 'h']: otherSize[k] });
+      changed++;
+    }
+    sizes.splice(at, 0, size);
+    if (R) trAttrs.splice(at, 0, trAttrs[ref]);
   }
-  const newRow = `<hp:tr${ref.attrs}>${acc}</hp:tr>`;
-  const refFull = `<hp:tr${ref.attrs}>${ref.inner}</hp:tr>`;
-  tbl = spliceEl(tbl, ref, where === 'after' ? refFull + newRow : newRow + refFull);
-  // Normalize rowAddr = row index (splice high→low so offsets stay valid).
-  const all = scanTopLevel(tbl, 'hp:tr');
-  for (let r = all.length - 1; r >= 0; r--) {
-    const fixed = all[r].inner.replace(/(<hp:cellAddr\b[^>]*\browAddr=")\d+(")/g, (m, a, b) => a + r + b);
-    if (fixed !== all[r].inner) tbl = spliceEl(tbl, all[r], `<hp:tr${all[r].attrs}>${fixed}</hp:tr>`);
+  for (const c of resized) c[Z] = Math.max(1, sizes.slice(c[P], c[P] + c[S]).reduce((a, b) => a + b, 0));
+  const rows1 = R ? nRows + delta : nRows, cols1 = R ? nCols : nCols + delta;
+  // Coverage: every slot of the new grid covered exactly once.
+  const seen = new Uint8Array(rows1 * cols1);
+  for (const c of cells) {
+    for (let r = c.ra; r < c.ra + c.rs; r++) for (let k = c.ca; k < c.ca + c.cs; k++) {
+      if (r >= rows1 || k >= cols1 || seen[r * cols1 + k]++) throw new Error(`${opName}: grid check failed at (row ${r}, col ${k}) from cell ${where(c)} - table left unchanged`);
+    }
   }
-  doc.write(section, spliceEl(doc.read(section), el, `<hp:tbl${bumpRowCnt(el.attrs, +1)}>${tbl}</hp:tbl>`));
-  return { table: tableIndex, insertedAt: where === 'after' ? refIdx + 1 : refIdx, rows: all.length };
+  const hole = seen.indexOf(0);
+  if (hole !== -1) throw new Error(`${opName}: grid check failed, slot (row ${Math.floor(hole / cols1)}, col ${hole % cols1}) uncovered - table left unchanged`);
+  // Serialize rows in rowAddr order, cells in colAddr order.
+  const byRow = Array.from({ length: rows1 }, () => []);
+  for (const c of cells) byRow[c.ra].push(c);
+  const tcXml = (c) => {
+    let tl = setTcTagAttr(setTcTagAttr(c.tail, 'cellAddr', 'colAddr', c.ca), 'cellAddr', 'rowAddr', c.ra);
+    tl = setTcTagAttr(setTcTagAttr(tl, 'cellSpan', 'colSpan', c.cs), 'cellSpan', 'rowSpan', c.rs);
+    tl = setTcTagAttr(setTcTagAttr(tl, 'cellSz', 'width', c.w), 'cellSz', 'height', c.h);
+    return `<hp:tc${c.attrs}>${c.body}${tl}</hp:tc>`;
+  };
+  const body = byRow.map((rc, r) => `<hp:tr${trAttrs[r] ?? ''}>${rc.sort((a, b) => a.ca - b.ca).map(tcXml).join('')}</hp:tr>`).join('');
+  // Table box size and cellzones (both live in the head, before the rows).
+  const zA = R ? 'RowAddr' : 'ColAddr';
+  let newHead = head.replace(/<hp:sz\b[^>]*>/, (tag) => tag.replace(new RegExp(`\\b${R ? 'height' : 'width'}="(\\d+)"`),
+    (m, v) => `${R ? 'height' : 'width'}="${Math.max(0, Number(v) + delta * size)}"`));
+  newHead = newHead.replace(/<hp:cellzone\b[^>]*\/>/g, (tag) => {
+    let s = Number(getAttr(tag, `start${zA}`)), e = Number(getAttr(tag, `end${zA}`));
+    if (delta < 0) { if (s === at && e === at) return ''; if (s > at) s--; if (e >= at) e--; }
+    else { if (s >= at) s++; if (e >= at) e++; }
+    return setTagAttr(setTagAttr(tag, `start${zA}`, s), `end${zA}`, e);
+  }).replace(/<hp:cellzoneList>\s*<\/hp:cellzoneList>/, '');
+  const attrs = R ? bumpRowCnt(el.attrs, delta) : bumpColCnt(el.attrs, delta);
+  doc.write(section, spliceEl(doc.read(section), el, `<hp:tbl${attrs}>${dropLinesegs(newHead + body + foot)}</hp:tbl>`));
+  return { at, rows: rows1, cols: cols1, changed };
+}
+
+// Insert a row (줄 추가) before (default) or after row `row`, merge-aware.
+function opInsertTableRow(doc, tableIndex, row, where, cells) {
+  const r = shiftGrid(doc, tableIndex, 'row', +1, { line: row, after: where === 'after', texts: cells, opName: 'insert_table_row' });
+  return { table: tableIndex, insertedAt: r.at, rows: r.rows, cellsAdded: r.changed };
 }
 
 function opDeleteTableRow(doc, tableIndex, row) {
-  const { section, el } = getTable(doc, tableIndex);
-  const tbl = el.inner;
-  const rows = scanTopLevel(tbl, 'hp:tr');
-  if (row < 0 || row >= rows.length) throw new Error(`delete_table_row: row ${row} out of range (0..${rows.length - 1})`);
-  const newInner = spliceEl(tbl, rows[row], '');
-  const newTbl = `<hp:tbl${bumpRowCnt(el.attrs, -1)}>${newInner}</hp:tbl>`;
-  doc.write(section, spliceEl(doc.read(section), el, newTbl));
-  return { table: tableIndex, row, deleted: true, remaining: rows.length - 1 };
+  const r = shiftGrid(doc, tableIndex, 'row', -1, { line: row, opName: 'delete_table_row' });
+  return { table: tableIndex, row, deleted: true, remaining: r.rows };
 }
 
 function opAppendTableColumn(doc, tableIndex, cells) {
@@ -668,50 +775,24 @@ function opAppendTableColumn(doc, tableIndex, cells) {
   return { table: tableIndex, rows: rows.length };
 }
 
-// Insert a column at a position (칸 추가 — 왼/오른쪽). For each row clones cell
-// `col`, fills `cells[r]`, inserts before/after it, then normalizes colAddr.
+// Insert a column (칸 추가) before (default) or after grid column `col`, merge-aware.
+// `cells[r]` = text for the new cell in grid row r (top to bottom).
 function opInsertTableColumn(doc, tableIndex, col, where, cells) {
+  const r = shiftGrid(doc, tableIndex, 'col', +1, { line: col, after: where === 'after', texts: cells, opName: 'insert_table_column' });
+  // The new column widens the table; if it now runs past the right margin
+  // (verified in Hancom), scale the columns back to the text width.
   const { section, el } = getTable(doc, tableIndex);
-  let tbl = el.inner;
-  const rows = scanTopLevel(tbl, 'hp:tr');
-  for (let r = rows.length - 1; r >= 0; r--) {
-    const rowEl = rows[r];
-    const tcs = scanTopLevel(rowEl.inner, 'hp:tc');
-    if (!tcs.length) continue;
-    const refIdx = Math.max(0, Math.min(col != null ? Number(col) : tcs.length - 1, tcs.length - 1));
-    const ref = tcs[refIdx];
-    const cellInner = setCellInner(ref.inner, (cells && cells[r] != null) ? cells[r] : '');
-    const newTc = freshenIds(`<hp:tc${ref.attrs}>${cellInner}</hp:tc>`);
-    const refFull = `<hp:tc${ref.attrs}>${ref.inner}</hp:tc>`;
-    let rowInner = spliceEl(rowEl.inner, ref, where === 'after' ? refFull + newTc : newTc + refFull);
-    const cells2 = scanTopLevel(rowInner, 'hp:tc');
-    for (let c = cells2.length - 1; c >= 0; c--) {
-      const fixedInner = cells2[c].inner.replace(/(<hp:cellAddr\b[^>]*\bcolAddr=")\d+(")/, (m, a, b) => a + c + b);
-      rowInner = spliceEl(rowInner, cells2[c], `<hp:tc${cells2[c].attrs}>${fixedInner}</hp:tc>`);
-    }
-    tbl = spliceEl(tbl, rowEl, `<hp:tr${rowEl.attrs}>${rowInner}</hp:tr>`);
-  }
-  doc.write(section, spliceEl(doc.read(section), el, `<hp:tbl${bumpColCnt(el.attrs, +1)}>${tbl}</hp:tbl>`));
-  return { table: tableIndex, rows: rows.length };
+  const w = tableGridWidth(el);
+  const maxW = pageTextWidth(doc, section);
+  const fitted = w > maxW;
+  if (fitted) opSetTableSize(doc, tableIndex, maxW / HU_PER_MM, null);
+  return { table: tableIndex, insertedAt: r.at, rows: r.rows, cols: r.cols, cellsAdded: r.changed, ...(fitted && { fittedToPage: true }) };
 }
 
+// Delete grid column `col` (addressed by colAddr, not by position in the row).
 function opDeleteTableColumn(doc, tableIndex, col) {
-  const { section, el } = getTable(doc, tableIndex);
-  let tbl = el.inner;
-  const rows = scanTopLevel(tbl, 'hp:tr');
-  let affected = 0;
-  for (let r = rows.length - 1; r >= 0; r--) {
-    const rowEl = rows[r];
-    const tcs = scanTopLevel(rowEl.inner, 'hp:tc');
-    if (col < 0 || col >= tcs.length) continue;
-    const newRowInner = spliceEl(rowEl.inner, tcs[col], '');
-    const newRow = `<hp:tr${rowEl.attrs}>${newRowInner}</hp:tr>`;
-    tbl = spliceEl(tbl, rowEl, newRow);
-    affected++;
-  }
-  const newTbl = `<hp:tbl${bumpColCnt(el.attrs, -1)}>${tbl}</hp:tbl>`;
-  doc.write(section, spliceEl(doc.read(section), el, newTbl));
-  return { table: tableIndex, col, rowsAffected: affected };
+  const r = shiftGrid(doc, tableIndex, 'col', -1, { line: col, opName: 'delete_table_column' });
+  return { table: tableIndex, col, rowsAffected: r.changed, remaining: r.cols };
 }
 
 function opMergeCells(doc, tableIndex, mode, opts) {
@@ -2204,13 +2285,21 @@ function opSetTableInnerMargin(doc, tableIndex, opts) {
 // resize, scale every cell's <hp:cellSz> proportionally to hit the target, then
 // update <hp:sz> to match. Rectangular tables resize exactly; merged cells are
 // approximate (same caveat as distribute_table).
+// Real table width = widest row's cellSz sum. Not rows[0] or <hp:sz>: a row
+// under a rowSpan has fewer cells, and merge_cells leaves a colSpan cell at one
+// column's width, so both under-report.
+// ponytail: wrong if every row has a horizontal merge, sum per colAddr if that bites.
+function tableGridWidth(el) {
+  return Math.max(0, ...scanTopLevel(el.inner, 'hp:tr').map((r) => scanTopLevel(r.inner, 'hp:tc')
+    .reduce((a, tc) => a + Number((tc.inner.match(/<hp:cellSz width="(\d+)"/) || [, 0])[1]), 0)));
+}
+
 function opSetTableSize(doc, tableIndex, widthMm, heightMm) {
   if (widthMm == null && heightMm == null) throw new Error('set_table_size: need width_mm and/or height_mm');
   const { section, el } = getTable(doc, tableIndex);
   const rows = scanTopLevel(el.inner, 'hp:tr');
   if (!rows.length) throw new Error('set_table_size: table has no rows');
-  const curW = scanTopLevel(rows[0].inner, 'hp:tc')
-    .reduce((a, tc) => a + Number((tc.inner.match(/<hp:cellSz width="(\d+)"/) || [, 0])[1]), 0);
+  const curW = tableGridWidth(el);
   const curH = rows.reduce((a, r) => {
     const c = scanTopLevel(r.inner, 'hp:tc')[0];
     return a + Number((c && c.inner.match(/<hp:cellSz width="\d+" height="(\d+)"/) || [, 0])[1]);

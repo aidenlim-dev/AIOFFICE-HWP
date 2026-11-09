@@ -440,6 +440,7 @@ The full operation vocabulary (text · paragraph · table including `insert_tabl
 
 Notes:
 - `hwpx-edit.js` is **`.hwpx` only** — it rejects `.hwp` with a clear error. Use the `.hwp` path (next section) for `.hwp` input.
+- Row/column insert and delete are merge-aware (spans grow or shrink, addresses shift, a merge origin on a deleted line is refused until `unmerge_cells`), and each ends with a grid coverage check that aborts the batch on failure. A stale `rowSpan` crashes desktop Hancom (`0x800706BE`) while rhwp previews look fine.
 - It strips the stale `<hp:linesegarray>` cache on paragraphs/rows it rebuilds, so Hancom relayouts correctly on open (no manual lineseg surgery needed).
 - It keeps `mimetype` stored-uncompressed and bumps `itemCnt` on `hh:charProperties` / `hh:paraProperties` when adding styles, so output stays Hancom-strict-valid.
 

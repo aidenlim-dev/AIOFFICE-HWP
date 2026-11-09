@@ -193,6 +193,8 @@ Note the nesting: cell content is `<hp:tc>` → `<hp:subList>` → `<hp:p>` → 
 | `cellSpan` (on `hp:tc`) | colSpan/rowSpan for merged cells |
 | `cellAddr` (on `hp:tc`) | `colAddr` / `rowAddr` — must be consistent within the table grid |
 
+**Merges and row/column edits.** Every grid slot must be covered by exactly one cell (origin `cellAddr` plus `cellSpan`). When a row or column is deleted, a merge that crosses it must lose one span (and that line's height or width in `cellSz`); a `rowSpan` that still points past the table makes desktop Hancom crash on open with `0x800706BE` (field report, taylee9809/hwpx-report-perfectly NOTES.md). rhwp previews tolerate the broken grid, so a clean preview does not prove the file is safe. `hwpx-edit.js` `insert/delete_table_row/column` do this fixup and refuse a merge origin on the deleted line.
+
 ---
 
 ## Common edit patterns
