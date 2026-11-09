@@ -3,12 +3,12 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deflateSync } from 'node:zlib';
 import { test } from 'node:test';
 
 const skillScripts = fileURLToPath(new URL('../plugins/aioffice-hwp/skills/aioffice-hwp/scripts/', import.meta.url));
-const { unzipSync, zipSync, strFromU8, strToU8 } = await import(join(skillScripts, 'vendor/fflate/index.mjs'));
+const { unzipSync, zipSync, strFromU8, strToU8 } = await import(pathToFileURL(join(skillScripts, 'vendor/fflate/index.mjs')).href);
 const STUB = join(skillScripts, 'templates/hancom_native_stub.hwpx');
 
 // Minimal valid PNG (grey, 8-bit). `dpi` adds a pHYs chunk.

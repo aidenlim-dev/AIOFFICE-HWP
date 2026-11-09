@@ -3,12 +3,12 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 
 const skillScripts = fileURLToPath(new URL('../plugins/aioffice-hwp/skills/aioffice-hwp/scripts/', import.meta.url));
-const { unzipSync, strFromU8 } = await import(join(skillScripts, 'vendor/fflate/index.mjs'));
-const { escapeHyperlinkCommand, buildHyperlinkCommand } = await import(join(skillScripts, 'cell-patch.js'));
+const { unzipSync, strFromU8 } = await import(pathToFileURL(join(skillScripts, 'vendor/fflate/index.mjs')).href);
+const { escapeHyperlinkCommand, buildHyperlinkCommand } = await import(pathToFileURL(join(skillScripts, 'cell-patch.js')).href);
 
 const URL_IN = 'https://ex.com/a?b=1;c#d';
 const COMMAND = 'https\\://ex.com/a\\?b=1\\;c\\#d;1;0;0;';
