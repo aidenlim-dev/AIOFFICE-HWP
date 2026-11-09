@@ -111,6 +111,7 @@ When the user says "preview", they almost always mean "show me the file" — sta
 | Edit existing `.hwpx` | `echo '{"path":"f.hwpx","operations":[...]}' \| node scripts/hwpx-edit.js` (op vocab in `references/hwpx-edit-ops.md`) |
 | Edit existing `.hwp` | `echo '{"path":"f.hwp","operations":[...]}' \| node scripts/create.js` (raw-patch via `cell-patch.js` — byte-level in-place, preserves tables, Hancom-Docs compatible) |
 | Validate output | `python3 scripts/validate.py <file.hwpx>` |
+| Look at a page yourself after a write (PNG) | `node scripts/render.js <file> --pages 2` (see "Self-check render") |
 | Preview file (Desktop = inline pane, CLI = browser link, cowork = drop-in viewer URL) | See Preview section for the surface decision rule |
 
 > **Python 명령어**: 예시는 `python3` 기준. Windows에서 `python3`가 없으면 `python`으로 실행 (동작 동일, 3.9+ 필요). Python이 아예 없어도 문서 읽기/생성/편집(`node` 경로)은 전부 동작한다 — Python은 unpack/pack/validate/make_seal 보조 스크립트에만 쓰인다.
@@ -628,6 +629,20 @@ Don't ask, just do it. **Showing the user a quick visual is your job** — but f
 
 In Desktop and CLI paths, "fire preview" means open the viewer / link directly. In cowork, "fire preview" means emit the hosted-viewer URL block alongside the file (launcher block only if asked or offline). Never write "please check if the file looks right" — give the user a working preview path.
 
+#### Self-check render (agent looks at its own edit)
+
+After a write, render the pages you changed and look at them before reporting:
+
+```bash
+node scripts/render.js out.hwpx --pages 2,4-5 [--out dir] [--scale 2] [--svg-only]
+# -> {status, pageCount, rasterizer, outDir, pages:[{page, svg, png}], note?}
+```
+
+- Pages are 1-based. Without `--out` the files go to a fresh temp dir. `pageCount` is the rhwp page count.
+- PNG comes from the first converter that works: Chrome/Edge/Chromium headless, `rsvg-convert`, then `magick`. If none is present, `png` is `null`, `note` says so, and only the SVG is written.
+- `Read` each `png` and check the edit landed where intended (text, table cell, page breaks). In cowork, also send the PNG to the user.
+- This is rhwp's approximate layout, the same engine as the preview. It is visual feedback, **not** a 한컴 compatibility check (see below).
+
 ### Verifying in 한컴독스 (companion skill)
 
 `AIOFFICE-HWP` produces `.hwp` / `.hwpx` bytes. **Important: the local preview (`preview-server.js`) does NOT verify 한컴 compatibility.** It's our own rhwp WASM renderer — fast and convenient for showing edits, but it can pass files that 한컴독스 silently rejects (round-trip strips, fingerprint issues, web-only mis-renders, silent attribute drops). **Real verification only happens by opening the file in 한컴독스 (web) or 한컴오피스 (desktop).**
@@ -669,6 +684,7 @@ Otherwise: don't push verification — user can invoke the companion skill thems
 | `scripts/unpack.py` | Python | Unzip .hwpx → directory of pretty-printed XML |
 | `scripts/pack.py` | Python | Repack directory → .hwpx with auto-repair |
 | `scripts/validate.py` | Python | HWPX schema and structural validation |
+| `scripts/render.js` | Node | Render pages to SVG + PNG (headless browser / rsvg-convert / magick) for agent self-check. JSON manifest on stdout |
 | `scripts/preview-server.js` | Node | Static HTTP server backing the Claude Code preview pane viewer |
 | `scripts/preview-viewer.html` + `scripts/preview-viewer.js` | static | Canvas-based vanilla-JS HWP viewer (vendored rhwp WASM, no React) |
 

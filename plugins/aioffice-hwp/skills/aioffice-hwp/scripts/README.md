@@ -19,6 +19,8 @@ End-to-end create + edit pipeline working, **zero-config** (deps vendored).
 | `cell-inspect.js` | ✅ | Per-table cell layout / cell text dump for `.hwp` — used to target cells before `set_cell_text` |
 | `secure-fill.mjs` | ✅ | PII-safe form filling: profile values are read in-process and never printed. Subcommands: detect / keys / template / fill / verify / stash / shred / handoff |
 | `make_seal.py` | ✅ | 4-char square seal (날인) PNG generator, transparent background. Requires Pillow |
+| `render.js` | ✅ | Headless page render for agent self-check: rhwp SVG per page (`pNN.svg`), then PNG via Chrome/Edge/Chromium `--screenshot`, `rsvg-convert`, or `magick` (first that works). `--pages 1,3-5`, `--out dir`, `--scale 2`, `--svg-only`. Prints a JSON manifest |
+| `lib/rhwp-node.js` | ✅ | `loadRhwp()`: loads vendored rhwp WASM in Node with the CJK-aware `measureTextWidth` stub (used by `render.js`) |
 | `preview-server.js` | ✅ | Loopback-only static + `/file` passthrough server backing the preview pane (port 3737). Host-header validated, idle auto-shutdown |
 | `preview-viewer.js` / `preview-viewer.html` | ✅ | Browser viewer (rhwp WASM rendering). Also published to GitHub Pages via `scripts/build-viewer.mjs` at the repo root |
 | `launcher/` | ✅ | Double-clickable preview launchers for macOS / Linux / Windows |
