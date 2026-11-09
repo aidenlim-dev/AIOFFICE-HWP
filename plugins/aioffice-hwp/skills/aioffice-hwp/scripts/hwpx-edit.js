@@ -4748,12 +4748,65 @@ function applyOp(doc, op) {
   }
 }
 
+// Preview/PrvText.txt is the plain-text preview shown by Explorer, Finder and
+// search indexers. Left stale after an edit it leaks text the user deleted, so
+// rebuild it from the sections: one line per paragraph ending in \r\n, hp:tab
+// as a space, cut at 1022 chars (Hancom measured cap). Idea from
+// jun-Bridge/hwpx-mcp packaging._preview (MIT).
+// ponytail: table cells are emitted as plain lines after the host paragraph,
+// not Hancom's <cell> form; add the <..> wrapping if a consumer needs it.
+const PRVTEXT_LIMIT = 1022;
 const XML_NAMED = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
 function decodeXmlText(s) {
   return s.replace(/&(lt|gt|amp|quot|apos|#\d+|#x[0-9a-f]+);/gi, (e, k) => XML_NAMED[k.toLowerCase()]
     || String.fromCodePoint(/^#x/i.test(k) ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10)));
 }
+// Text the reader never sees in the body: hidden comments (숨은 설명) and the
+// memo body a MEMO field keeps inside <hp:fieldBegin>. The field's visible
+// text sits after fieldBegin, so dropping the element itself is safe.
+const PRV_HIDDEN = /<hp:(hiddenComment|fieldBegin)\b[^>]*?(?:\/>|>[\s\S]*?<\/hp:\1>)/g;
+function buildPrvText(doc) {
+  let out = '';
+  const stack = [];
+  const tok = /<hp:p(?=[\s>/])[^>]*?(\/?)>|<\/hp:p>|<hp:t(?:\s[^>]*[^/>])?>([\s\S]*?)<\/hp:t>/g;
+  for (const name of doc.sectionNames()) {
+    const xml = doc.read(name).replace(PRV_HIDDEN, '');
+    let m;
+    tok.lastIndex = 0;
+    while ((m = tok.exec(xml)) && out.length < PRVTEXT_LIMIT) {
+      if (m[0] === '</hp:p>') {
+        // Nested paragraphs (cells, footnotes) follow their host paragraph's line.
+        const p = stack.pop() || { text: '', tail: '' };
+        const line = p.text + '\r\n' + p.tail;
+        if (stack.length) stack[stack.length - 1].tail += line;
+        else out += line;
+      } else if (m[2] !== undefined) {
+        if (stack.length) stack[stack.length - 1].text += decodeXmlText(m[2].replace(/<hp:tab\b[^>]*\/>|<hp:tab\b[^>]*>[\s\S]*?<\/hp:tab>/g, ' ').replace(/<[^>]+>/g, ''));
+      } else if (m[1]) {
+        if (stack.length) stack[stack.length - 1].tail += '\r\n'; // self-closing <hp:p/>
+        else out += '\r\n';
+      } else stack.push({ text: '', tail: '' });
+    }
+  }
+  out = out.slice(0, PRVTEXT_LIMIT);
+  return /[\uD800-\uDBFF]$/.test(out) ? out.slice(0, -1) : out;
+}
+
+// Refresh an existing PrvText only when a section changed. Never creates the
+// entry, keeps a UTF-8 BOM if the original had one, and skips identical bytes.
+// PrvImage is left alone (we cannot render it here).
+function refreshPrvText(doc) {
+  const name = Object.keys(doc.files).find((n) => /^Preview\/PrvText\.txt$/i.test(n));
+  if (!name || ![...doc.dirty].some((n) => /^Contents\/section\d+\.xml$/i.test(n))) return;
+  const old = doc.files[name];
+  const bom = old.length >= 3 && old[0] === 0xef && old[1] === 0xbb && old[2] === 0xbf ? '\uFEFF' : '';
+  const next = strToU8(bom + buildPrvText(doc));
+  if (next.length === old.length && next.every((b, i) => b === old[i])) return;
+  doc.files[name] = next;
+}
+
 function save(doc, outputPath) {
+  refreshPrvText(doc);
   // Write dirty text files back into the byte map, then zip.
   for (const name of doc.dirty) doc.files[name] = strToU8(doc.text[name]);
   // mimetype must be the first entry and STORED (uncompressed) per HWPX spec.

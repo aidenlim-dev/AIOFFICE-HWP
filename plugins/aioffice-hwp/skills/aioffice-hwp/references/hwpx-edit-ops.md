@@ -31,6 +31,8 @@ echo '{ "path": "in.hwpx", "output": "out.hwpx", "operations": [ ... ] }' \
 
 Returns JSON: `{ "ok": true, "output": "...", "results": [ { "type": ..., ...stats } ] }`.
 
+On save, an existing `Preview/PrvText.txt` is rebuilt from the edited sections (1022-char cap), so deleted or replaced text does not linger in the file preview. `Preview/PrvImage.png` is left as is.
+
 **Atomic:** if any op throws, **nothing is saved** and the response is
 `{ "ok": false, "error": "operation <i> (<type>) failed: ..." }`. Fix the args and re-run the whole batch.
 
