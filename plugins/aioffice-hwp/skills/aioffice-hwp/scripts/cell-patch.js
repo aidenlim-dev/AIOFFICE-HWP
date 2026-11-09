@@ -1476,24 +1476,31 @@ export async function patchCellsInPlace(filePath, edits) {
 // replaceOne and SKILL.md docs the constraint. Use set_cell_text* for
 // cells.
 
-function findReplaceTextTarget(records, raw, query, caseSensitive) {
+// `from` = {rec, byte}: resume the search inside record `rec` at body byte
+// `byte` (used by the counting / all-match loop so a replacement that
+// contains the query is never re-matched). Matches only start on UTF-16
+// code-unit boundaries (even byte offsets).
+function findReplaceTextTarget(records, raw, query, caseSensitive, from = { rec: 0, byte: 0 }) {
   const queryBuf = Buffer.from(query, 'utf16le');
   const queryLower = query.toLowerCase();
   // Track the most recent level-0 PARA_HEADER as we walk — that's the
   // paragraph whose text_count we update when the replacement changes
   // length, and whose level-1 PARA_CHAR_SHAPE we shift.
-  let paraHeaderIdx = -1;
+  let paraHeaderIdx = -1, paraOrdinal = -1;
   for (let i = 0; i < records.length; i++) {
     const r = records[i];
-    if (r.tag === TAG_PARA_HEADER && r.level === 0) paraHeaderIdx = i;
+    if (r.tag === TAG_PARA_HEADER && r.level === 0) { paraHeaderIdx = i; paraOrdinal++; }
+    if (i < from.rec) continue;
     if (r.tag !== TAG_PARA_TEXT || r.level !== 1) continue;
     const body = raw.slice(r.dataOff, r.dataOff + r.size);
+    const start = i === from.rec ? from.byte : 0;
     let byteOffset;
     if (caseSensitive) {
-      byteOffset = body.indexOf(queryBuf);
+      byteOffset = body.indexOf(queryBuf, start);
+      while (byteOffset >= 0 && byteOffset % 2) byteOffset = body.indexOf(queryBuf, byteOffset + 1);
     } else {
       const bodyStr = body.toString('utf16le').toLowerCase();
-      const charIdx = bodyStr.indexOf(queryLower);
+      const charIdx = bodyStr.indexOf(queryLower, Math.ceil(start / 2));
       byteOffset = charIdx >= 0 ? charIdx * 2 : -1;
     }
     if (byteOffset >= 0 && paraHeaderIdx >= 0) {
@@ -1510,6 +1517,8 @@ function findReplaceTextTarget(records, raw, query, caseSensitive) {
         paraTextRec: r,
         charShapeRec: charShape,
         byteOffset,
+        recIdx: i,
+        para: paraOrdinal,
       };
     }
   }
@@ -1533,23 +1542,17 @@ function buildParaTextRecord(body, level) {
   return Buffer.concat([head, body]);
 }
 
-// Equal-length replace: bytes-in-place. Returns { raw, replaced }. raw is
-// the same buffer object (mutated). No record-size or text_count changes.
-function applyReplaceTextEqualLength(raw, op) {
-  const queryBuf = Buffer.from(op.query, 'utf16le');
+// Equal-length replace at a found `target`: bytes-in-place. Returns raw, the
+// same buffer object (mutated). No record-size or text_count changes.
+function applyReplaceTextEqualLength(raw, op, target) {
   const replBuf = Buffer.from(op.replacement ?? '', 'utf16le');
-  const records = parseRecords(raw);
-  const caseSensitive = op.case_sensitive !== false;
-  const target = findReplaceTextTarget(records, raw, op.query, caseSensitive);
-  if (!target) return { raw, replaced: false };
   replBuf.copy(raw, target.paraTextRec.dataOff + target.byteOffset);
-  return { raw, replaced: true };
+  return raw;
 }
 
 // Different-length replace: rebuild the PARA_TEXT record, shift the
 // paragraph's PARA_CHAR_SHAPE charPos entries past the match, and update
-// PARA_HEADER text_count. Returns { raw, replaced } where raw is a NEW
-// buffer (length changes because the record header and/or body grew or
+// PARA_HEADER text_count. Returns a NEW raw buffer (length changes because the record header and/or body grew or
 // shrank).
 //
 // The three coordinated edits, in order:
@@ -1557,14 +1560,9 @@ function applyReplaceTextEqualLength(raw, op) {
 //       paraTextRec.dataOff offsets we read are still valid
 //   (2) PARA_HEADER text_count update — same reason
 //   (3) PARA_TEXT record swap — last, builds the new buffer
-function applyReplaceTextDifferentLength(raw, op) {
+function applyReplaceTextDifferentLength(raw, op, target) {
   const queryBuf = Buffer.from(op.query, 'utf16le');
   const replBuf = Buffer.from(op.replacement ?? '', 'utf16le');
-  const records = parseRecords(raw);
-  const caseSensitive = op.case_sensitive !== false;
-  const target = findReplaceTextTarget(records, raw, op.query, caseSensitive);
-  if (!target) return { raw, replaced: false };
-
   const { paraHeaderRec, paraTextRec, charShapeRec, byteOffset } = target;
   const queryChars = queryBuf.length / 2;
   const replChars = replBuf.length / 2;
@@ -1616,14 +1614,145 @@ function applyReplaceTextDifferentLength(raw, op) {
     newRecord,
     raw.slice(paraTextRec.headOff + oldRecordLen),
   ]);
-  return { raw: newRaw, replaced: true };
+  return newRaw;
 }
 
-function applyReplaceText(raw, op) {
+function applyReplaceText(raw, op, target) {
   const qLen = Buffer.byteLength(op.query, 'utf16le');
   const rLen = Buffer.byteLength(op.replacement ?? '', 'utf16le');
-  if (qLen === rLen) return applyReplaceTextEqualLength(raw, op);
-  return applyReplaceTextDifferentLength(raw, op);
+  if (qLen === rLen) return applyReplaceTextEqualLength(raw, op, target);
+  return applyReplaceTextDifferentLength(raw, op, target);
+}
+
+// Run one replace_text op over one section's records. Legacy mode (no
+// expected_count / occurrence / all) keeps the old contract: only the first
+// match in the section is replaced. Counting modes scan every match;
+// `pick(ordinal)` says whether the doc-wide ordinal-th match is replaced.
+// Records are re-parsed after each rewrite, and the search resumes after the
+// inserted text, so a replacement containing the query cannot loop.
+function replaceTextInSection(raw, op, base, pick, legacy) {
+  const caseSensitive = op.case_sensitive !== false;
+  const qBytes = Buffer.byteLength(op.query, 'utf16le');
+  const rBytes = Buffer.byteLength(op.replacement ?? '', 'utf16le');
+  let records = parseRecords(raw);
+  let from = { rec: 0, byte: 0 }, seen = 0, replaced = 0;
+  for (;;) {
+    const t = findReplaceTextTarget(records, raw, op.query, caseSensitive, from);
+    if (!t) break;
+    if (pick(base + seen++)) {
+      raw = applyReplaceText(raw, op, t);
+      replaced++;
+      if (legacy) break;
+      records = parseRecords(raw);
+      from = { rec: t.recIdx, byte: t.byteOffset + rBytes };
+    } else {
+      from = { rec: t.recIdx, byte: t.byteOffset + qBytes };
+    }
+  }
+  return { raw, seen, replaced };
+}
+
+// Visible text of a PARA_TEXT body: drops HWP control codes. Char controls
+// (0, 10, 13, 24..31) take one code unit, inline/extended controls take 8.
+function hwpVisibleText(body) {
+  let s = '';
+  for (let i = 0; i + 1 < body.length;) {
+    const c = body.readUInt16LE(i);
+    if (c >= 32) { s += String.fromCharCode(c); i += 2; } else i += (c === 0 || c === 10 || c === 13 || c >= 24) ? 2 : 16;
+  }
+  return s;
+}
+
+// Body paragraph texts of one section, as [{section, para, text}] for hints.
+function sectionParaTexts(raw, section) {
+  const out = []; let para = -1;
+  for (const r of parseRecords(raw)) {
+    if (r.tag === TAG_PARA_HEADER && r.level === 0) para++;
+    else if (r.tag === TAG_PARA_TEXT && r.level === 1 && para >= 0) {
+      out.push({ section, para, text: hwpVisibleText(raw.slice(r.dataOff, r.dataOff + r.size)) });
+    }
+  }
+  return out;
+}
+
+// ── replace_text count guard + near-miss hints (shared with hwpx-edit.js) ──
+//
+// Loose fold for "the document actually says X" hints only, never for
+// editing. Built from Unicode general categories (Zs, Pd, Pi, Pf) plus the
+// lookalike sets that have no category of their own. After NFC, spaces and
+// zero-width chars are dropped, middle-dot lookalikes (U+00B7 U+2027 U+2219
+// U+22C5 U+30FB U+FF65, plus U+318D used as a dot in Korean), tildes / wave
+// dashes, dashes and quotes each fold to one char, and case is folded.
+// Idea from CoreDotToday coredotdocs search.py (Apache-2.0), written fresh.
+const FOLD_DROP = /[\s\p{Zs}\u200B-\u200D\u2060\uFEFF]/u;
+const FOLD_DOT = /[\u00B7\u2027\u2219\u22C5\u30FB\uFF65\u318D]/u;
+const FOLD_TILDE = /[~\u02DC\u223C\u301C\u3030\uFF5E]/u;
+const FOLD_DASH = /[\p{Pd}\u2212\u2043]/u;
+const FOLD_QUOTE = /["'`\p{Pi}\p{Pf}\u2032\u2033\uFF02\uFF07]/u;
+function foldForHint(text) {
+  let s = ''; const starts = [], ends = [];
+  let i = 0;
+  for (const ch of text.normalize('NFC')) {
+    let f;
+    if (FOLD_DROP.test(ch)) f = '';
+    else if (FOLD_DOT.test(ch)) f = '\u00B7';
+    else if (FOLD_TILDE.test(ch)) f = '~';
+    else if (FOLD_DASH.test(ch)) f = '-';
+    else if (FOLD_QUOTE.test(ch)) f = '"';
+    else { const l = ch.toLowerCase(); f = l.length === ch.length ? l : ch; }
+    for (let k = 0; k < f.length; k++) { starts.push(i); ends.push(i + ch.length); }
+    s += f; i += ch.length;
+  }
+  return { s, starts, ends, src: text.normalize('NFC') };
+}
+
+const HINT_LIMIT = 10, HINT_CTX = 15;
+
+// Exact hits of `query` in paragraph texts, with ±15 chars of context.
+export function textHits(paras, query, caseSensitive = true) {
+  const out = [];
+  const q = caseSensitive ? query : query.toLowerCase();
+  for (const p of paras) {
+    const t = caseSensitive ? p.text : p.text.toLowerCase();
+    for (let i = t.indexOf(q); i >= 0 && out.length < HINT_LIMIT; i = t.indexOf(q, i + q.length)) {
+      out.push({ section: p.section, para: p.para, context: p.text.slice(Math.max(0, i - HINT_CTX), i + q.length + HINT_CTX) });
+    }
+  }
+  return out;
+}
+
+// Spots whose folded text equals the folded query but whose real text differs.
+function nearHits(paras, query) {
+  const q = foldForHint(query).s;
+  const out = [];
+  if (!q) return out;
+  for (const p of paras) {
+    const f = foldForHint(p.text);
+    for (let i = f.s.indexOf(q); i >= 0 && out.length < HINT_LIMIT; i = f.s.indexOf(q, i + q.length)) {
+      const text = f.src.slice(f.starts[i], f.ends[i + q.length - 1]);
+      if (text !== query) out.push({ section: p.section, para: p.para, text });
+    }
+  }
+  return out;
+}
+
+// Coded error for a replace_text count mismatch. Thrown before anything is
+// written, so the batch stays atomic. code = TARGET_NOT_FOUND (0 hits) or
+// AMBIGUOUS_TARGET (count differs from expected_count).
+export function replaceCountError(label, query, total, paras, { expected, occurrence, caseSensitive = true } = {}) {
+  const countOff = expected != null && total !== expected;
+  const code = total && countOff ? 'AMBIGUOUS_TARGET' : 'TARGET_NOT_FOUND';
+  const candidates = textHits(paras, query, caseSensitive);
+  const near = nearHits(paras, query);
+  let msg = total && !countOff
+    ? `${label}: occurrence ${occurrence} is out of range, "${query}" matched ${total} spot(s) (${code}).`
+    : `${label}: "${query}" matched ${total} spot(s)${expected != null ? `, expected_count is ${expected}` : ''} (${code}).`;
+  if (candidates.length) msg += ` Candidates: ${candidates.map((c) => `section ${c.section} para ${c.para} "${c.context}"`).join('; ')}.`;
+  if (near.length) msg += ` The document has a near match: ${near.map((n) => `"${n.text}" (section ${n.section} para ${n.para})`).join(', ')}. Copy that exact text into the query.`;
+  else if (total) msg += ' Narrow the query or scope it with `section`, or set expected_count to the real count.';
+  const e = new Error(msg);
+  e.code = code; e.candidates = candidates; e.near = near;
+  return e;
 }
 
 export async function replaceTextInPlace(filePath, ops) {
@@ -1640,8 +1769,21 @@ export async function replaceTextInPlace(filePath, ops) {
     if (/[\n\r]/.test(replacement) || replacement.indexOf('\u2028') !== -1 || replacement.indexOf('\u2029') !== -1) {
       throw new Error("replace_text: replacement cannot contain paragraph-break characters");
     }
+    for (const k of ['expected_count', 'occurrence', 'section']) {
+      const v = op[k];
+      if (v != null && !(Number.isInteger(v) && v >= (k === 'expected_count' ? 1 : 0))) {
+        throw new Error(`replace_text: '${k}' must be a ${k === 'expected_count' ? 'positive' : 'non-negative'} integer`);
+      }
+    }
   }
   ops = ops.map((op) => ({ ...op, replacement: sanitizeHwpText(op.replacement) }));
+  // Per-op doc-wide state for the count guard. `legacy` = none of
+  // expected_count / occurrence / all given, i.e. the old first-match-per-
+  // section behaviour, kept as is for existing callers.
+  const states = ops.map((op) => ({
+    legacy: op.expected_count == null && op.occurrence == null && !op.all,
+    seen: 0, paras: [],
+  }));
 
   // buf/fat/minifat/minifatStart/rootChain are all `let` so Phase 3 /
   // Phase 3b expansion paths can replace them.
@@ -1691,18 +1833,23 @@ export async function replaceTextInPlace(filePath, ops) {
     let dirty = false;
     const sectionReplacements = [];
 
-    for (const op of ops) {
-      const r = applyReplaceText(raw, op);
+    ops.forEach((op, oi) => {
+      const st = states[oi];
+      if (op.section != null && op.section !== secIdx) return;
+      if (!st.legacy) st.paras.push(...sectionParaTexts(raw, secIdx)); // hint source, pre-edit
+      const pick = op.occurrence != null ? (n) => n === op.occurrence : () => true;
+      const r = replaceTextInSection(raw, op, st.seen, pick, st.legacy);
+      st.seen += r.seen;
       // Different-length replacements return a freshly-allocated buffer;
       // equal-length returns the same buffer mutated. Either way, reassign
       // so the next op (and the deflate below) sees the latest state.
       if (r.replaced) {
         raw = r.raw;
         dirty = true;
-        totalReplaced++;
-        sectionReplacements.push({ section: secIdx, query: op.query, replacement: op.replacement ?? '' });
+        totalReplaced += r.replaced;
+        sectionReplacements.push({ section: secIdx, query: op.query, replacement: op.replacement ?? '', count: r.replaced });
       }
-    }
+    });
     if (!dirty) continue;
 
     // Deflate + fit. Both regular-FAT and mini-stream chains auto-expand,
@@ -1742,6 +1889,19 @@ export async function replaceTextInPlace(filePath, ops) {
 
     summary.push(...sectionReplacements);
   }
+
+  // Count guard runs before the single write below, so a mismatch leaves
+  // the file byte-identical.
+  ops.forEach((op, oi) => {
+    const st = states[oi];
+    const bad = (op.expected_count != null && st.seen !== op.expected_count)
+      || (op.occurrence != null && op.occurrence >= st.seen);
+    if (bad) {
+      throw replaceCountError('replace_text', op.query, st.seen, st.paras, {
+        expected: op.expected_count, occurrence: op.occurrence, caseSensitive: op.case_sensitive !== false,
+      });
+    }
+  });
 
   writeFileSync(filePath, buf);
   const result = Object.assign([], summary);

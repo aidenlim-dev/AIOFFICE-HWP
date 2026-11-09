@@ -15,8 +15,8 @@
 //   }
 //
 // Supported operation types (all .hwpx):
-//   replace_text          { find, replace }
-//   fill_template         { values: { "{{k}}": "v", ... } }
+//   replace_text          { find, replace, expected_count?, section? }   // count mismatch -> AMBIGUOUS_TARGET / TARGET_NOT_FOUND, nothing saved
+//   fill_template         { values: { "{{k}}": "v", ... }, require_unique? }
 //   set_paragraph_text    { index, text }
 //   append_paragraph      { text }
 //   delete_paragraph      { index }
@@ -89,7 +89,7 @@ import path from 'node:path';
 import url from 'node:url';
 import { unzipSync, zipSync, strFromU8, strToU8 } from './vendor/fflate/index.mjs';
 import { safeUnzip } from './lib/safe-unzip.js';
-import { buildHyperlinkCommand, xmlEscape, xmlText } from './cell-patch.js';
+import { buildHyperlinkCommand, replaceCountError, textHits, xmlEscape, xmlText } from './cell-patch.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
@@ -312,7 +312,12 @@ function spliceNodeTokens(content, find, replace) {
 function replaceTextAcrossRuns(xml, find, replace) {
   const RUN = /<hp:run\b[^>]*>(?:(?!<\/?hp:run\b)[\s\S])*?<\/hp:run>/g;
   const OBJ = /<hp:(?:pic|chart|tbl|ellipse|rect|line|arc|polygon|curve|equation|container|ole|video|textart|connectLine|compose|dutmal|drawText)\b/;
-  const isText = (r) => r.includes('<hp:t') && !OBJ.test(r);
+  // Only runs made of nothing but <hp:t> nodes: the rebuild below keeps just the
+  // text, so a run with <hp:ctrl> (hyperlink fieldBegin params), <hp:secPr> etc.
+  // would get its URL rewritten and its controls pushed inside <hp:t>.
+  const isText = (r) => r.includes('<hp:t') && !OBJ.test(r) &&
+    !r.replace(/^<hp:run\b[^>]*>|<\/hp:run>$/g, '')
+      .replace(/<hp:t(?:\s[^>]*)?\/>|<hp:t(?:\s[^>]*)?>[\s\S]*?<\/hp:t>/g, '').trim();
   const runs = []; let m;
   while ((m = RUN.exec(xml))) runs.push({ start: m.index, end: m.index + m[0].length, raw: m[0] });
   if (!runs.length) return { xml, count: 0 };
@@ -345,53 +350,102 @@ function replaceTextAcrossRuns(xml, find, replace) {
   return { xml: out, count };
 }
 
-function opReplaceText(doc, find, replace) {
+// Section names an op works on: all, or just the 0-based `section` index.
+function sectionsFor(doc, section, label) {
+  const names = doc.sectionNames();
+  if (section == null) return names;
+  if (!Number.isInteger(section) || section < 0 || section >= names.length) {
+    throw new Error(`${label}: section ${section} out of range (0..${names.length - 1})`);
+  }
+  return [names[section]];
+}
+
+// Plain text of each top-level <hp:p> (cell text included), as
+// [{section, para, text}] with section-local paragraph indices. Hint source.
+function paraTexts(doc, names) {
+  const all = doc.sectionNames();
+  return names.flatMap((name) => scanTopLevel(doc.read(name), 'hp:p').map((el, para) => ({
+    section: all.indexOf(name), para,
+    text: decodeXmlText((el.inner.match(/<hp:t(?:\s[^>]*[^/>])?>[\s\S]*?<\/hp:t>/g) || [])
+      .map((t) => t.replace(/<[^>]+>/g, '')).join('')),
+  })));
+}
+
+// Stand-in for the replacement while both passes run (a Unicode
+// noncharacter), swapped for the real text at the end. Without it a
+// replacement containing `find` ('A' -> 'AB') was re-matched by the splice
+// loop and again by pass 2, inflating the count into the thousands.
+const REPLACE_STANDIN = '\uFDD0';
+
+// opts: expected_count (exact doc-wide match count, else throw before any
+// write), section (0-based index to scope the op), dry (count only).
+function opReplaceText(doc, find, replace, opts = {}) {
   if (!find) throw new Error('replace_text: "find" is required and non-empty');
+  const { expected_count: expected, section, dry } = opts;
+  if (expected != null && !(Number.isInteger(expected) && expected >= 1)) {
+    throw new Error('replace_text: "expected_count" must be a positive integer');
+  }
+  const names = sectionsFor(doc, section, 'replace_text');
   // Capture the WHOLE <hp:t> body ([\s\S]*?, not [^<]*) so inline controls inside
   // it are visible to the splicer; spliceNodeTokens then matches THROUGH them
   // (<hp:fwSpace/> etc. are zero-width for matching), so a natural `find` like
   // "2017. 3. 28(금)" fills even though it's stored "2017.<hp:fwSpace/> 3. 28(금)".
   const nodeRe = /(<hp:t(?:\s[^>]*)?>)([\s\S]*?)(<\/hp:t>)/g;
   let total = 0;
-  for (const name of doc.sectionNames()) {
+  const pending = [];
+  for (const name of names) {
     let changed = false;
+    const src = doc.read(name);
+    const standIn = !find.includes(REPLACE_STANDIN) && !src.includes(REPLACE_STANDIN);
+    const rep = standIn ? REPLACE_STANDIN : replace;
     // Pass 1 — within a single text node (control-aware).
-    let xml = doc.read(name).replace(nodeRe, (m, open, text, close) => {
-      const r = spliceNodeTokens(text, find, replace);
+    let xml = src.replace(nodeRe, (m, open, text, close) => {
+      const r = spliceNodeTokens(text, find, rep);
       if (!r.count) return m;
       total += r.count;
       changed = true;
       return open + r.content + close;
     });
     // Pass 2 — match across adjacent text-runs (placeholder split by formatting).
-    const cross = replaceTextAcrossRuns(xml, find, replace);
+    const cross = replaceTextAcrossRuns(xml, find, rep);
     if (cross.count) { xml = cross.xml; total += cross.count; changed = true; }
-    if (changed) doc.write(name, dropLinesegs(xml));
+    if (changed) pending.push([name, standIn ? xml.split(REPLACE_STANDIN).join(xmlText(replace)) : xml]);
   }
+  if (expected != null && total !== expected) {
+    throw replaceCountError('replace_text', find, total, paraTexts(doc, names), { expected });
+  }
+  if (!dry) for (const [name, xml] of pending) doc.write(name, dropLinesegs(xml));
   return { replaced: total };
 }
 
 function opFillTemplate(doc, values, requireUnique) {
   if (!values || typeof values !== 'object') throw new Error('fill_template: "values" object required');
+  // Ambiguity guard (opt-in — secure-fill sets it for PII safety). fill_template's replace is
+  // GLOBAL, so a placeholder that matches MORE THAN ONE spot fills several cells with the same
+  // value; in a multi-person / parallel form (참여인력 5명, 비영리·기업 병렬표) that silently
+  // writes one person's data into another's block. Refuse so the caller retargets the exact
+  // cell with {table,row,col}. Counted dry on the untouched doc (same counter as
+  // replace_text expected_count) and thrown before any write. Positions only, no context
+  // text: secure-fill relays this message and earlier values must not leak. (Mirrors the
+  // .hwp track's set_cell_text_by_label require_occurrence guard.)
+  if (requireUnique) {
+    const ambiguous = Object.keys(values)
+      .map((k) => [k, opReplaceText(doc, k, '', { dry: true }).replaced])
+      .filter(([, n]) => n > 1);
+    if (ambiguous.length) {
+      const paras = paraTexts(doc, doc.sectionNames());
+      const where = (k) => textHits(paras, k).map((h) => `section ${h.section} para ${h.para}`).join(', ');
+      const e = new Error(`fill_template: require_unique - ${ambiguous.map(([k, n]) => `"${k}" matched ${n} spots (${where(k)})`).join(', ')}. A repeated placeholder fills multiple cells (multi-person / parallel form), which would cross-contaminate blocks. Target the exact cell with {table,row,col} instead.`);
+      e.code = 'AMBIGUOUS_TARGET';
+      throw e;
+    }
+  }
   const perKey = {};
   let total = 0;
   for (const [k, v] of Object.entries(values)) {
     const r = opReplaceText(doc, k, v);
     perKey[k] = r.replaced;
     total += r.replaced;
-  }
-  // Ambiguity guard (opt-in — secure-fill sets it for PII safety). fill_template's replace is
-  // GLOBAL, so a placeholder that matches MORE THAN ONE spot fills several cells with the same
-  // value; in a multi-person / parallel form (참여인력 5명, 비영리·기업 병렬표) that silently
-  // writes one person's data into another's block. Refuse so the caller retargets the exact
-  // cell with {table,row,col}. Thrown before main()'s save() and the batch is atomic, so the
-  // in-memory edits are discarded and nothing is written. (Mirrors the .hwp track's
-  // set_cell_text_by_label require_occurrence guard.)
-  if (requireUnique) {
-    const ambiguous = Object.entries(perKey).filter(([, n]) => n > 1);
-    if (ambiguous.length) {
-      throw new Error(`fill_template: require_unique — ${ambiguous.map(([k, n]) => `"${k}" matched ${n} spots`).join(', ')}. A repeated placeholder fills multiple cells (multi-person / parallel form), which would cross-contaminate blocks. Target the exact cell with {table,row,col} instead.`);
-    }
   }
   return { total, perKey };
 }
@@ -4839,7 +4893,9 @@ function opInsertTextbox(doc, op) {
 
 function applyOp(doc, op) {
   switch (op.type) {
-    case 'replace_text': return opReplaceText(doc, op.find, op.replace);
+    case 'replace_text':
+      if (op.occurrence != null) throw new Error('replace_text: "occurrence" is .hwp only; on .hwpx scope with "section" plus "expected_count": 1');
+      return opReplaceText(doc, op.find, op.replace, { expected_count: op.expected_count, section: op.section });
     case 'fill_template': return opFillTemplate(doc, op.values, op.require_unique);
     case 'set_paragraph_text': return opSetParagraphText(doc, op.index, op.text);
     case 'append_paragraph': return opAppendParagraph(doc, op.text);
@@ -5018,7 +5074,8 @@ async function main() {
     try {
       results.push({ type: ops[i].type, ...applyOp(doc, ops[i]) });
     } catch (e) {
-      fail(`operation ${i} (${ops[i] && ops[i].type}) failed: ${e && e.message ? e.message : String(e)}`, { results });
+      fail(`operation ${i} (${ops[i] && ops[i].type}) failed: ${e && e.message ? e.message : String(e)}`,
+        { results, ...(e && e.code ? { code: e.code, candidates: e.candidates, near: e.near } : {}) });
     }
   }
   save(doc, outputPath);
