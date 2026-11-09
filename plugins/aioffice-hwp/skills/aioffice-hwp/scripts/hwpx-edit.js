@@ -88,6 +88,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import { unzipSync, zipSync, strFromU8, strToU8 } from './vendor/fflate/index.mjs';
+import { safeUnzip } from './lib/safe-unzip.js';
 import { buildHyperlinkCommand, xmlEscape, xmlText } from './cell-patch.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
@@ -4781,7 +4782,9 @@ async function main() {
     ? payload.output
     : inputPath.replace(/\.hwpx$/i, '_edited.hwpx');
 
-  const doc = new Hwpx(unzipSync(bytes));
+  let files;
+  try { files = safeUnzip(bytes); } catch (e) { fail(`cannot open .hwpx: ${e.message}`); }
+  const doc = new Hwpx(files);
   // Read-only inspect: dump the cell inventory and exit without touching/saving the file.
   if (payload.inspect === 'cells') {
     process.stdout.write(JSON.stringify({ ok: true, tables: dumpCells(doc) }, null, 2) + '\n');

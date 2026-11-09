@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import childProcess from 'node:child_process';
-import { unzipSync, strFromU8 } from './vendor/fflate/index.mjs';
+import { strFromU8 } from './vendor/fflate/index.mjs';
+import { safeUnzip } from './lib/safe-unzip.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
@@ -165,7 +166,7 @@ function classifyFont(name, asetNames, installedNames) {
 function parseHwpxInventory(bytes) {
   let files;
   try {
-    files = unzipSync(bytes);
+    files = safeUnzip(bytes);
   } catch (e) {
     throw new Error(`HWPX ZIP을 열 수 없습니다: ${e.message}`);
   }

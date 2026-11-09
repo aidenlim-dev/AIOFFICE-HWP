@@ -22,6 +22,9 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 
+MAX_ENTRIES = 10000
+MAX_TOTAL_BYTES = 256 * 1024 * 1024
+
 REQUIRED_FILES = [
     "mimetype",
     "META-INF/container.xml",
@@ -43,6 +46,11 @@ def validate(hwpx_path: Path) -> list[str]:
 
     issues: list[str] = []
     with zipfile.ZipFile(hwpx_path, "r") as zf:
+        # Zip-bomb guard, same limits as lib/safe-unzip.js.
+        infos = zf.infolist()
+        total = sum(i.file_size for i in infos)
+        if len(infos) > MAX_ENTRIES or total > MAX_TOTAL_BYTES:
+            return [f"zip too large to inspect: {len(infos)} entries, {total} bytes"]
         names = zf.namelist()
         if not names:
             return ["zip is empty"]

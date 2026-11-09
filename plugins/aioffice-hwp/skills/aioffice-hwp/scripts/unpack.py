@@ -13,6 +13,8 @@ from xml.dom import minidom
 
 
 XML_SUFFIXES = (".xml", ".hpf", ".rdf")
+MAX_ENTRIES = 10000
+MAX_TOTAL_BYTES = 256 * 1024 * 1024
 
 
 def pretty_print_xml(xml_bytes: bytes) -> bytes:
@@ -35,6 +37,11 @@ def unpack(hwpx_path: Path, out_dir: Path, pretty: bool = True) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     count = 0
     with zipfile.ZipFile(hwpx_path, "r") as zf:
+        # Zip-bomb guard, same limits as lib/safe-unzip.js.
+        infos = zf.infolist()
+        total = sum(i.file_size for i in infos)
+        if len(infos) > MAX_ENTRIES or total > MAX_TOTAL_BYTES:
+            raise SystemExit(f"refusing oversized zip: {len(infos)} entries, {total} bytes")
         for name in zf.namelist():
             target = out_dir / name
             # Zip-Slip guard: refuse entries that would escape the output dir.
